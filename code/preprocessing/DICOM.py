@@ -6,6 +6,7 @@ from typing import Union
 import os
 import pandas as pd
 import re
+import shutil
 
 class DICOMextract:
     UNKNOWN = 'Unknown'
@@ -258,81 +259,81 @@ class DICOMfilter():
             self.logger.warning(f'No majority number of slices found | {self.Session_ID}')
         return self.N_SLICES
     
-    def split_scan(self, i):
-        """Splits a scan with multiple of N_SLICES slices into multiple scans"""
-        directory = os.path.dirname(self.dicom_table['PATH'].iloc[i])
-        files = glob.glob(os.path.join(directory, '*.dcm'))
-
-        # Function to extract all numeric parts from a filename
-        def extract_numbers(filename):
-            return [int(num) for num in re.findall(r'\d+', filename)]
-        
-        # Analyze the first few filenames to determine the differing numeric part
-        def find_differing_index(filenames, num_samples=3):
-            if len(filenames) < num_samples:
-                num_samples = len(filenames)
-            sample_numbers = [extract_numbers(filenames[i]) for i in range(num_samples)]
-            for index in range(len(sample_numbers[0])):
-                values = [sample[index] for sample in sample_numbers]
-                if len(set(values)) == num_samples:  # All values are different
-                    return index
-            return -1
-        
-        try:
-            # Sort files based on the identified incremental numeric part
-            incremental_index = find_differing_index(files)
-            if incremental_index == -1:
-                raise ValueError("Unable to determine the incremental part of the filenames.")
-        
-            def extract_incremental_value(filename):
-                numbers = extract_numbers(filename)
-                return numbers[incremental_index] if incremental_index < len(numbers) else float('inf')
-            
-            f_copy = files.copy()
-            files = sorted(files, key=extract_incremental_value)
-
-            n_actual = len(files)
-            n_expected = self.N_SLICES
-            n_scans = n_actual // n_expected
-            self.logger.debug(f'Expecting to split scan with {n_actual} slices into {n_scans} scans of {n_expected} slices| {self.Session_ID}')
-            new_subtable = {}                           
-            for j in range(n_scans):
-                file_group = files[(j*n_expected):((j+1)*n_expected)]
-                self.logger.debug(f'Scanning {file_group[0]} as start of sub_scan {j} | {self.Session_ID}')
-                extract = DICOMextract(file_group[0])
-                result = {
-                    'PATH': file_group[0],
-                    'Orientation': extract.Orientation(),
-                    'ID': extract.ID(),
-                    'DATE': extract.Date(),
-                    'Series_desc': extract.Desc(),
-                    'Modality': extract.Modality(),
-                    'AcqTime': extract.Acq(),
-                    'SrsTime': extract.Srs(),
-                    'ConTime': extract.Con(),
-                    'StuTime': extract.Stu(),
-                    'TriTime': extract.Tri(),
-                    'InjTime': extract.Inj(),
-                    'Lat': 'Unknown',
-                    'NumSlices': n_expected,
-                    'Thickness': extract.Thickness(),
-                    'BreastSize': extract.BreastSize(),
-                    'DWI': extract.DWI(),
-                    'Type': extract.Type(),
-                    'Series': extract.Series(),
-                    'SessionID': self.Session_ID[0]
-                }
-                for key, item in result.items():
-                    if key not in new_subtable.keys():
-                        new_subtable[key] = []
-                    new_subtable[key].append(item)
-            new_scan = pd.DataFrame(new_subtable)
-            self.dicom_table = self.dicom_table.drop(self.dicom_table[self.dicom_table['PATH'] == f_copy[0]].index)  # Remove the original scan
-            self.dicom_table = pd.concat([self.dicom_table, new_scan], ignore_index=True)  # Add the new scans
-            self.logger.debug(f'Split scan with {n_actual} slices into {n_scans} scans | {self.Session_ID}')
-        except ValueError as e:
-            self.logger.warning(f"Skipping scan due to error: {e} | {self.Session_ID}")
-        return self.dicom_table
+    #def split_scan(self, i):
+    #    """Splits a scan with multiple of N_SLICES slices into multiple scans"""
+    #    directory = os.path.dirname(self.dicom_table['PATH'].iloc[i])
+    #    files = glob.glob(os.path.join(directory, '*.dcm'))
+#
+    #    # Function to extract all numeric parts from a filename
+    #    def extract_numbers(filename):
+    #        return [int(num) for num in re.findall(r'\d+', filename)]
+    #    
+    #    # Analyze the first few filenames to determine the differing numeric part
+    #    def find_differing_index(filenames, num_samples=3):
+    #        if len(filenames) < num_samples:
+    #            num_samples = len(filenames)
+    #        sample_numbers = [extract_numbers(filenames[i]) for i in range(num_samples)]
+    #        for index in range(len(sample_numbers[0])):
+    #            values = [sample[index] for sample in sample_numbers]
+    #            if len(set(values)) == num_samples:  # All values are different
+    #                return index
+    #        return -1
+    #    
+    #    try:
+    #        # Sort files based on the identified incremental numeric part
+    #        incremental_index = find_differing_index(files)
+    #        if incremental_index == -1:
+    #            raise ValueError("Unable to determine the incremental part of the filenames.")
+    #    
+    #        def extract_incremental_value(filename):
+    #            numbers = extract_numbers(filename)
+    #            return numbers[incremental_index] if incremental_index < len(numbers) else float('inf')
+    #        
+    #        f_copy = files.copy()
+    #        files = sorted(files, key=extract_incremental_value)
+#
+    #        n_actual = len(files)
+    #        n_expected = self.N_SLICES
+    #        n_scans = n_actual // n_expected
+    #        self.logger.debug(f'Expecting to split scan with {n_actual} slices into {n_scans} scans of {n_expected} slices| {self.Session_ID}')
+    #        new_subtable = {}                           
+    #        for j in range(n_scans):
+    #            file_group = files[(j*n_expected):((j+1)*n_expected)]
+    #            self.logger.debug(f'Scanning {file_group[0]} as start of sub_scan {j} | {self.Session_ID}')
+    #            extract = DICOMextract(file_group[0])
+    #            result = {
+    #                'PATH': file_group[0],
+    #                'Orientation': extract.Orientation(),
+    #                'ID': extract.ID(),
+    #                'DATE': extract.Date(),
+    #                'Series_desc': extract.Desc(),
+    #                'Modality': extract.Modality(),
+    #                'AcqTime': extract.Acq(),
+    #                'SrsTime': extract.Srs(),
+    #                'ConTime': extract.Con(),
+    #                'StuTime': extract.Stu(),
+    #                'TriTime': extract.Tri(),
+    #                'InjTime': extract.Inj(),
+    #                'Lat': 'Unknown',
+    #                'NumSlices': n_expected,
+    #                'Thickness': extract.Thickness(),
+    #                'BreastSize': extract.BreastSize(),
+    #                'DWI': extract.DWI(),
+    #                'Type': extract.Type(),
+    #                'Series': extract.Series(),
+    #                'SessionID': self.Session_ID[0]
+    #            }
+    #            for key, item in result.items():
+    #                if key not in new_subtable.keys():
+    #                    new_subtable[key] = []
+    #                new_subtable[key].append(item)
+    #        new_scan = pd.DataFrame(new_subtable)
+    #        self.dicom_table = self.dicom_table.drop(self.dicom_table[self.dicom_table['PATH'] == f_copy[0]].index)  # Remove the original scan
+    #        self.dicom_table = pd.concat([self.dicom_table, new_scan], ignore_index=True)  # Add the new scans
+    #        self.logger.debug(f'Split scan with {n_actual} slices into {n_scans} scans | {self.Session_ID}')
+    #    except ValueError as e:
+    #        self.logger.warning(f"Skipping scan due to error: {e} | {self.Session_ID}")
+    #    return self.dicom_table
     
     def removeSlices(self):
         """Removes scans with a different number of slices"""
@@ -345,7 +346,12 @@ class DICOMfilter():
             if dicom_copy['NumSlices'].iloc[i] != self.N_SLICES:
                 self.logger.debug(f'Identified scan with multiple of {self.N_SLICES} slices | {self.Session_ID}')
                 self.logger.debug('Separating into multiple scans')
-                self.split_scan(i)
+                splitter = DICOMsplit(dicom_copy.iloc[[i]], debug=self.debug)
+                # remove the original row entry
+                self.dicom_table = self.dicom_table.drop(self.dicom_table[self.dicom_table['PATH'] == dicom_copy['PATH'].iloc[i]].index)
+                # add the new rows
+                self.dicom_table = pd.concat([self.dicom_table, splitter.output_table], ignore_index=True)
+                self.logger.debug(f'Separated scan with {dicom_copy["NumSlices"].iloc[i]} slices into {len(splitter.output_table)} scans | {self.Session_ID}')
         self.logger.debug(f'Removed {len(self.removed["Slices"])} scans with a different number of slices | {self.Session_ID}')
         return self.dicom_table
 
@@ -383,7 +389,85 @@ class DICOMfilter():
         self.removed['DWI'] = self.dicom_table[self.dicom_table['DWI'] != 1]
         self.logger.debug(f'Removed {len(self.removed["DWI"])} DWI scans | {self.Session_ID}')
         return self.dicom_table
+
+class DICOMsplit():
+    def __init__(self, dicom_table: pd.DataFrame, debug: int = 0):
+        '''
+        This class is used to split a single directory with multiple scans into multiple directories of a single scan each.
+        The received DataFrame should contain a single Session_ID and directory
+        '''
+        # Assert dicom table is a single row
+        assert dicom_table.shape[0] == 1, 'Multiple rows found in the table'
+        self.tmp_save = '/FL_system/data/tmp/'
+        if not os.path.exists(self.tmp_save):
+            os.makedirs(self.tmp_save)
+        self.debug = debug
+        self.dicom_table = dicom_table
+        self.Session_ID = self.dicom_table['SessionID'][0]
+        assert self.Session_ID.istype(str), 'Session_ID must be a string'
+        self.directory = os.path.dirname(self.dicom_table['PATH'][0])
+        assert self.directory.istype(str), 'Directory must be a string'
+        self.output_rows = []
+
+        self.scan_results = self.scan_all()
+        self.sort_scans()
+        self.output_table = pd.DataFrame(self.output_rows)
+
+    def scan_all():
+        """Scans all files in the directory"""
+        files = glob.glob(os.path.join(self.directory, '*.dcm'))
+        info = {
+            'PATH': [],
+            'AcqTime': [],
+            'SrsTime': [],
+            'ConTime': [],
+            'StuTime': [],
+            'TriTime': [],
+            'InjTime': [],
+            'Series': [],
+        }
+        for file in files:
+            extractor = DICOMextract(file)
+            info['PATH'].append(file)
+            info['AcqTime'].append(extractor.Acq())
+            info['SrsTime'].append(extractor.Srs())
+            info['ConTime'].append(extractor.Con())
+            info['StuTime'].append(extractor.Stu())
+            info['TriTime'].append(extractor.Tri())
+            info['InjTime'].append(extractor.Inj())
+            info['Series'].append(extractor.Series())
+        return pd.DataFrame(info)
     
+    def sort_scans():
+        """Sorts the scans based on the Series number"""
+        if not os.path.exists(f'{self.tmp_save}{self.Session_ID}'):
+            os.makedirs(f'{self.tmp_save}{self.Session_ID}')
+        for i in self.scan_results['Series'].unique():
+            if not os.path.exists(f'{self.tmp_save}{self.Session_ID}/{i}'):
+                os.makedirs(f'{self.tmp_save}{self.Session_ID}/{i}')
+            slices = self.scan_results[self.scan_results['Series'] == i]
+            
+            for j in range(len(slices)):            
+                # copy each file to its series folder
+                file = slices['PATH'].iloc[j]
+                shutil.copy(file, f"{self.tmp_save}{self.Session_ID}/{i}")
+                if j == 0:
+                    # save the first file to the output table
+                    info = self.dicom_table.iloc[0].to_dict()
+                    extractor = DICOMextract(file)
+                    info['PATH'] = f"{self.tmp_save}{self.Session_ID}/{i}"
+                    info['NumSlices'] = len(slices)
+                    info['AcqTime'] = self.scan_results['AcqTime'].iloc[j]
+                    info['SrsTime'] = self.scan_results['SrsTime'].iloc[j]
+                    info['ConTime'] = self.scan_results['ConTime'].iloc[j]
+                    info['StuTime'] = self.scan_results['StuTime'].iloc[j]
+                    info['TriTime'] = self.scan_results['TriTime'].iloc[j]
+                    info['InjTime'] = self.scan_results['InjTime'].iloc[j]
+                    info['Series'] = i
+                    self.output_rows.append(info)
+        return
+
+
 class DICOMorder():
 
     def __init__(self, dicom_table: pd.DataFrame, debug: int = 0):
