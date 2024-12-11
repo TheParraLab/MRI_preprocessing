@@ -1,21 +1,20 @@
-# Federated Learning Control System
+# Control System
 This directory is the control system for the Federated Learning (FL) environment.  The control system is responsible for managing the FL training process.  It will start the server and client containers, and monitor the training process.  The app directory contains the web-app for the control system.
 
 ## Table of Contents
-- [Federated Learning Control System](#federated-learning-control-system)
+- [Control System](#control-system)
   - [Table of Contents](#table-of-contents)
   - [Directory Structure](#directory-structure)
 
 ## Directory Structure
     ├── README.md                       <- The top-level README for developers using this project.
     ├── dockerfile                      <- Dockerfile for building the control system container
-    ├── dockerfile-compose.yml          <- Docker-compose file for building the control system container
+    ├── docker-compose.yml          <- Docker-compose file for building the control system container
     └── app                             <- Directory for the control system web-app
         ├──app.py                       <- Main application file
         ├──templates                    <- Directory for html templates
         │  ├──index.html                <- Main page template
-        │  ├──client.html               <- Client page template
-        │  └──server.html               <- Server page template
+        │  └──client.html               <- Client page template
         └──static                       <- Directory for static files
             ├──style.css                <- CSS file for styling the web-app
             ├──script.js                <- JavaScript file for scripting
@@ -42,9 +41,6 @@ The index.html file is the main page for the control system.  This file outlines
 
 ### Client.html
 The client.html file contains the necessary containers for clients interacting with the system.  It provides access to request data preprocessing, as well as start the client containers.  The client.html file is the default page loaded into the control system. The terminal on this page will display the output from the client containers. This page will also display the current status of the system, including: GPU status, data preprocessing status, and client container status.
-
-### Server.html
-The server.html file contains the necessary containers for the server interacting with the system.  It provides access to start the server containers.  The server.html file is currently locked behind a password, and is not accessible to general clients.  The terminal on this page will display the output from the server containers. This page will also display a useful visualization of all connected nodes.
 
 ### Script.js
 The script.js file contains the necessary JavaScript for the webpage.  This file will handle all webpage interactions, and will trigger the appropriate actions in the app.py file.  This file will also handle the loading of the client and server pages into the webpage.
