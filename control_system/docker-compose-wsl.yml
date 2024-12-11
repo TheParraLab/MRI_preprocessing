@@ -1,0 +1,24 @@
+services:
+  control:
+    container_name: control
+    build:
+      context: .
+      dockerfile: dockerfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PROJECT_DIRECTORY_PATH}:/FL_system
+      - ${DATA_DIRECTORY_PATH}:/data
+      - ../app:/app
+    ports:
+      - "5000:5000"
+    environment:
+      - DATA_DIRECTORY_PATH
+      - PROJECT_DIRECTORY_PATH
+      - NVIDIA_VISIBLE_DEVICES=all
+      - FLASK_ENV=development
+      - FLASK_RUN_HOST=0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

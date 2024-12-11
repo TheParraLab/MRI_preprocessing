@@ -1,0 +1,168 @@
+html {
+    height: 100%;
+    margin: 0;
+}
+body {
+    font-family: 'Lato', sans-serif;
+    margin: 0;
+    background-color: #f4f4f4;
+    color: #333;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+h1, h2 {
+    color: #333;
+}
+.status {
+    padding: 10px;
+    margin-bottom: 20px;
+    border-radius: 5px;
+    font-weight: 500;
+}
+.active {
+    background-color: #e0f2f1;
+    color: #00796b;
+}
+.inactive {
+    background-color: #ffebee;
+    color: #c62828;
+}
+button {
+    background-color: #7D55C7;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    margin-right: 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+}
+button:hover {
+    background-color: #545859;
+}
+.container-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 20px;
+    grid-auto-rows: minmax(100px, auto);
+    align-items: fill; /* Changed to align items at the top */
+}
+
+/* Styles for individual containers */
+.container {
+    min-height: 200px;
+    margin: 10px;
+    margin-bottom: 20px;
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px #7D55C7;
+}
+
+/* New class for the container that should span 2 columns */
+.container-wide {
+    grid-column: span 3; /* This makes the container span 2 columns */
+}
+.terminalOutput {
+    background-color: #727272;
+    padding: 10px; /* Maintained */
+    margin-bottom: 20px;
+    border-radius: 5px;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    white-space: pre-wrap;
+    height: 200px;
+    box-sizing: border-box; /* Ensures padding and border are included in the element's dimensions */
+    overflow-y: auto;
+    width: 100%; /* Makes the element fill the width of its container */
+    border: 10px solid #727272; /* Adjust the border color as needed */
+}
+
+/* Checkbox formatting  */
+.checkbox {
+    display: inline-block; /* Makes the element an inline-level block container, allowing it to sit next to other elements */
+    position: relative; /* Sets the positioning context for absolutely positioned pseudo-elements or children */
+    padding-left: 25px; /* Creates space to the left inside the element, useful for custom checkbox styling */
+    margin-bottom: 12px; /* Adds space below the element, separating it from subsequent content */
+    cursor: pointer; /* Changes the mouse cursor to a pointer when hovering over the element, indicating it's clickable */
+    font-size: 22px; /* Sets the size of the font within the checkbox label */
+    user-select: none; /* Prevents the text within the element from being selectable, enhancing UX */
+    color: #7D55C7; /* Sets the text color of the label */
+}
+/* Change the box appearance when the checkbox is checked */
+.checkbox input[type="checkbox"]:checked + label::before {
+    background-color: #7D55C7; /* Background color when checked */
+    border-color: #7D55C7; /* Optional: change border color when checked */
+}
+#dataPath {
+    overflow-wrap: break-word; /* Breaks long words to prevent overflow */
+    word-wrap: break-word; /* For older browsers */
+}
+
+.grid-container {
+    display: grid;
+    grid-template-columns: 2fr 1fr; /* Adjust the ratio as needed */
+    gap: 20px; /* Space between columns */
+}
+.content {
+    flex: 1;
+    padding: 20px;
+}
+footer {
+    background-color: #7D55C7;
+    color: #000000;
+    text-align: center;
+    width: 100%;
+    margin-top: auto;
+}
+.footer-content {
+    display: flex;
+    align-items: center; /* Vertically center the items in the footer */
+    justify-content: start; /* Align items to the start of the footer */
+    padding: 10px; /* Add some padding around the content */
+}
+
+.footer-logo {
+    margin-right: 15px; /* Add some space between the image and the text */
+    width: 250px; /* Adjust the width as needed */
+    height: auto; /* Maintain aspect ratio */
+}
+.footer-text {
+    font-size: 14px; /* Adjust the font size as needed */
+    margin-left: auto;
+}
+.footer-text a {
+    color: black;
+}
+/* Header styles */
+.header { /* Added a class to target the header specifically */
+    background-color: #7D55C7;
+    color: white;
+    padding: 10px;
+    text-align: left;
+    border: 1px solid #7D55C7;
+}
+.header .tabs { /* Added a class to target the tabs overall */
+    display: flex;
+    justify-content: left;
+    list-style-type: none;
+    padding: 0;
+    margin: 0;
+}
+.header .tabs li { /* Ensure no margin on the left of the first tab */
+    margin: 0;
+}
+.header .tabs a { /* Added a class to target the links specifically */
+    text-decoration: none;
+    color: white;
+    font-weight: bold;
+    padding: 10px 15px; /* Add padding inside the box */
+}
+.header .tabs a:hover { /* Added a class to target the links on hover */
+    font-weight: normal;
+    background-color: #5a3ea1;
+}
+.header h1 {
+    color: white;
+}

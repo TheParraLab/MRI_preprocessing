@@ -1,0 +1,59 @@
+<!-- templates/containers.html -->
+<!-- This file contains the HTML content for the containers that will be loaded into the main webpage. -->
+<!-- The content of this file will be loaded into the main webpage's containerSection div. -->
+
+<div class="container-grid">
+
+    <!--Introduction Message-->
+    <div class='container container-wide'> <!-- System instructions -->
+        <h3> System Usage Instrucions</h3>
+    </div>
+
+    <!--System status-->
+    <div class="container">
+        <h3>System Status</h3>
+            <div class='status inactive' id="gpuStatus">Sensing GPU...</div>
+        <h3>Data Status</h3>
+            <div class="status inactive" id="dataStatus">Sensing Data...</div>
+        <h3>Client Status</h3>
+            <div class="status inactive" id="clientStatus">Sensing Client...</div>
+    </div>
+    
+    <!--TESTING: Preprocessing using a seperate docker image
+    <div class="container container-wide">
+        <h3>Preprocessing</h3>
+        <p>This system expects data provided in raw DICOM format.  The preprocessing tools will take care of extracting necessary timing information and formatting the scans into the models expected input.<br></p>
+        <b>Desired data path:<br></b>
+        <input type="text" id="dataPathInput" placeholder="Enter path to data here"><br>
+        <button id="scanData">Scan Directory</button>
+        <button id="TEST:ProcessData">Process Data</button>
+    </div>
+    -->
+    
+    <!--Details on provided data-->
+    <div class="container container-wide grid-container"> <!-- Data details -->
+        <div class="data-info">
+            <h3>Data Source</h3>
+            <div id="dataPath">Local path: {{ dataPath }}</div>
+            <h3>Data Size</h3>
+            <div id="dataSize">Error parsing data directory</div>
+        </div>
+        <div class="data-processing">
+            <h3>Data Processing</h3>
+            <label><input type="checkbox" class="checkbox" id="RawPresent" disabled> Raw Data</label><br>
+            <label><input type="checkbox" class="checkbox" id="DetailsExtracted" disabled> Dicom Extracted</label><br>
+            <label><input type="checkbox" class="checkbox" id="DetailsParsed" disabled> Dicom Parsed</label><br>
+            <label><input type="checkbox" class="checkbox" id="NiftiConversion" disabled> Nifti Conversion</label><br>
+            <label><input type="checkbox" class="checkbox" id="RasComplete" disabled> RAS Orientation</label><br>
+            <label><input type="checkbox" class="checkbox" id="Aligned" disabled> Aligned</label><br>
+            <label><input type="checkbox" class="checkbox" id="InputsGen" disabled> Data Ready</label><br>
+            <button id='processData'>Process Data</button>
+        </div>
+    </div>
+
+    <!-- Terminal printout -->
+    <div class="container container-wide"> <!-- Terminal output -->
+        <h3>Terminal Output <button id='clearTerminal'>Clear</button></h3>
+        <div class="terminalOutput" id="terminalOutput">Terminal output will appear here<br></div>
+    </div>
+</div>

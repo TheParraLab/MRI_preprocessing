@@ -1,0 +1,43 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+    <title>Federated Learning Control Panel</title>
+</head>
+<body>
+    <div class="header">
+        <h1>Control Panel</h1>
+        <ul class="tabs">
+            <li><a href="#" data-file="client.html">Client</a></li>
+            <li><a href="#" data-file="server.html" data-requires-password="true">Server</a></li>
+        </ul>
+    </div>
+    <div class="content">
+        <!--<h2>Control Elements</h2>
+            <button id='startClient'>Start Client</button>
+            <button id='startQuickstart'>Start Quickstart</button>--->
+        <h2>System Dashboard</h2>
+            <div id="containerSection"></div>    <!-- This is where the containers.html content will be loaded -->
+    </div>
+    <footer>
+        <div class='footer-content'>
+            <img src="/static/ccny_logo.png" alt="CCNY Logo" class="footer-logo">
+            <div class="footer-text">
+                <p>Department of Biomedical Engineering</p>
+                <p><a href='http://parralab.org' target="_blank">The Parra Lab</a></p>
+            </div>
+        </div>
+    </footer>
+    <script>
+        // Load the default tab content on page load
+        document.addEventListener("DOMContentLoaded", function() {
+            loadContent('client.html');
+        });
+    </script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="/static/containers.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+services:
+  control:
+    container_name: control
+    build:
+      # Build using the Dockerfile in the same directory
+      context: .
+      dockerfile: dockerfile
+    runtime: nvidia # Allow the container to utilize the host's GPU
+    volumes:
+      # Mounts the host's Docker socket to the container
+      # This allows the container to manage other containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      ######################################################
+      - ${PROJECT_DIRECTORY_PATH}:/FL_system
+      #- ${PROJECT_DIRECTORY_PATH}/data:/data
+      - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
+      - ./app:/app
+    ports:
+      - "5000:5000"
+    environment:
+      # Passes environment variables to the container
+      # These environmental variables are set in the start_control.sh file
+      - DATA_DIRECTORY_PATH
+      - PROJECT_DIRECTORY_PATH
+      ######################################################
+      - NVIDIA_VISIBLE_DEVICES=all
+      - FLASK_ENV=development
+      - FLASK_RUN_HOST=0.0.0.0
+    networks:
+      - flwr-network
+  
+networks:
+  flwr-network:
+    external: true
