@@ -1,0 +1,9 @@
+data/*
+!data/raw/
+
+output/*
+
+certs/*
+
+*.pyc
+__pycache__
