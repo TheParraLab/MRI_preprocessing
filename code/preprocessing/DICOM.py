@@ -208,9 +208,9 @@ class DICOMfilter():
 
     def removeT2(self):
         """Removes T2 scans from the table"""
-        self.removed['T2'] = self.dicom_table[self.dicom_table['Modality'] == 'T2']
+        self.removed['T2'] = self.dicom_table[self.dicom_table['Modality'].isin(['T2', 'Unknown'])]
+        self.dicom_table = self.dicom_table[self.dicom_table['Modality'].isin(['T1'])]
         self.logger.debug(f'Removed {len(self.removed["T2"])} T2 scans | {self.Session_ID}')
-        self.dicom_table = self.dicom_table[self.dicom_table['Modality'] != 'T2']
         return self.dicom_table
     
     def removeImplants(self):
