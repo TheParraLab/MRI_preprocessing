@@ -23,11 +23,18 @@ progress_queue = manager.Queue()
 # Define necessary parameters
 SAVE_DIR = '/FL_system/data/' # Location to save the constructed Data_table.csv
 SCAN_DIR = '/FL_system/data/raw/' # Location to recursively scan for dicom files
-TEST = False # If True, only the first 2 dicom files will be scanned
-N_TEST = 10 # Number of dicom files to scan if TEST is True
+TEST = True # If True, only the first 2 dicom files will be scanned
+N_TEST = 100 # Number of dicom files to scan if TEST is True
 PARALLEL = True # If True, the scan will be parallelized
 LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
 DEBUG = 0
+
+# Profiler
+PROFILE = True
+if PROFILE:
+    import yappi
+    import pstats
+    import io
 
 #### Preprocessing | Step 1: Extract DICOM data ####
 # This script scans the input directory for dicom files and extracts necessary header information
@@ -207,7 +214,7 @@ def findDicom(directory, debug=0):
 #############################
 ## Main script
 #############################
-if __name__ == '__main__':
+def main():
     # Print the current configuration
     LOGGER.info('Starting scanDicom: Step 01')
     LOGGER.info(f'SCAN_DIR: {SCAN_DIR}')
@@ -216,6 +223,8 @@ if __name__ == '__main__':
     if TEST:
         LOGGER.info(f'Running in test mode: {TEST}')
         LOGGER.info(f'N_TEST: {N_TEST}')
+    if PROFILE:
+        LOGGER.info(f'Running with profiler: {PROFILE}')
 
     # Check if the Data_table.csv already exists
     if 'Data_table.csv' in os.listdir(SAVE_DIR):
@@ -242,4 +251,19 @@ if __name__ == '__main__':
     Data_table = pd.DataFrame(INFO) # Convert the extracted information to a pandas dataframe
     Data_table.to_csv(f'{SAVE_DIR}Data_table.csv', index=False) # Save the extracted information to a csv file
     LOGGER.info('DICOM information extraction completed and saved to Data_table.csv')
+
+if __name__ == '__main__':
+    if PROFILE:
+        LOGGER.info('Profiling enabled')
+        yappi.start()
+        LOGGER.info('Starting main function')
+        main()
+        LOGGER.info('Main function completed')
+        yappi.stop()
+        profile_output_path = 'step01_profile.yappi'
+        LOGGER.info(f'Writing profile results to {profile_output_path}')
+        yappi.get_func_stats().save(profile_output_path, type='pstat')
+        LOGGER.info(f'Profile results saved to {profile_output_path}')
+    else:
+        main()
     exit()
