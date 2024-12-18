@@ -23,7 +23,7 @@ progress_queue = manager.Queue()
 # Define necessary parameters
 SAVE_DIR = '/FL_system/data/' # Location to save the constructed Data_table.csv
 SCAN_DIR = '/FL_system/data/raw/' # Location to recursively scan for dicom files
-TEST = True # If True, only the first 2 dicom files will be scanned
+TEST = False # If True, only the first 2 dicom files will be scanned
 N_TEST = 100 # Number of dicom files to scan if TEST is True
 PARALLEL = True # If True, the scan will be parallelized
 LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
