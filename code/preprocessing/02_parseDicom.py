@@ -24,11 +24,19 @@ progress_queue = manager.Queue()
 SAVE_DIR = '/FL_system/data/' # Location to saveupdated tables and load the constructed Data_table.csv ['/FL_system/data/']
 COMPUTED_FLAGS = ['slope', 'sub', 'subtract', 'secondary']
 DEBUG = 0
-TEST = False
-N_TEST = 10
+TEST = True
+N_TEST = 100
 PARALLEL = True
 # Initialize logger
 LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
+
+# Profiler
+PROFILE = True
+if PROFILE:
+    import yappi
+    import pstats
+    import io
+    #yappi.set_clock_type('cpu')
 
 #### Preprocessing | Step 2: Parse DICOM data ####
 # This script uses the extracted dicom data to filter and order the identified scans
@@ -131,14 +139,14 @@ def filterDicom(Data_subset):
     Data_subset = Data_subset.reset_index(drop=True)
     filter = DICOMfilter(Data_subset, debug=DEBUG, logger=LOGGER)
     filter.removeT2()
-    #filter.removeImplants()
-    #filter.removeSide()
-    filter.removeSlices()
-    # Check if 'Type' column exists before removing computed flags
     if 'Type' in Data_subset.columns:
         filter.removeComputed(COMPUTED_FLAGS)
     else:
-        LOGGER.error("'Type' column not found in Data_subset")
+        LOGGER.error("'Type' column not found in Data_subset")#filter.removeImplants()
+    #filter.removeSide()
+    filter.removeSlices()
+    # Check if 'Type' column exists before removing computed flags
+
     #filter.removeTimes(['TriTime']) # Omitted, Pre scans have unknown trigger time
     #filter.removeDWI()
 
@@ -171,7 +179,8 @@ def init_data():
 #############################
 ## Main script
 #############################
-if __name__ == '__main__':
+def main():
+    global Data_table, Remove_Tables
     LOGGER.info('Starting parseDicom: Step 02')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
     LOGGER.info(f'COMPUTED_FLAGS: {COMPUTED_FLAGS}')
@@ -180,8 +189,9 @@ if __name__ == '__main__':
     if TEST:
         LOGGER.info(f'TEST: {TEST}')
         LOGGER.info(f'N_TEST: {N_TEST}')
+    if PROFILE:
+        LOGGER.info('Profiling enabled')
 
-    
     # Check if the Data_table_timing.csv already exists
     if 'Data_table_timing.csv' in os.listdir(SAVE_DIR):
         LOGGER.error('Data_table_timing.csv already exists')
@@ -209,7 +219,7 @@ if __name__ == '__main__':
     removed = list(removed)
     Data_table = pd.concat(results)
     Data_table = Data_table.reset_index(drop=True)
-    Iden_uniq_after = np.unique(Data_table['SessionID'])
+    Iden_uniq_after = Data_table['SessionID'].unique()
     run_with_progress(agg_removed, removed, Parallel=False)
     # Display the results of the filtering process
     LOGGER.info('Filtering Results:')
@@ -241,3 +251,19 @@ if __name__ == '__main__':
     #Filter pre table to only include Iden_uniq sessions
     PRE_TABLE = PRE_TABLE[PRE_TABLE['SessionID'].isin(Iden_uniq)]
     PRE_TABLE.to_csv(f'{SAVE_DIR}Data_table_TESTING.csv', index=False)
+
+if __name__ == '__main__':
+    if PROFILE:
+        LOGGER.info('Profiling enabled')
+        yappi.start()
+        LOGGER.info('Starting main function')
+        main()
+        LOGGER.info('Main function completed')
+        yappi.stop()
+        profile_output_path = 'step02_profile.yappi'
+        LOGGER.info(f'Writing profile results to {profile_output_path}')
+        yappi.get_func_stats().save(profile_output_path, type='pstat')
+        LOGGER.info(f'Profile results saved to {profile_output_path}')
+    else:
+        main()
+    exit()

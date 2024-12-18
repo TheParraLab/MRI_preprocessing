@@ -398,22 +398,28 @@ class DICOMsplit():
         '''
         # Assert dicom table is a single row
         assert dicom_table.shape[0] == 1, 'Multiple rows found in the table'
+        assert dicom_table['SessionID'].nunique() == 1, 'Multiple Session_IDs found in the table'
+        # Check if the DataFrame is empty
+        if dicom_table.empty:
+            raise ValueError('The provided dicom_table is empty.')
         self.tmp_save = '/FL_system/data/tmp/'
         if not os.path.exists(self.tmp_save):
             os.makedirs(self.tmp_save)
         self.debug = debug
         self.dicom_table = dicom_table
-        self.Session_ID = self.dicom_table['SessionID'][0]
-        assert self.Session_ID.istype(str), 'Session_ID must be a string'
-        self.directory = os.path.dirname(self.dicom_table['PATH'][0])
-        assert self.directory.istype(str), 'Directory must be a string'
+        self.Session_ID = self.dicom_table['SessionID'].iloc[0]
+        assert isinstance(self.Session_ID, str), 'Session_ID must be a string'
+        self.directory = os.path.dirname(self.dicom_table['PATH'].iloc[0])
+        assert isinstance(self.directory, str), 'Directory must be a string'
         self.output_rows = []
 
-        self.scan_results = self.scan_all()
+        self.scan_all()
+        print(f'Found {self.scan_results["Series"].nunique()} unique series | [{self.Session_ID}]')
+        print(f'Found {self.scan_results["TriTime"].nunique()} unique trigger times | [{self.Session_ID}]')
         self.sort_scans()
         self.output_table = pd.DataFrame(self.output_rows)
 
-    def scan_all():
+    def scan_all(self):
         """Scans all files in the directory"""
         files = glob.glob(os.path.join(self.directory, '*.dcm'))
         info = {
@@ -436,35 +442,74 @@ class DICOMsplit():
             info['TriTime'].append(extractor.Tri())
             info['InjTime'].append(extractor.Inj())
             info['Series'].append(extractor.Series())
-        return pd.DataFrame(info)
+            del extractor
+        self.scan_results = pd.DataFrame(info)
+        return 
     
-    def sort_scans():
+    def sort_scans(self):
         """Sorts the scans based on the Series number"""
         if not os.path.exists(f'{self.tmp_save}{self.Session_ID}'):
             os.makedirs(f'{self.tmp_save}{self.Session_ID}')
-        for i in self.scan_results['Series'].unique():
-            if not os.path.exists(f'{self.tmp_save}{self.Session_ID}/{i}'):
-                os.makedirs(f'{self.tmp_save}{self.Session_ID}/{i}')
-            slices = self.scan_results[self.scan_results['Series'] == i]
-            
-            for j in range(len(slices)):            
-                # copy each file to its series folder
-                file = slices['PATH'].iloc[j]
-                shutil.copy(file, f"{self.tmp_save}{self.Session_ID}/{i}")
-                if j == 0:
+        self.scan_results.to_csv(f'{self.tmp_save}{self.Session_ID}/scan_results.csv')
+
+        if self.scan_results['Series'].nunique() == 1:
+            print(f'Single series found | [{self.Session_ID}]')
+            if self.scan_results['TriTime'].nunique() > 1:
+                print(f' {self.scan_results["TriTime"].nunique()} unique trigger times found | [{self.Session_ID}]')
+                timing = self.scan_results['TriTime'].unique()
+                
+                for i in range(len(timing)):
+                    if not os.path.exists(f'{self.tmp_save}{self.Session_ID}/{i}'):
+                        os.makedirs(f'{self.tmp_save}{self.Session_ID}/{i}')
+                    new_table = self.scan_results[self.scan_results['TriTime'] == timing[i]]
+                    files = new_table['PATH'].to_list()
+                    print(f'Found {len(files)} files for trigger time {timing[i]} | [{self.Session_ID}]')
+                    for j in range(len(files)):
+                        shutil.copy(files[j], f"{self.tmp_save}{self.Session_ID}/{i}")
+                        if j == 0:
+                            # grab first scan result for 
+                            info = {}
+                            info['PATH'] = f"{self.tmp_save}{self.Session_ID}/{i}"
+                            extractor = DICOMextract(files[j])
+                            info['AcqTime'] = (extractor.Acq())
+                            info['SrsTime'] = (extractor.Srs())
+                            info['ConTime'] = (extractor.Con())
+                            info['StuTime'] = (extractor.Stu())
+                            info['TriTime'] = (extractor.Tri())
+                            info['InjTime'] = (extractor.Inj())
+                            info['Series'] = extractor.Series()
+                            info['ID'] = extractor.ID()
+                            info['DATE'] = extractor.Date()
+                            info['SessionID'] = self.Session_ID
+                            self.output_rows.append(info)
                     # save the first file to the output table
-                    info = self.dicom_table.iloc[0].to_dict()
-                    extractor = DICOMextract(file)
-                    info['PATH'] = f"{self.tmp_save}{self.Session_ID}/{i}"
-                    info['NumSlices'] = len(slices)
-                    info['AcqTime'] = self.scan_results['AcqTime'].iloc[j]
-                    info['SrsTime'] = self.scan_results['SrsTime'].iloc[j]
-                    info['ConTime'] = self.scan_results['ConTime'].iloc[j]
-                    info['StuTime'] = self.scan_results['StuTime'].iloc[j]
-                    info['TriTime'] = self.scan_results['TriTime'].iloc[j]
-                    info['InjTime'] = self.scan_results['InjTime'].iloc[j]
-                    info['Series'] = i
-                    self.output_rows.append(info)
+                print(self.scan_results)
+            print(self.scan_results)
+        else:
+            print(f'Multiple series found | [{self.Session_ID}]')
+            for i in self.scan_results['Series'].unique():
+                if not os.path.exists(f'{self.tmp_save}{self.Session_ID}/{i}'):
+                    os.makedirs(f'{self.tmp_save}{self.Session_ID}/{i}')
+                slices = self.scan_results[self.scan_results['Series'] == i]
+                
+                for j in range(len(slices)):            
+                    # copy each file to its series folder
+                    file = slices['PATH'].iloc[j]
+                    shutil.copy(file, f"{self.tmp_save}{self.Session_ID}/{i}")
+                    if j == 0:
+                        # save the first file to the output table
+                        info = self.dicom_table.iloc[0].to_dict()
+                        extractor = DICOMextract(file)
+                        info['PATH'] = f"{self.tmp_save}{self.Session_ID}/{i}"
+                        info['NumSlices'] = len(slices)
+                        info['AcqTime'] = self.scan_results['AcqTime'].iloc[j]
+                        info['SrsTime'] = self.scan_results['SrsTime'].iloc[j]
+                        info['ConTime'] = self.scan_results['ConTime'].iloc[j]
+                        info['StuTime'] = self.scan_results['StuTime'].iloc[j]
+                        info['TriTime'] = self.scan_results['TriTime'].iloc[j]
+                        info['InjTime'] = self.scan_results['InjTime'].iloc[j]
+                        info['Series'] = i
+                        self.output_rows.append(info)
         return
 
 
