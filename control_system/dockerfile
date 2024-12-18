@@ -33,7 +33,7 @@ RUN apt-get install -y git cmake g++ && \
 WORKDIR /app
 #COPY ../app /app
 # Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir flask flask_socketio pydicom numpy pandas nibabel scipy hdf5storage flwr==1.11.1
+RUN pip install --no-cache-dir flask flask_socketio pydicom numpy pandas nibabel scipy hdf5storage yappi
 
 # Make port 5000 available to the world outside this container
 EXPOSE 5000
