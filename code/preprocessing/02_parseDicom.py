@@ -24,14 +24,15 @@ progress_queue = manager.Queue()
 SAVE_DIR = '/FL_system/data/' # Location to saveupdated tables and load the constructed Data_table.csv ['/FL_system/data/']
 COMPUTED_FLAGS = ['slope', 'sub', 'subtract', 'secondary']
 DEBUG = 0
-TEST = True
+TEST = False
+PROGRESS = False
 N_TEST = 100
 PARALLEL = True
 # Initialize logger
 LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
 
 # Profiler
-PROFILE = True
+PROFILE = False
 if PROFILE:
     import yappi
     import pstats
@@ -78,13 +79,14 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     LOGGER.debug(f'Number of items: {len(items)}')
     LOGGER.debug(f'Parallel: {Parallel}')
 
-    # Initialize progress bar
-    Progress = ProgressBar(len(items))
-    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-    updater_thread.start()
-    
-    # Pass the progress queue to the target function
-    target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
+    if PROGRESS:
+        # Initialize progress bar
+        Progress = ProgressBar(len(items))
+        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
+        updater_thread.start()
+        
+        # Pass the progress queue to the target function
+        target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
 
     # Run the target function with a progress bar
     if Parallel:
@@ -94,10 +96,11 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     else:
         results = [target(item) for item in items]
 
-    # Close the progress bar
-    progress_queue.put(None)
-    print('\n')
-    updater_thread.join()
+    if PROGRESS:
+        # Close the progress bar
+        progress_queue.put(None)
+        print('\n')
+        updater_thread.join()
 
     LOGGER.debug(f'Completed {target_name} with progress bar')
     LOGGER.debug(f'Number of results: {len(results)}')
@@ -155,6 +158,7 @@ def filterDicom(Data_subset):
 # Function to split the data table based on the unique identifier
 def split_table(ID):
     global Data_table
+    LOGGER.debug(f'Splitting table for ID: {ID}')
     return Data_table[Data_table['SessionID'] == ID].copy()
 
 # Function to aggregate removed scans

@@ -26,11 +26,12 @@ SCAN_DIR = '/FL_system/data/raw/' # Location to recursively scan for dicom files
 TEST = False # If True, only the first 2 dicom files will be scanned
 N_TEST = 100 # Number of dicom files to scan if TEST is True
 PARALLEL = True # If True, the scan will be parallelized
+PROGRESS = False # If True, a progress bar will be displayed
 LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
 DEBUG = 0
 
 # Profiler
-PROFILE = True
+PROFILE = False
 if PROFILE:
     import yappi
     import pstats
@@ -99,13 +100,14 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     LOGGER.debug(f'Number of items: {len(items)}')
     LOGGER.debug(f'Parallel: {Parallel}')
 
-    # Initialize progress bar
-    Progress = ProgressBar(len(items))
-    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-    updater_thread.start()
-    
-    # Pass the progress queue to the target function
-    target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
+    if PROGRESS:
+        # Initialize progress bar
+        Progress = ProgressBar(len(items))
+        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
+        updater_thread.start()
+        
+        # Pass the progress queue to the target function
+        target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
 
     # Run the target function with a progress bar
     results = []
@@ -127,9 +129,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
                 LOGGER.error(f'Error in sequential processing: {e}')
 
     # Close the progress bar
-    progress_queue.put(None)
-    print('\n')
-    updater_thread.join()
+    if PROGRESS:
+        progress_queue.put(None)
+        print('\n')
+        updater_thread.join()
 
     LOGGER.debug(f'Completed {target_name} with progress bar')
     LOGGER.debug(f'Number of results: {len(results)}')
