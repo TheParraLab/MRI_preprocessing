@@ -25,7 +25,8 @@ LOGGER = get_logger('03_saveNifti', '/FL_system/data/logs/')
 LOAD_DIR = '/FL_system/data/' # Location to load the constructed Data_table_timing.csv ['/FL_system/data/']
 SAVE_DIR = '/FL_system/data/nifti/' # Location to save the nifti files ['/FL_system/data/nifti/']
 DEBUG = 0
-TEST = False
+TEST = True
+PROGRESS = False
 N_TEST = 200
 PARALLEL = True
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
@@ -81,9 +82,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     LOGGER.debug(f'Parallel: {Parallel}')
 
     # Initialize progress bar
-    Progress = ProgressBar(len(items))
-    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-    updater_thread.start()
+    if PROGRESS:
+        Progress = ProgressBar(len(items))
+        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
+        updater_thread.start()
     
     # Pass the progress queue to the target function
     target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
@@ -114,9 +116,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
                 LOGGER.error(f'Error in sequential processing: {e}', exec_info=True)
 
     # Close the progress bar
-    progress_queue.put(None)
-    print('\n')
-    updater_thread.join()
+    if PROGRESS:
+        progress_queue.put(None)
+        print('\n')
+        updater_thread.join()
 
     LOGGER.debug(f'Completed {target_name} with progress bar')
     LOGGER.debug(f'Number of results: {len(results)}')
