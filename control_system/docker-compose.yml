@@ -14,6 +14,7 @@ services:
       - ${PROJECT_DIRECTORY_PATH}:/FL_system
       #- ${PROJECT_DIRECTORY_PATH}/data:/data
       - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
+      - /media/nicholas/Expansion:/FL_system/data/nifti
       - ./app:/app
     ports:
       - "5000:5000"
