@@ -143,6 +143,11 @@ def progress_updater(queue, progress_bar):
 
 def run_cmd(command, commands):
     SessionID = command[2].split(os.sep)[-1]
+    output_dir = command[2]
+    file_name = command[4]
+    if os.file.exists(f'{output_dir}{os.sep}{file_name}.nii'):
+        LOGGER.debug(f'Nifti file already exists for {file_name}')
+        return
 
     if stop_flag.is_set():
         LOGGER.info('stop flag is set, exiting')
