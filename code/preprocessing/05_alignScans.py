@@ -25,6 +25,8 @@ DEBUG = 0
 TEST = True
 N_TEST = 10
 PARALLAL = True
+PROGRESS = False
+
 #### Preprocessing | Step 5: Align Scans ####
 # This script aims to coregister all session-specific scans to the 01_01 scan
 # 
@@ -47,9 +49,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     LOGGER.debug(f'Parallel: {Parallel}')
 
     # Initialize progress bar
-    Progress = ProgressBar(len(items))
-    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-    updater_thread.start()
+    if PROGRESS:
+        Progress = ProgressBar(len(items))
+        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
+        updater_thread.start()
     
     # Pass the progress queue to the target function
     target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
@@ -63,9 +66,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
         results = [target(item) for item in items]
 
     # Close the progress bar
-    progress_queue.put(None)
-    print('\n')
-    updater_thread.join()
+    if PROGRESS:
+        progress_queue.put(None)
+        print('\n')
+        updater_thread.join()
 
     LOGGER.debug(f'Completed {target_name} with progress bar')
     LOGGER.debug(f'Number of results: {len(results)}')
@@ -90,25 +94,32 @@ def align(Dir):
     # It saves the coregistered scans in the output directory
     Fils = glob.glob(f'{Dir}/*_RAS.nii')
     Fils.sort()
+    LOGGER.info(f'Processing {Dir}')
     if not os.path.exists(f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}'):
         os.mkdir(f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}')
+        LOGGER.debug(f'Created directory: {SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}')
     # Coregister all subsequent scans
     for ii in Fils[2:]:
         # Perform coregistration to 01_01
         dest = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{ii.split(os.sep)[-1]}'
         dest = dest.replace('.nii','')
-        os.system(f'reg_aladin -ref {Fils[1]} -flo {ii} -res {dest}_aff.nii -aff /data/affine.txt')
-        os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -aff /data/affine.txt -be 0.1')
-        os.system(f'rm /data/affine.txt')
+        print(dest)
+        aff_save = (os.sep).join(dest.split(os.sep)[:-1])
+        os.system(f'reg_aladin -ref {Fils[1]} -flo {ii} -aff {dest}_aff.txt')
+        os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
+        os.system(f'rm {dest}_aff.txt')
+        LOGGER.info(f'Coregistered: {ii}')
     # Coregister the first scan
     dest = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{Fils[0].split(os.sep)[-1]}'
     dest = dest.replace('.nii','')
-    os.system(f'reg_aladin -ref {Fils[1]} -flo {Fils[0]} -res {dest}_aff.nii -aff /data/affine.txt')
-    os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -aff /data/affine.txt -be 0.1')
-    os.system(f'rm /data/affine.txt')
+    os.system(f'reg_aladin -ref {Fils[1]} -flo {Fils[0]} -aff {dest}_aff.txt')
+    os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
+    os.system(f'rm {dest}_aff.txt')
+    LOGGER.info(f'Coregistered: {Fils[0]}')
 
     # Copy reference to coregistered samples
     os.system(f'cp {Fils[1]} {SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{Fils[1].split(os.sep)[-1]}')
+    LOGGER.info(f'Copied: {Fils[1]}')
 
     return 'completed'
 
