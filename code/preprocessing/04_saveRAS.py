@@ -1,6 +1,7 @@
 import os
 import pydicom as pyd
 import glob
+import json
 import numpy as np
 import pandas as pd
 import nibabel as nib
@@ -24,6 +25,7 @@ SAVE_DIR = '/FL_system/data/RAS/'
 TEST = True
 N_TEST = 10
 PARALLEL = True
+PROGRESS = False
 
 debug = 0
 #### Preprocessing | Step 4: Save RAS Nifti Files ####
@@ -49,9 +51,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     LOGGER.debug(f'Parallel: {Parallel}')
 
     # Initialize progress bar
-    Progress = ProgressBar(len(items))
-    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-    updater_thread.start()
+    if PROGRESS:
+        Progress = ProgressBar(len(items))
+        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
+        updater_thread.start()
     
     # Pass the progress queue to the target function
     target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
@@ -65,9 +68,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
         results = [target(item) for item in items]
 
     # Close the progress bar
-    progress_queue.put(None)
-    print('\n')
-    updater_thread.join()
+    if PROGRESS:
+        progress_queue.put(None)
+        print('\n')
+        updater_thread.join()
 
     LOGGER.debug(f'Completed {target_name} with progress bar')
     LOGGER.debug(f'Number of results: {len(results)}')
@@ -92,7 +96,20 @@ def RAS_convert(dir):
     # It saves the RAS files in the output directory
     Fils = glob.glob(f'{dir}/*.nii')
     Fils.sort()
-
+    for ii in Fils:
+        if ii.endswith('00a.nii'):
+            LOGGER.debug(f'{ii} | found 00a.nii, attempting to isolate FS sample...')
+            json_00 = json.load(open(f'{dir}/00.json'))
+            json_00a = json.load(open(f'{dir}/00a.json'))
+            if 'FS' in json_00['SeriesDescription']:
+                LOGGER.debug(f'{dir} | Found FS in 00')
+                Fils.remove(f'{dir}/00a.nii')
+            elif 'FS' in json_00a['SeriesDescription']:
+                LOGGER.debug(f'{dir} | Found FS in 00a')
+                Fils.remove(f'{dir}/00.nii')
+            else:
+                LOGGER.error(f'{dir} | No FS found in 00 or 00a')
+    
     for ii in Fils:
         LOGGER.debug(f'Processing: {ii}')
 
@@ -130,6 +147,8 @@ def RAS_convert(dir):
         if not os.path.exists(f'{SAVE_DIR}{dir.split(os.sep)[-1]}'):
             LOGGER.debug(f'Creating directory: {SAVE_DIR}{dir.split(os.sep)[-1]}')
             os.mkdir(f'{SAVE_DIR}{dir.split(os.sep)[-1]}')
+        if save_path.endswith('00a.nii'):
+            save_path = save_path.replace('00a.nii', '00.nii')
         nib.save(ras_img,save_path.replace('.nii', '_RAS.nii'))
     return 'completed'
 
@@ -142,6 +161,9 @@ if __name__ == '__main__':
         LOGGER.info(f'TEST: {TEST}')
         LOGGER.info(f'N_TEST: {N_TEST}')
 
+    Data_table = pd.read_csv('/FL_system/data/Data_table.csv')
+    Data_table_timing = pd.read_csv('/FL_system/data/Data_table_timing.csv')
+    
     if os.path.exists(SAVE_DIR) and len(os.listdir(SAVE_DIR)) > 0:
         LOGGER.error('RAS directory already exists')
         LOGGER.error('To reprocess data, please remove RAS directory from /FL_system/data/')
