@@ -100,7 +100,8 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
                     LOGGER.info('stop flag is set, exiting')
                     break
                 try:
-                    result = future.result(timeout=600)
+                    #result = future.result(timeout=600)
+                    result = future.result()
                     results.append(result)
                 except Exception as e:
                     LOGGER.error(f'Error in parallel processing: {e}', exc_info = True)
@@ -145,13 +146,17 @@ def run_cmd(command, commands):
     SessionID = command[2].split(os.sep)[-1]
     output_dir = command[2]
     file_name = command[4]
-    if os.file.exists(f'{output_dir}{os.sep}{file_name}.nii'):
+    LOGGER.debug(f'Converting {command[-1]} to nifti at {output_dir}{os.sep}{file_name}.nii')
+
+    if os.path.exists(f'{output_dir}{os.sep}{file_name}.nii'):
         LOGGER.debug(f'Nifti file already exists for {file_name}')
+        commands.remove(command)
         return
 
     if stop_flag.is_set():
         LOGGER.info('stop flag is set, exiting')
         return
+
     with disk_space_lock:
         if not check_disk_space(SAVE_DIR):
             if not stop_flag.is_set():
@@ -159,13 +164,14 @@ def run_cmd(command, commands):
                 stop_flag.set()
                 LOGGER.warning('Stop flag set')
             return
+        
     if not os.path.isdir(f'{SAVE_DIR}{SessionID}'):
         try:
             os.mkdir(f'{SAVE_DIR}{SessionID}')
             if DEBUG > 0:
                 LOGGER.debug(f'Created directory for {SessionID}')
         except FileExistsError:
-            LOGGER.error(f'Directory for {SessionID} already exists')
+            LOGGER.warning(f'Directory for {SessionID} already exists')
     try:
         if DEBUG == 0:
             result = subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -247,7 +253,8 @@ if __name__ == '__main__':
         # Building the commands for conversion
         commands = run_with_progress(makeNifti, Data_subsets, Parallel=PARALLEL)
         commands = manager.list([item for sublist in commands for item in sublist])
-
+        LOGGER.info(f'Number of commands: {len(commands)}')
+        
     # Running the commands
     #run_with_progress(run_cmd, commands, Parallel=PARALLEL)
     run_with_progress(partial(run_cmd, commands=commands), commands, Parallel=PARALLEL)
