@@ -46,6 +46,12 @@ def check_disk_space(directory: str) -> bool:
         LOGGER.debug(f'Available space: {available_space}')
     return available_space > DISK_SPACE_THRESHOLD
 
+def check_source_files(source_path: str) -> bool:
+    """Check if the source path file exists contains files."""
+    return (len(glob.glob(f'{source_path}/*')) > 0) or (len(glob.glob(f'{source_path}/*/*')) > 0)
+
+    return len(glob.glob(f'{source_dir}/*')) > 0
+
 def save_progress(data, filename):
     """Save progress to a file."""
     LOGGER.info(f'Saving progress to {filename}')
@@ -146,6 +152,8 @@ def run_cmd(command, commands):
     SessionID = command[2].split(os.sep)[-1]
     output_dir = command[2]
     file_name = command[4]
+    input_file = command[-1]
+    input_file = ('/'.join(input_file.split('/')[:-1]))
     LOGGER.debug(f'Converting {command[-1]} to nifti at {output_dir}{os.sep}{file_name}.nii')
 
     if os.path.exists(f'{output_dir}{os.sep}{file_name}.nii'):
@@ -161,6 +169,12 @@ def run_cmd(command, commands):
         if not check_disk_space(SAVE_DIR):
             if not stop_flag.is_set():
                 LOGGER.warning('Disk space is running low.  Pausing...')
+                stop_flag.set()
+                LOGGER.warning('Stop flag set')
+            return
+        if not check_source_files(input_file):
+            if not stop_flag.is_set():
+                LOGGER.warning(f'No files found in {input_file}')
                 stop_flag.set()
                 LOGGER.warning('Stop flag set')
             return
@@ -254,19 +268,31 @@ if __name__ == '__main__':
         commands = run_with_progress(makeNifti, Data_subsets, Parallel=PARALLEL)
         commands = manager.list([item for sublist in commands for item in sublist])
         LOGGER.info(f'Number of commands: {len(commands)}')
-        
-    # Running the commands
-    #run_with_progress(run_cmd, commands, Parallel=PARALLEL)
-    run_with_progress(partial(run_cmd, commands=commands), commands, Parallel=PARALLEL)
-
-    if not stop_flag.is_set():
-        LOGGER.info('Nifti conversion complete without stop flag')
-        LOGGER.info('Removing progress file')
-        if os.path.exists('saveNifti_progress.pkl'):
-            os.remove('saveNifti_progress.pkl')
-    else:
-        LOGGER.info('Nifti conversion complete with stop flag')
-        save_progress(list(commands), 'saveNifti_progress.pkl')
-        LOGGER.info('checkpoint file saved')
+        print(commands[1])
+    LOGGER.info('Isolating priority commands')
+    commands_priority = manager.list([item for item in commands if 'raw' in item[-1]])
+    commands_redirected = manager.list([item for item in commands if 'raw' not in item[-1]])
+    if len(commands_priority) > 0:
+        LOGGER.debug(f'Number of priority commands: {len(commands_priority)}')
+        run_with_progress(partial(run_cmd, commands=commands), commands_priority, Parallel=PARALLEL)
+        if not stop_flag.is_set():
+            LOGGER.info('Priority commands complete without stop flag')
+            LOGGER.info('Running non-priority from temporary files')
+            if len(commands_redirected) > 0:
+                LOGGER.debug(f'Number of redirected commands: {len(commands_redirected)}')
+                run_with_progress(partial(run_cmd, commands=commands), commands_redirected, Parallel=PARALLEL)
+                if not stop_flag.is_set():
+                    LOGGER.info('Nifti conversion complete without stop flag')
+                    LOGGER.info('Removing progress file')
+                    if os.path.exists('saveNifti_progress.pkl'):
+                        os.remove('saveNifti_progress.pkl')
+                else:
+                    LOGGER.info('Nifti conversion complete with stop flag')
+                    save_progress(list(commands), 'saveNifti_progress.pkl')
+                    LOGGER.info('checkpoint file saved')
+        else:
+            LOGGER.info('Nifti conversion complete with stop flag')
+            save_progress(list(commands), 'saveNifti_progress.pkl')
+            LOGGER.info('checkpoint file saved')
     stop_flag.set()
 
