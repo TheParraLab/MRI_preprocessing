@@ -21,7 +21,7 @@ LOAD_DIR = '/FL_system/data/coreg/'
 SAVE_DIR = '/FL_system/data/inputs/'
 DEBUG = 0
 TEST = True
-N_TEST = 10
+N_TEST = 40
 PARALLAL = True
 PROGRESS = False
 # This script is for generating the numpy files utilized for model training
@@ -95,19 +95,30 @@ def generate_slopes(SessionID):
     Fils = glob.glob(f'{LOAD_DIR}/{SessionID}/*.nii')
     Fils.sort()
     LOGGER.debug(f'{SessionID} | Files | {Fils} ')
-    Data = Data_table[Data_table['SessionID'] == i]
-    assert np.min(len(Data), len(Fils)) >= 3, 'Minimim number of samples is not met, unable to determine slopes with <3 scans'
+    Data = Data_table[Data_table['SessionID'] == SessionID]
+    assert np.min([len(Data), len(Fils)]) >= 3, 'Minimim number of samples is not met, unable to determine slopes with <3 scans'
     if len(Data) != len(Fils):
         LOGGER.warning(f'{SessionID} | Different number of files and detected times')
         LOGGER.warning(f'{SessionID} | Analyzing timing spreadsheet to remove non-fat saturated (assumption!)')
         Data = Data[Data['Series_desc'].str.contains('FS', na=False)].reset_index(drop=True)
     assert len(Data) == len(Fils), 'ERROR: different sizes cannot be fixed through Fat saturation'
 
-    Major = Data['Major']
-    sorting = np.argsort(Major)
-    Times = [Data['TriTime'][ii] for ii in sorting] #Loading Times in ms
-    # Converting to seconds
-    Times = [t/1000 for t in Times]
+    Major = Data['Major'] # Major is the order of the scans
+    sorting = np.argsort(Major) # Sorting the scans
+    LOGGER.debug(f'{SessionID} | Sorting values| {sorting.values}')
+    LOGGER.debug(f'{SessionID} | Trigger Time | {Data["TriTime"].values}')
+    LOGGER.debug(f'{SessionID} | Scan Duration | {Data["ScanDur"].values}')
+    try:
+        ScanDuration = [Data['ScanDur'].iloc[ii] for ii in sorting] #Scan Duration in us
+        Times = [Data['TriTime'].iloc[ii] for ii in sorting] #Loading Times in ms
+        if Times[0] == 'Unknown':
+            Times[0] = float(Times[1]) - (float(ScanDuration[0])/1000)
+        # Converting to seconds
+        Times = [float(T)/1000 for T in Times]
+    except Exception as e:
+        LOGGER.error(f'{SessionID} | Error loading times')
+        LOGGER.error(f'{SessionID} | {e}')
+        return
     LOGGER.debug(f'{SessionID} | Times | {Times}')
     
     # Load the 01 scan
@@ -117,77 +128,99 @@ def generate_slopes(SessionID):
     p95 = float(np.percentile(data0,95))
     LOGGER.debug(f'{SessionID} | 95% | {p95}')
 
+    header = img.header.copy()
+    header['datatype'] = 16 # 32-bit float
+    header['scl_slope'] = 1
+    header['bitpix'] = 32
+    header['cal_max'] = 0
+    header['cal_min'] = 0
+    
     # Create a new NIfTI image with the same affine, but with the data type, slope, and intercept set explicitly
-    new_img = nib.Nifti1Image(data0, img.affine)
-    new_img.header['datatype'] = 16
-    new_img.header['scl_slope'] = 1
-    new_img.header['bitpix'] = 32
-    new_img.header['cal_max'] = 0
-    new_img.header['cal_min'] = 0
+    #new_img = nib.Nifti1Image(data0, img.affine)
+    #new_img.header['datatype'] = 16
+    #new_img.header['scl_slope'] = 1
+    #new_img.header['bitpix'] = 32
+    #new_img.header['cal_max'] = 0
+    #new_img.header['cal_min'] = 0
 
     # Building time matrix same shape as loaded data
-    T = np.zeros_like(data0)
+    T = np.zeros_like(data0, dtype=np.float32)
     T = np.expand_dims(T, axis=-1)
     T = np.repeat(T, len(Times), axis=-1)
     for ii,jj in enumerate(Times):
         T[:,:,:,ii] = jj
     
     # Loading all image data into single matrix
-    D = np.zeros_like(data0)
+    D = np.zeros_like(data0, dtype=np.float32)
     D = np.expand_dims(D, axis=-1)
-    D = np.repeat(D, n, axis=-1)
+    D = np.repeat(D, len(Times), axis=-1)
     for ii,jj in enumerate(Fils):
         img = nib.load(jj)
-        data0 = img.get_fdata()
+        data0 = img.get_fdata().astype(np.float32)
         data0[np.isnan(data0)] = 0
         D[:,:,:,ii] = data0
     D[np.isnan(D)] = 0
 
+    LOGGER.debug(f'{SessionID} | Creating saving directory for inputs')
+    os.mkdir(SAVE_DIR + f'/{SessionID}')
+
     ###################################
     # Calculating slope 1 (enhancement)
     LOGGER.debug(f'{SessionID} | Starting slope 1 calculation')
-    Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1)
-    Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1)
+    Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1).astype(np.float32)
+    Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1).astype(np.float32)
     slope1 = np.divide(
         np.sum((T[:,:,:,0:2] - Tmean) * (D[:,:,:,0:2] - Dmean), axis=3),
         np.sum(np.square((T[:,:,:,0:2] - Tmean)), axis=3)
     ).astype(np.float32)
     slope1 = slope1 / p95
 
-    nib.save(nib.Nifti1Image(slope1.astype('float32'), img.affine), SAVE_DIR + f'/{SessionID}/slope1.nii')
+    header['glmax'] = np.max(slope1)
+    header['glmin'] = np.min(slope1)
+    header['descrip'] = 'pre slp img'
+
+    LOGGER.debug(f'{SessionID} | Slope 1 shape: {slope1.shape}')
+    LOGGER.debug(f'{SessionID} | Header shape: {header.get_data_shape()}')
+
+    nib.save(nib.Nifti1Image(slope1.astype('float32'), img.affine, header), SAVE_DIR + f'/{SessionID}/slope1.nii')
     LOGGER.debug(f'{SessionID} | Saved slope 1')
 
     ###################################
     # Calculating slope 2 (washout)
     LOGGER.debug(f'{SessionID} | Starting slope 2 calculation')
-    Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,1:], axis=3), axis=-1), n-1, axis=-1)
-    Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,1:], axis=3), axis=-1), n-1, axis=-1)
+    Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,1:], axis=3), axis=-1), len(Times)-1, axis=-1).astype(np.float32)
+    Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,1:], axis=3), axis=-1), len(Times)-1, axis=-1).astype(np.float32)
     slope2 = np.divide(
         np.sum((T[:,:,:,1:] - Tmean) * (D[:,:,:,1:] - Dmean), axis=3),
         np.sum(np.square((T[:,:,:,1:] - Tmean)), axis=3)
     ).astype(np.float32)
     slope2 = slope2 / p95
 
-    nib.save(nib.Nifti1Image(slope2.astype('float32'), img.affine), SAVE_DIR + f'/{SessionID}/slope2.nii')
+    header['glmax'] = np.max(slope2)
+    header['glmin'] = np.min(slope2)
+    header['descrip'] = 'post slp img'
+
+    LOGGER.debug(f'{SessionID} | Slope 2 shape: {slope2.shape}')
+    LOGGER.debug(f'{SessionID} | Header shape: {header.get_data_shape()}')
+
+    nib.save(nib.Nifti1Image(slope2.astype('float32'), img.affine, header), SAVE_DIR + f'/{SessionID}/slope2.nii')
     LOGGER.debug(f'{SessionID} | Saved slope 2')
 
     ###################################
     # Creating post-contrast image
     LOGGER.debug(f'{SessionID} | Starting post contrast scan')
     img = nib.load(Fils[1])
-    data1 = img.get_fdata()
+    data1 = img.get_fdata().astype(np.float32)
     data1[np.isnan(data1)] = 0
     post = data1/p95
 
-    nib.save(nib.Nifti1Image(post.astype('float32'), img.affine), SAVE_DIR + f'/{SessionID}/post.nii')
+    LOGGER.debug(f'{SessionID} | Post contrast shape: {post.shape}')
+    LOGGER.debug(f'{SessionID} | Header shape: {header.get_data_shape()}')
+
+    nib.save(nib.Nifti1Image(post.astype('float32'), img.affine, img.header), SAVE_DIR + f'/{SessionID}/post.nii')
     LOGGER.debug(f'{SessionID} | Saved post contrast scan')
 
     ###################################
-
-
-
-
-
 
 
 
@@ -199,13 +232,16 @@ if __name__ == '__main__':
         exit()
      
     session = np.unique(Data_table['SessionID'])
-
     Dirs = os.listdir(f'{LOAD_DIR}/')
+    if TEST:
+        session = session[:N_TEST]
+        Dirs = Dirs[:N_TEST]
+
     N = len(Dirs)
     k = 0
     
     if N != len(session):
-        LOGGER.warning('Mismatch number of sessions and input directories')
+        LOGGER.warning(f'Mismatch number of sessions and input directories | {len(session)} {N}')
 
     # Check if inputs have already been generated
     if os.path.exists(SAVE_DIR):
