@@ -1,6 +1,9 @@
 data/*
 !data/raw/
 
+*.nii
+*.nii.gz
+
 output/*
 
 certs/*

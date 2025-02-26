@@ -23,7 +23,7 @@ LOAD_DIR = '/FL_system/data/RAS/'
 SAVE_DIR = '/FL_system/data/coreg/'
 DEBUG = 0
 TEST = True
-N_TEST = 10
+N_TEST = 40
 PARALLAL = True
 PROGRESS = False
 
@@ -59,7 +59,7 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
 
     # Run the target function with a progress bar
     if Parallel:
-        with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
+        with ProcessPoolExecutor(max_workers=cpu_count()//2) as executor:
             futures = [executor.submit(target, item, *args, **kwargs) for item in items]
             results = [future.result() for future in futures]
     else:
@@ -105,16 +105,22 @@ def align(Dir):
         dest = dest.replace('.nii','')
         print(dest)
         aff_save = (os.sep).join(dest.split(os.sep)[:-1])
-        os.system(f'reg_aladin -ref {Fils[1]} -flo {ii} -aff {dest}_aff.txt')
-        os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
-        os.system(f'rm {dest}_aff.txt')
+        #os.system(f'reg_aladin -ref {Fils[1]} -flo {ii} -aff {dest}_aff.txt')
+        #os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
+        #os.system(f'rm {dest}_aff.txt')
+        
+        os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -be 0.1')
+
         LOGGER.info(f'Coregistered: {ii}')
     # Coregister the first scan
     dest = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{Fils[0].split(os.sep)[-1]}'
     dest = dest.replace('.nii','')
-    os.system(f'reg_aladin -ref {Fils[1]} -flo {Fils[0]} -aff {dest}_aff.txt')
-    os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
-    os.system(f'rm {dest}_aff.txt')
+    #os.system(f'reg_aladin -ref {Fils[1]} -flo {Fils[0]} -aff {dest}_aff.txt')
+    #os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
+    #os.system(f'rm {dest}_aff.txt')
+    
+    os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -be 0.1')
+    
     LOGGER.info(f'Coregistered: {Fils[0]}')
 
     # Copy reference to coregistered samples
