@@ -2,6 +2,7 @@
 
 > This is a generalized implementation of MRI preprocesing for various ML/AI tasks within the Parra Lab
 
+> It is recommended to run this on a Linux system.  Windows should work, but has not been verified.
 ---
 
 ## Table of Contents
@@ -49,6 +50,11 @@ After this is provided, the system will start up and be accessible on port 5000 
 
 The code to perform the preprocessing is provided in /code/preprocessing.  The 00_preprocess.sh script will run all preprocessing steps in series, placing fully processed data into /data/inputs.
 When required, individual preprocessing scripts can be run by accessing the CLI of the container, and running `python3 0X_script.py` from within the /FL_system/code/preprocessing/ directory.  Python scripts will be modified to take in parameters as command line arguments in the near future.
+
+### Models
+
+In the future, I plan for the control webserver to be able to perform model inference and training.  To this end, the webserver will report GPU availability (Preprocessing alone does not require the GPU to be present.
+
 ---
 
 ## Acknowledgements
