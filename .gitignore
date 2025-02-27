@@ -12,3 +12,6 @@ certs/*
 __pycache__
 
 mount*
+
+tmp/*
+*.zip
