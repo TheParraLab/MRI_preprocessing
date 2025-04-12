@@ -1,6 +1,9 @@
 data/*
 !data/raw/
 
+*.nii
+*.nii.gz
+
 output/*
 
 certs/*
@@ -9,3 +12,6 @@ certs/*
 __pycache__
 
 mount*
+
+tmp/*
+*.zip

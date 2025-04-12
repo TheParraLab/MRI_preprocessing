@@ -23,7 +23,7 @@ LOGGER = get_logger('04_saveRAS', '/FL_system/data/logs/')
 LOAD_DIR = '/FL_system/data/nifti/'
 SAVE_DIR = '/FL_system/data/RAS/'
 TEST = True
-N_TEST = 10
+N_TEST = 40
 PARALLEL = True
 PROGRESS = False
 

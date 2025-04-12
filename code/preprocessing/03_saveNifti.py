@@ -294,5 +294,17 @@ if __name__ == '__main__':
             LOGGER.info('Nifti conversion complete with stop flag')
             save_progress(list(commands), 'saveNifti_progress.pkl')
             LOGGER.info('checkpoint file saved')
+    elif len(commands_redirected) > 0:
+        LOGGER.debug(f'Number of redirected commands: {len(commands_redirected)}')
+        run_with_progress(partial(run_cmd, commands=commands), commands_redirected, Parallel=PARALLEL)
+        if not stop_flag.is_set():
+            LOGGER.info('Nifti conversion complete without stop flag')
+            LOGGER.info('Removing progress file')
+            if os.path.exists('saveNifti_progress.pkl'):
+                os.remove('saveNifti_progress.pkl')
+        else:
+            LOGGER.info('Nifti conversion complete with stop flag')
+            save_progress(list(commands), 'saveNifti_progress.pkl')
+            LOGGER.info('checkpoint file saved')
     stop_flag.set()
 
