@@ -1,7 +1,8 @@
-# Package imports
+# Standard imports
 import os
 import time
 import argparse
+# Third-party imports
 import pydicom as pyd
 import numpy as np
 import pandas as pd
@@ -14,25 +15,41 @@ from concurrent.futures import ThreadPoolExecutor
 from toolbox import get_logger
 from DICOM import DICOMextract
 
-parser = argparse.ArgumentParser(description='Scan DICOM files and extract information')
-parser.add_argument('-m', '--multiprocess', action='store_true', help='Use multiprocessing')
-parser.add_argument ('-d', '--debug', type=int, help='0 for no debug, 1 for debug, 2 for verbose', default=0)
-args = parser.parse_args()
-# Define necessary parameters
-SAVE_DIR = '/FL_system/data/' # Location to save the constructed Data_table.csv
-SCAN_DIR = '/FL_system/data/raw/' # Location to recursively scan for dicom files
-TEST = False # If True, only the first 2 dicom files will be scanned
-N_TEST = 100 # Number of dicom files to scan if TEST is True
-PARALLEL = args.multiprocess # If True, the script will run in parallel
-DEBUG = args.debug # Debug level for logging
-LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
+# Global variables for progress bar
+Progress = None
+manager = Manager()
+progress_queue = manager.Queue()
 
+# Define command line arguments
+parser = argparse.ArgumentParser(description='Extract DICOM data to build Data_table.csv')
+parser.add_argument('--test', nargs='?', const=100, type=int, help='Run in test mode with an optional number of dicom directories to scan (default: 100)')
+parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
+parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
+parser.add_argument('--save', nargs='?', const='/FL_system/data/', type=str, help='Location to save the constructed Data_table.csv (default: /FL_system/data/)')
+parser.add_argument('--scan', nargs='?', const='/FL_system/data/raw/', type=str, help='Location to recursively scan for dicom files (default: /FL_system/data/raw/)')
+args = parser.parse_args()
+
+# Apply cli arguments
+SAVE_DIR = args.save
+SCAN_DIR = args.scan
+TEST = args.test is not None # If True, the script will run in test mode
+N_TEST = args.test if TEST else 100 # Number of dicom directories to scan if TEST is True
+PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
+N_CPUS = args.multi if PARALLEL else cpu_count()-1 # Number of cpus to use if PARALLEL is True
+PROFILE = args.profile # If True, the script will run with the profiler enabled
 # Profiler
-PROFILE = False
 if PROFILE:
     import yappi
     import pstats
     import io
+
+# Define necessary parameters
+PROGRESS = False # If True, a progress bar will be displayed
+# Currently, progress bar causing runtime errors. Disabled until problem can be resolved
+# PROGRESS = True
+LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
+DEBUG = 0
+
 
 #### Preprocessing | Step 1: Extract DICOM data ####
 # This script scans the input directory for dicom files and extracts necessary header information
@@ -83,7 +100,7 @@ def run_function(target: Callable[..., Any], items: List[Any], Parallel: bool=Tr
     # Run the target function with a progress bar
     results = []
     if Parallel:
-        max_workers = min(32, 2 * cpu_count())
+        max_workers = min(32, 2 * N_CPUS)
         LOGGER.debug(f'Using ThreadPoolExecutor with max_workers={max_workers}')
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(target, item, *args, **kwargs) for item in items]
