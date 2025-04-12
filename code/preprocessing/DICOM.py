@@ -270,7 +270,6 @@ class DICOMfilter():
         for i in range(len(dicom_copy)):
             if dicom_copy['NumSlices'].iloc[i] != self.N_SLICES:
                 self.logger.debug(f'Identified scan with multiple of {self.N_SLICES} slices | {self.Session_ID}')
-                self.logger.debug('Separating into multiple scans')
                 splitter = DICOMsplit(dicom_copy.iloc[[i]], logger=self.logger, debug=self.debug)
                 self.temporary_relocations.append(splitter.temporary_relocations)
                 # remove the original row entry

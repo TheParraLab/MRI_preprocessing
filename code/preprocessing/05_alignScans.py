@@ -22,7 +22,7 @@ LOGGER = get_logger('05_alignScans', '/FL_system/data/logs/')
 LOAD_DIR = '/FL_system/data/RAS/'
 SAVE_DIR = '/FL_system/data/coreg/'
 DEBUG = 0
-TEST = True
+TEST = False
 N_TEST = 40
 PARALLAL = True
 PROGRESS = False
@@ -99,6 +99,7 @@ def align(Dir):
         os.mkdir(f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}')
         LOGGER.debug(f'Created directory: {SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}')
     # Coregister all subsequent scans
+    LOGGER.debug(f'Utilizing {Fils[1]} as reference for coregistration')
     for ii in Fils[2:]:
         # Perform coregistration to 01_01
         dest = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{ii.split(os.sep)[-1]}'

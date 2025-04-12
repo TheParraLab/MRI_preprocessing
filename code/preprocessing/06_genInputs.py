@@ -96,7 +96,10 @@ def generate_slopes(SessionID):
     Fils.sort()
     LOGGER.debug(f'{SessionID} | Files | {Fils} ')
     Data = Data_table[Data_table['SessionID'] == SessionID]
-    assert np.min([len(Data), len(Fils)]) >= 3, 'Minimim number of samples is not met, unable to determine slopes with <3 scans'
+    if np.min([len(Data), len(Fils)]) < 3:
+        LOGGER.warning(f'{SessionID} | Skipping session due to insufficient number of scans (<3)')
+        return
+    
     if len(Data) != len(Fils):
         LOGGER.warning(f'{SessionID} | Different number of files and detected times')
         LOGGER.warning(f'{SessionID} | Analyzing timing spreadsheet to remove non-fat saturated (assumption!)')

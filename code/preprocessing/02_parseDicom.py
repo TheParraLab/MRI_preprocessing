@@ -232,10 +232,10 @@ def relocate(commands, relocations):
         return
     with disk_space_lock:
         try:
-            print(commands[0][1])
-            print('/'.join(commands[0][1].split('/')[0:-2]))
+            LOGGER.debug(commands[0][1])
+            LOGGER.debug('/'.join(commands[0][1].split('/')[0:-2]))
         except:
-            print(commands)
+            LOGGER.warning(commands)
         if not check_disk_space('/'.join(commands[0][1].split('/')[0:-2])):
             if not stop_flag.is_set():
                 LOGGER.warning('Disk space is running low.  Pausing...')
@@ -278,7 +278,7 @@ def main():
         LOGGER.error(f'To reprocess data, please remove Data_table_timing.csv from {SAVE_DIR}')
         exit()
 
-    progress = load_progress('saveNifti_progress.pkl')
+    progress = load_progress('parseDicom_progress.pkl')
     if progress:
         LOGGER.info(f'Progress file found. {len(progress)} items remaining')
         temporary_relocation = manager.list(progress)
@@ -301,9 +301,7 @@ def main():
         results, removed, temporary_relocation = run_with_progress(filterDicom, Data_subsets, Parallel=PARALLEL)
         temporary_relocation = list(temporary_relocation)
         temporary_relocation = manager.list([item for sublist in temporary_relocation for item in sublist])
-        print(temporary_relocation)
-        print(len(temporary_relocation))
-        #print(temporary_relocation.keys())
+
         # Filtered results and removed scans are concatenated into a single table
         results = list(results)
         removed = list(removed)
@@ -340,7 +338,13 @@ def main():
         Data_table.to_csv(f'{SAVE_DIR}Data_table_timing.csv', index=False)
         LOGGER.info('Timing information saved to Data_table_timing.csv')
     LOGGER.info(f'Number of temporary relocations: {len(temporary_relocation)}')
-    run_with_progress(partial(relocate, relocations=temporary_relocation), temporary_relocation, Parallel=PARALLEL)
+
+
+    #save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
+    #exit()
+
+
+    run_with_progress(partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL)
 
     if not stop_flag.is_set():
         LOGGER.info('redirection complete without stop flag')
