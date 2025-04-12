@@ -195,7 +195,15 @@ class DICOMextract:
         except Exception as e:
             self.log_error('Unable to read breast size', e)
             return self.UNKNOWN
-        
+    
+    def ScanDur(self) -> Union[float, str]:
+        """Attempts to extract the scan duration of the scan, in microseconds"""
+        try:
+            return self.metadata[('0019','105A')].value
+        except Exception as e:
+            self.log_error('Unable to read AcquisitionDuration', e)
+            return self.UNKNOWN
+            
 class DICOMfilter():
     def __init__(self, dicom_table: pd.DataFrame, logger: logging.Logger = None, debug: int = 0):
         self.debug = debug
