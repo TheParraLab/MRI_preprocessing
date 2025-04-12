@@ -135,6 +135,7 @@ def extractDicom(f, debug=0):
             'StuTime': extract.Stu(),
             'TriTime': extract.Tri(),
             'InjTime': extract.Inj(),
+            'ScanDur': extract.ScanDur(),
             'Lat': extract.LR(),
             'NumSlices': extract.NumSlices(),
             'Thickness': extract.Thickness(),
