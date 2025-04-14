@@ -104,24 +104,47 @@ def generate_slopes(SessionID):
         LOGGER.warning(f'{SessionID} | Different number of files and detected times')
         LOGGER.warning(f'{SessionID} | Analyzing timing spreadsheet to remove non-fat saturated (assumption!)')
         Data = Data[Data['Series_desc'].str.contains('FS', na=False)].reset_index(drop=True)
-    assert len(Data) == len(Fils), 'ERROR: different sizes cannot be fixed through Fat saturation'
-
+    if not len(Data) == len(Fils):
+        LOGGER.error(f'{SessionID} | ERROR: different sizes cannot be fixed through Fat saturation')
+        return
     Major = Data['Major'] # Major is the order of the scans
     sorting = np.argsort(Major) # Sorting the scans
-    LOGGER.debug(f'{SessionID} | Sorting values| {sorting.values}')
-    LOGGER.debug(f'{SessionID} | Trigger Time | {Data["TriTime"].values}')
-    LOGGER.debug(f'{SessionID} | Scan Duration | {Data["ScanDur"].values}')
-    try:
-        ScanDuration = [Data['ScanDur'].iloc[ii] for ii in sorting] #Scan Duration in us
-        Times = [Data['TriTime'].iloc[ii] for ii in sorting] #Loading Times in ms
-        if Times[0] == 'Unknown':
-            Times[0] = float(Times[1]) - (float(ScanDuration[0])/1000)
-        # Converting to seconds
-        Times = [float(T)/1000 for T in Times]
-    except Exception as e:
-        LOGGER.error(f'{SessionID} | Error loading times')
-        LOGGER.error(f'{SessionID} | {e}')
+    #LOGGER.debug(f'{SessionID} | Sorting values| {sorting.values}')
+    #LOGGER.debug(f'{SessionID} | Trigger Time | {Data["TriTime"].values}')
+    #LOGGER.debug(f'{SessionID} | Scan Duration | {Data["ScanDur"].values}')
+    
+    # Check trigger time is not unkown for any of the scans
+    if 'Unknown' in Data['TriTime'][1:].values:
+        LOGGER.error(f'{SessionID} | Trigger time is unknown for the post scan, cannot calculate slopes')
         return
+    else:
+        Times = [Data['TriTime'].iloc[ii] for ii in sorting] #Loading Times in ms
+        # Check for scan duration us known for the pre scan
+        if 'Unknown' in Data['ScanDur'][0].values:
+            LOGGER.warning(f'{SessionID} | Scan duration is unknown for the pre scan, attempting to estimate from acquision times')
+            try:
+                AcqTime = [Data['AcqTime'].iloc[ii] for ii in sorting] #Loading AcqTime in hh:mm:ss 
+                Times = [float(T)/1000 for T in Times] # Converting to seconds
+                AcqTime = [int(t.split(':')[0])*3600 + int(t.split(':')[1])*60 + int(t.split(':')[2]) for t in AcqTime] # Converting to seconds
+                Times[0] = float(AcqTime[0]) - (float(AcqTime[1])) # Estimating the time of the pre-scan
+
+            except Exception as e:
+                LOGGER.error(f'{SessionID} | Error loading acquisition times')
+                LOGGER.error(f'{SessionID} | {e}')
+                return
+        else:
+            try:
+                ScanDuration = [Data['ScanDur'].iloc[ii] for ii in sorting] #Scan Duration in us
+                if Times[0] == 'Unknown':
+                    Times[0] = float(Times[1]) - (float(ScanDuration[0])/1000)
+                # Converting to seconds
+                Times = [float(T)/1000 for T in Times]
+
+            except Exception as e:
+                LOGGER.error(f'{SessionID} | Error loading times')
+                LOGGER.error(f'{SessionID} | {e}')
+                return
+            
     LOGGER.debug(f'{SessionID} | Times | {Times}')
     
     # Load the 01 scan
