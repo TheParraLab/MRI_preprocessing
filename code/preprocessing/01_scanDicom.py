@@ -25,13 +25,15 @@ parser = argparse.ArgumentParser(description='Extract DICOM data to build Data_t
 parser.add_argument('--test', nargs='?', const=100, type=int, help='Run in test mode with an optional number of dicom directories to scan (default: 100)')
 parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
 parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
-parser.add_argument('--save', nargs='?', const='/FL_system/data/', type=str, help='Location to save the constructed Data_table.csv (default: /FL_system/data/)')
-parser.add_argument('--scan', nargs='?', const='/FL_system/data/raw/', type=str, help='Location to recursively scan for dicom files (default: /FL_system/data/raw/)')
+parser.add_argument('--save_dir', nargs='?', default='/FL_system/data/', type=str, help='Location to save the constructed Data_table.csv (default: /FL_system/data/)')
+parser.add_argument('--scan_dir', nargs='?', default='/FL_system/data/raw/', type=str, help='Location to recursively scan for dicom files (default: /FL_system/data/raw/)')
+parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
+parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
 args = parser.parse_args()
 
 # Apply cli arguments
-SAVE_DIR = args.save
-SCAN_DIR = args.scan
+SAVE_DIR = args.save_dir
+SCAN_DIR = args.scan_dir
 TEST = args.test is not None # If True, the script will run in test mode
 N_TEST = args.test if TEST else 100 # Number of dicom directories to scan if TEST is True
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
@@ -44,9 +46,6 @@ if PROFILE:
     import io
 
 # Define necessary parameters
-PROGRESS = False # If True, a progress bar will be displayed
-# Currently, progress bar causing runtime errors. Disabled until problem can be resolved
-# PROGRESS = True
 LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
 DEBUG = 0
 
@@ -57,30 +56,7 @@ DEBUG = 0
 # The extracted information is saved to /FL_system/data/Data_table.csv
 #
 # This step will begin by performing a recursive search for all dicom files in the input directory
-# The first 2 files found in each directory will be checked to ensure they are from the same series
-# TODO: Add detection for how many series are present in a directory, maybe look at first and last file and check series #?
-#   - If they are, only the first file will be recorded
-#   - If they are not, all files will be recorded
-# After the scan, the following information will be extracted from the dicom headers:
-#   - PatientID
-#   - StudyDate
-#   - Path
-#   - SeriesDescription
-#   - AcquisitionTime
-#   - SeriesTime
-#   - ContentTime
-#   - StudyTime
-#   - TriggerTime
-#   - InjectionTime
-#   - Modality
-#   - Laterality
-#   - NumSlices
-#   - Orientation
-#   - SliceThickness
-#   - BreastSize
-#   - DiffusionBValue
-#   - ImageType
-#   - SeriesNumber
+
 # The extracted information will be saved to /data/Data_table.csv
 # NOTE: This script is expected to run inside of the provided control_system docker container and called through the available web interface
 
@@ -88,11 +64,15 @@ DEBUG = 0
 ## Parallelization and Progress functions
 #########################################
 
-def run_function(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
+def run_function(target: Callable[..., Any], items: List[Any], Parallel: bool=True, N_CPUS: int=0, *args, **kwargs) -> List[Any]:
     """Run a function with a progress bar"""
 
     target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
-
+    if N_CPUS == 0:
+        N_CPUS = cpu_count() - 1
+    else:
+        N_CPUS = min(N_CPUS, cpu_count() - 1)
+            
     # Debugging information
     LOGGER.debug(f'Running {target_name} {" in parallel" if Parallel else "sequentially"}')
     LOGGER.debug(f'Number of items: {len(items)}')
@@ -225,7 +205,15 @@ def findDicom(directory, debug=0):
 #############################
 ## Main script
 #############################
-def main():
+def main(out_name='Data_table.csv', SAVE_DIR='', SCAN_DIR='', idx=None, dir_list=''):
+    if idx is not None:
+        assert os.path.exists(dir_list), f'Directory list file {dir_list} does not exist'
+        SAVE_DIR = os.path.join(SAVE_DIR, 'tmp/')
+        with open(dir_list, 'r') as f:
+            Dirs = f.readlines()
+            Dir = Dirs[idx].strip()
+        SCAN_DIR = Dir
+
     # Print the current configuration
     LOGGER.info('Starting scanDicom: Step 01')
     LOGGER.info(f'SCAN_DIR: {SCAN_DIR}')
@@ -235,43 +223,71 @@ def main():
         LOGGER.info(f'Profiling is enabled')
 
     # Check if the Data_table.csv already exists
-    if 'Data_table.csv' in os.listdir(SAVE_DIR):
-        LOGGER.error('Data_table.csv already exists. Skipping step 01')
-        LOGGER.error('To re-run this step, delete the existing Data_table.csv file')
+    if out_name in os.listdir(SAVE_DIR):
+        LOGGER.error(f'{out_name} already exists. Skipping step 01')
+        LOGGER.error(f'To re-run this step, delete the existing {out_name} file')
         exit()
+    if idx is None:
+        # Finding main directory and subdirectories
+        LOGGER.info('Finding all directories containing DICOM files')
+        dicom_dirs = find_all_dicom_dirs(SCAN_DIR, debug=DEBUG)
+        if TEST:
+            dicom_dirs = dicom_dirs[:N_TEST]
+            LOGGER.info(f'Running in test mode with {N_TEST} directories')
+    else:
+        with open(dir_list, 'r') as f:
+            Dirs = f.readlines()
+        Dir = Dirs[idx].strip()
+        dicom_dirs = find_all_dicom_dirs(Dir, debug=DEBUG)
 
-    # Finding main directory and subdirectories
-    LOGGER.info('Finding all directories containing DICOM files')
-    dicom_dirs = find_all_dicom_dirs(SCAN_DIR, debug=DEBUG)
-    if TEST:
-        dicom_dirs = dicom_dirs[:N_TEST]
-        LOGGER.info(f'Running in test mode with {N_TEST} directories')
-                    
+
     # Scan the directories for dicom files
     LOGGER.info('Analyzing DICOM directories')
     dicom_files = run_function(findDicom, dicom_dirs, Parallel=PARALLEL, debug=DEBUG)
     dicom_files = [f for sublist in dicom_files for f in sublist] # Flatten the list of lists
     LOGGER.info(f'Found {len(dicom_files)} dicom files in the input directory')
-
     # Extract the dicom information
     LOGGER.info('Extracting information from dicom files')
     INFO = run_function(extractDicom, dicom_files, Parallel=PARALLEL, debug=DEBUG)
     Data_table = pd.DataFrame(INFO) # Convert the extracted information to a pandas dataframe
-    Data_table.to_csv(f'{SAVE_DIR}Data_table.csv', index=False) # Save the extracted information to a csv file
-    LOGGER.info('DICOM information extraction completed and saved to Data_table.csv')
+    Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False) # Save the extracted information to a csv file
+    LOGGER.info(f'DICOM information extraction completed and saved to {out_name}')
+
+    if idx is not None:
+        if idx == len(Dirs) - 1:
+            LOGGER.info('Last script, compiling results')
+            Tables = []
+            while len(Tables) < len(Dirs):
+                LOGGER.info('Waiting for all tables to be compiled')
+                time.sleep(5)
+                Tables = os.listdir(SAVE_DIR)
+            LOGGER.info('Compiling results')
+            Data_table = pd.DataFrame()
+            for table in Tables:
+                if table.endswith('.csv'):
+                    LOGGER.info(f'Compiling {table}')
+                    Data_table = pd.concat([Data_table, pd.read_csv(f'{SAVE_DIR}{table}')], ignore_index=True)
+            SAVE_DIR = SAVE_DIR.replace('tmp/', '')
+            Data_table.to_csv(f'{SAVE_DIR}Data_table.csv', index=False) # Save the extracted information to a csv file
+
 
 if __name__ == '__main__':
     if PROFILE:
         LOGGER.info('Profiling enabled')
         yappi.start()
         LOGGER.info('Starting main function')
-        main()
+
+    if args.dir_idx is None:
+        main(SCAN_DIR=SCAN_DIR, SAVE_DIR=SAVE_DIR)
+    else:
+        LOGGER.info(f'Processing single directory: {args.dir_idx}')
+        main(out_name=f'Data_table_{args.dir_idx}.csv', idx=args.dir_idx, dir_list=args.dir_list, SCAN_DIR=SCAN_DIR, SAVE_DIR=SAVE_DIR)
+
+    if PROFILE:
         LOGGER.info('Main function completed')
         yappi.stop()
         profile_output_path = 'step01_profile.yappi'
         LOGGER.info(f'Writing profile results to {profile_output_path}')
         yappi.get_func_stats().save(profile_output_path, type='pstat')
         LOGGER.info(f'Profile results saved to {profile_output_path}')
-    else:
-        main()
     exit()
