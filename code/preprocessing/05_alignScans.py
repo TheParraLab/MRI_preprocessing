@@ -1,4 +1,5 @@
 import os
+import argparse
 import pydicom as pyd
 import glob
 import numpy as np
@@ -12,19 +13,31 @@ import subprocess
 import threading
 
 from toolbox import ProgressBar, get_logger
+#BASE_PATH = '/FL_system'
+BASE_PATH = '/home/nleotta000/Projects/'
 # Global variables for progress bar and lock
 Progress = None
 manager = Manager()
 progress_queue = manager.Queue()
-LOGGER = get_logger('05_alignScans', '/FL_system/data/logs/')
+
+# Define command line arguments
+parser = argparse.ArgumentParser(description='Align scans to the first post scan')
+parser.add_argument('--load_dir', type=str, default=f'{BASE_PATH}/data/RAS/', help='Directory to load scans from')
+parser.add_argument('--save_dir', type=str, default=f'{BASE_PATH}/data/coreg/', help='Directory to save aligned scans')
+parser.add_argument('--multi', '-m', action='store_true', help='Use multiprocessing')
+parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
+parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
+args = parser.parse_args()
+
+LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
 
 # Define necessary directories
-LOAD_DIR = '/FL_system/data/RAS/'
-SAVE_DIR = '/FL_system/data/coreg/'
+LOAD_DIR = args.load_dir
+SAVE_DIR = args.save_dir
 DEBUG = 0
 TEST = False
 N_TEST = 40
-PARALLAL = True
+PARALLAL = args.multi
 PROGRESS = False
 
 #### Preprocessing | Step 5: Align Scans ####
@@ -59,7 +72,8 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
 
     # Run the target function with a progress bar
     if Parallel:
-        with ProcessPoolExecutor(max_workers=cpu_count()//2) as executor:
+        num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", cpu_count()//2))
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
             futures = [executor.submit(target, item, *args, **kwargs) for item in items]
             results = [future.result() for future in futures]
     else:
@@ -92,6 +106,14 @@ def progress_updater(queue, progress_bar):
 def align(Dir):
     # This function coregisters all scans in the input directory to the 01_01 scan
     # It saves the coregistered scans in the output directory
+
+    # Make sure Dir is a string
+    assert isinstance(Dir, str), f'Dir should be a string, but got {type(Dir)}'
+    LOGGER.info(Dir[-1])
+    if Dir[-1] == os.sep:
+        LOGGER.warning(f'Directory {Dir} has a trailing slash. Removing it.')
+        Dir = Dir[:-1]
+    
     Fils = glob.glob(f'{Dir}/*_RAS.nii')
     Fils.sort()
     LOGGER.info(f'Processing {Dir}')
@@ -102,15 +124,21 @@ def align(Dir):
     LOGGER.debug(f'Utilizing {Fils[1]} as reference for coregistration')
     for ii in Fils[2:]:
         # Perform coregistration to 01_01
+        LOGGER.info(f'Current DIRECTORY: {Dir}')
+        LOGGER.info(f'Current ID: {Dir.split(os.sep)[-1]}')
+        LOGGER.info(f'Current seperator: {os.sep}')
+        LOGGER.info(f'Split Directory: {Dir.split(os.sep)}')
         dest = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{ii.split(os.sep)[-1]}'
         dest = dest.replace('.nii','')
-        print(dest)
+        LOGGER.info(f'Coregistering scan to save to {dest}')
         aff_save = (os.sep).join(dest.split(os.sep)[:-1])
         #os.system(f'reg_aladin -ref {Fils[1]} -flo {ii} -aff {dest}_aff.txt')
         #os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
         #os.system(f'rm {dest}_aff.txt')
-        
-        os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -be 0.1')
+        try:
+            subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', ii, '-res', f'{dest}.nii', '-be', '0.1'], check=True)
+        except subprocess.CalledProcessError as e:
+            LOGGER.error(f'Error during coregistration: {e}')
 
         LOGGER.info(f'Coregistered: {ii}')
     # Coregister the first scan
@@ -119,13 +147,15 @@ def align(Dir):
     #os.system(f'reg_aladin -ref {Fils[1]} -flo {Fils[0]} -aff {dest}_aff.txt')
     #os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
     #os.system(f'rm {dest}_aff.txt')
-    
-    os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -be 0.1')
+    try:
+        subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', Fils[0], '-res', f'{dest}.nii', '-be', '0.1'], check=True)
+    except subprocess.CalledProcessError as e:
+        LOGGER.error(f'Error during coregistration: {e}')
     
     LOGGER.info(f'Coregistered: {Fils[0]}')
 
     # Copy reference to coregistered samples
-    os.system(f'cp {Fils[1]} {SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{Fils[1].split(os.sep)[-1]}')
+    subprocess.run(['cp', Fils[1], f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{Fils[1].split(os.sep)[-1]}'], check=True)
     LOGGER.info(f'Copied: {Fils[1]}')
 
     return 'completed'
@@ -139,6 +169,22 @@ if __name__ == '__main__':
         LOGGER.info(f'Running in test mode: {TEST}')
         LOGGER.info(f'Number of test sessions: {N_TEST}')
 
+    if args.dir_idx is not None:
+        with open(args.dir_list, 'r') as f:
+            Dirs = f.readlines()
+        Dirs = [x.strip() for x in Dirs]
+        if args.dir_idx >= len(Dirs):
+            LOGGER.error(f'Directory index {args.dir_idx} is out of range. Please provide a valid index.')
+            exit()
+        else:
+            Dir = [Dirs[args.dir_idx]]
+        if not os.path.exists(SAVE_DIR):
+            os.mkdir(SAVE_DIR)
+            LOGGER.warning(f'Created directory: {SAVE_DIR}')
+        LOGGER.info(f'Processing single directory: {Dir}')
+        align(Dir[0])
+        exit()
+
     if os.path.exists(SAVE_DIR):
         if len(os.listdir(SAVE_DIR)) > 0:
             LOGGER.error('Coregistration already complete.')
@@ -150,7 +196,7 @@ if __name__ == '__main__':
         os.mkdir(SAVE_DIR)
 
     # Load the data
-    Dirs = glob.glob('/FL_system/data/RAS/*')
+    Dirs = glob.glob(f'{BASE_PATH}/data/RAS/*')
     if TEST:
         Dirs = Dirs[:N_TEST]
     
