@@ -2,6 +2,11 @@ import time
 import logging
 import os
 
+from typing import Callable, List, Any
+from functools import partial
+from multiprocessing import cpu_count
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+
 def get_logger(name: str, save_dir: str = ''):
     # Check if save_dir exists
     if save_dir and save_dir[-1] != '/':
@@ -31,6 +36,65 @@ def get_logger(name: str, save_dir: str = ''):
 
     return logger
 
+def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List[Any], Parallel: bool=True, P_type: str='thread', N_CPUS: int=0, *args, **kwargs) -> List[Any]:
+    """Run a function with a list of items in parallel or sequentially.
+    Args:
+        LOGGER (logging.Logger): Logger object for logging.
+        target (Callable[..., Any]): The function to run.
+        items (List[Any]): List of items to process.
+        Parallel (bool): Whether to run in parallel or sequentially.
+        P_type (str): Type of parallelism ('thread' or 'process').
+        N_CPUS (int): Number of CPUs to use for parallel processing.
+        *args: Additional arguments to pass to the target function.
+        **kwargs: Additional keyword arguments to pass to the target function.
+    Returns:
+        List[Any]: List of results from the target function.
+    """
+
+    target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
+    if N_CPUS == 0:
+        N_CPUS = cpu_count() - 1
+    else:
+        N_CPUS = min(N_CPUS, cpu_count() - 1)
+            
+    # Debugging information
+    LOGGER.debug(f'Running {target_name} {" in parallel" if Parallel else "sequentially"}')
+    LOGGER.debug(f'Number of items: {len(items)}')
+
+    # Run the target function with a progress bar
+    results = []
+    if Parallel:
+        max_workers = min(32, 2 * N_CPUS)
+        LOGGER.debug(f'Using ThreadPoolExecutor with max_workers={max_workers}')
+        Executor = ThreadPoolExecutor if P_type == 'thread' else ProcessPoolExecutor
+        with Executor(max_workers=max_workers) as executor:
+            futures = [executor.submit(target, item, *args, **kwargs) for item in items]
+            for i, future in enumerate(futures):
+                try:
+                    LOGGER.debug(f'Waiting for future {i} to complete') 
+                    result = future.result(timeout=300)
+                    results.append(result)
+                    LOGGER.debug(f'Future {i} completed successfully')
+                except TimeoutError:
+                    LOGGER.error(f'Timeout error for item {i}')
+                except Exception as e:
+                    LOGGER.error(f'Error in parallel processing for item {i}: {e}')
+    else:
+        for item in items:
+            try:
+                result = target(item)
+                results.append(result)
+            except Exception as e:
+                LOGGER.error(f'Error in sequential processing: {e}')
+
+
+    LOGGER.debug(f'Completed {target_name} {" in parallel" if Parallel else "sequentially"}')
+    LOGGER.debug(f'Number of results: {len(results)}')
+
+    # Check if results is a list of tuples before returning zip(*results)
+    if results and isinstance(results[0], tuple):
+        return zip(*results)
+    return results
 
 class ProgressBar:
     # Class to create a progress bar

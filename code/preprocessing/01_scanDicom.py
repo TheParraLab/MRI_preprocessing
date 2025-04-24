@@ -12,7 +12,7 @@ from typing import Callable, List, Any
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 # Custom imports
-from toolbox import get_logger
+from toolbox import get_logger, run_function
 from DICOM import DICOMextract
 
 # Global variables for progress bar
@@ -47,8 +47,6 @@ if PROFILE:
 
 # Define necessary parameters
 LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
-DEBUG = 0
-
 
 #### Preprocessing | Step 1: Extract DICOM data ####
 # This script scans the input directory for dicom files and extracts necessary header information
@@ -60,61 +58,10 @@ DEBUG = 0
 # The extracted information will be saved to /data/Data_table.csv
 # NOTE: This script is expected to run inside of the provided control_system docker container and called through the available web interface
 
-#########################################
-## Parallelization and Progress functions
-#########################################
-
-def run_function(target: Callable[..., Any], items: List[Any], Parallel: bool=True, N_CPUS: int=0, *args, **kwargs) -> List[Any]:
-    """Run a function with a progress bar"""
-
-    target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
-    if N_CPUS == 0:
-        N_CPUS = cpu_count() - 1
-    else:
-        N_CPUS = min(N_CPUS, cpu_count() - 1)
-            
-    # Debugging information
-    LOGGER.debug(f'Running {target_name} {" in parallel" if Parallel else "sequentially"}')
-    LOGGER.debug(f'Number of items: {len(items)}')
-
-    # Run the target function with a progress bar
-    results = []
-    if Parallel:
-        max_workers = min(32, 2 * N_CPUS)
-        LOGGER.debug(f'Using ThreadPoolExecutor with max_workers={max_workers}')
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-            for i, future in enumerate(futures):
-                try:
-                    LOGGER.debug(f'Waiting for future {i} to complete') 
-                    result = future.result(timeout=300)
-                    results.append(result)
-                    LOGGER.debug(f'Future {i} completed successfully')
-                except TimeoutError:
-                    LOGGER.error(f'Timeout error for item {i}')
-                except Exception as e:
-                    LOGGER.error(f'Error in parallel processing for item {i}: {e}')
-    else:
-        for item in items:
-            try:
-                result = target(item)
-                results.append(result)
-            except Exception as e:
-                LOGGER.error(f'Error in sequential processing: {e}')
-
-
-    LOGGER.debug(f'Completed {target_name} {" in parallel" if Parallel else "sequentially"}')
-    LOGGER.debug(f'Number of results: {len(results)}')
-
-    # Check if results is a list of tuples before returning zip(*results)
-    if results and isinstance(results[0], tuple):
-        return zip(*results)
-    return results
-
 #############################
 ## Main functions
 #############################
-def extractDicom(f, debug=0):
+def extractDicom(f):
     try:
         LOGGER.debug(f'Extracting information for file: {f}')
         extract = DICOMextract(f)
@@ -147,7 +94,7 @@ def extractDicom(f, debug=0):
         LOGGER.error(f'Error extracting information for file: {f} | {e}')
         return None
 
-def find_all_dicom_dirs(directory, debug=0):
+def find_all_dicom_dirs(directory):
     """
     Find all directories containing DICOM files (.dcm) in the given directory.
 
@@ -174,11 +121,9 @@ def find_all_dicom_dirs(directory, debug=0):
 
     return dicom_dirs
 
-def findDicom(directory, debug=0):
+def findDicom(directory):
     # Find all dicom files in the directory through a recursive search
-    # Will only record the first file found for each directory if files have the same series number
-    # TODO: upgrade series detection to not look for the first 2 files but distant files
-    
+    # Will only record the first file found for each directory if files have the same series number    
     dicom_files = []
 
     for root, dirs, files in os.walk(directory):
@@ -205,14 +150,17 @@ def findDicom(directory, debug=0):
 #############################
 ## Main script
 #############################
-def main(out_name='Data_table.csv', SAVE_DIR='', SCAN_DIR='', idx=None, dir_list=''):
-    if idx is not None:
-        assert os.path.exists(dir_list), f'Directory list file {dir_list} does not exist'
-        SAVE_DIR = os.path.join(SAVE_DIR, 'tmp/')
-        with open(dir_list, 'r') as f:
-            Dirs = f.readlines()
-            Dir = Dirs[idx].strip()
-        SCAN_DIR = Dir
+def main(out_name='Data_table.csv', SAVE_DIR='', SCAN_DIR=''):
+    # Validate input directories
+    assert os.path.exists(SCAN_DIR), f'SAVE_DIR {SCAN_DIR} does not exist. Please provide a valid directory.'
+
+    # Create the save directory if it does not exist
+    if not os.path.exists(SAVE_DIR):
+        try:
+            os.makedirs(SAVE_DIR)
+            LOGGER.info(f'Created directory {SAVE_DIR}')
+        except Exception as e:
+            LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
 
     # Print the current configuration
     LOGGER.info('Starting scanDicom: Step 01')
@@ -222,67 +170,83 @@ def main(out_name='Data_table.csv', SAVE_DIR='', SCAN_DIR='', idx=None, dir_list
     if PROFILE:
         LOGGER.info(f'Profiling is enabled')
 
-    # Check if the Data_table.csv already exists
+    # Check if the output already exists
     if out_name in os.listdir(SAVE_DIR):
         LOGGER.error(f'{out_name} already exists. Skipping step 01')
         LOGGER.error(f'To re-run this step, delete the existing {out_name} file')
         exit()
-    if idx is None:
-        # Finding main directory and subdirectories
-        LOGGER.info('Finding all directories containing DICOM files')
-        dicom_dirs = find_all_dicom_dirs(SCAN_DIR, debug=DEBUG)
-        if TEST:
-            dicom_dirs = dicom_dirs[:N_TEST]
-            LOGGER.info(f'Running in test mode with {N_TEST} directories')
-    else:
-        with open(dir_list, 'r') as f:
-            Dirs = f.readlines()
-        Dir = Dirs[idx].strip()
-        dicom_dirs = find_all_dicom_dirs(Dir, debug=DEBUG)
 
+    # Finding main directory and subdirectories
+    LOGGER.info('Finding all directories containing DICOM files')
+    dicom_dirs = find_all_dicom_dirs(SCAN_DIR)
+    if TEST:
+        dicom_dirs = dicom_dirs[:N_TEST]
+        LOGGER.info(f'Running in test mode with {N_TEST} directories')
 
     # Scan the directories for dicom files
     LOGGER.info('Analyzing DICOM directories')
-    dicom_files = run_function(findDicom, dicom_dirs, Parallel=PARALLEL, debug=DEBUG)
+    dicom_files = run_function(LOGGER, findDicom, dicom_dirs, Parallel=PARALLEL, P_type='thread')
     dicom_files = [f for sublist in dicom_files for f in sublist] # Flatten the list of lists
     LOGGER.info(f'Found {len(dicom_files)} dicom files in the input directory')
     # Extract the dicom information
     LOGGER.info('Extracting information from dicom files')
-    INFO = run_function(extractDicom, dicom_files, Parallel=PARALLEL, debug=DEBUG)
+    INFO = run_function(LOGGER, extractDicom, dicom_files, Parallel=PARALLEL, P_type='thread')
     Data_table = pd.DataFrame(INFO) # Convert the extracted information to a pandas dataframe
     Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False) # Save the extracted information to a csv file
     LOGGER.info(f'DICOM information extraction completed and saved to {out_name}')
 
-    if idx is not None:
-        if idx == len(Dirs) - 1:
-            LOGGER.info('Last script, compiling results')
-            Tables = []
-            while len(Tables) < len(Dirs):
-                LOGGER.info('Waiting for all tables to be compiled')
-                time.sleep(5)
-                Tables = os.listdir(SAVE_DIR)
-            LOGGER.info('Compiling results')
-            Data_table = pd.DataFrame()
-            for table in Tables:
-                if table.endswith('.csv'):
-                    LOGGER.info(f'Compiling {table}')
-                    Data_table = pd.concat([Data_table, pd.read_csv(f'{SAVE_DIR}{table}')], ignore_index=True)
-            SAVE_DIR = SAVE_DIR.replace('tmp/', '')
-            Data_table.to_csv(f'{SAVE_DIR}Data_table.csv', index=False) # Save the extracted information to a csv file
-
 
 if __name__ == '__main__':
+    # Start the profiler if enabled
     if PROFILE:
         LOGGER.info('Profiling enabled')
         yappi.start()
         LOGGER.info('Starting main function')
 
+    # Create the scan directory when necessary
+    if not os.path.exists(SAVE_DIR):
+        # Use try-except to handle directory creation, in case parallel processes try to create the same directory
+        try:
+            os.makedirs(SAVE_DIR)
+            LOGGER.info(f'Created directory {SAVE_DIR}')
+        except Exception as e:
+            LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
+    
+    # If not running on an HPC
     if args.dir_idx is None:
         main(SCAN_DIR=SCAN_DIR, SAVE_DIR=SAVE_DIR)
+    # If running on an HPC
     else:
+        assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
+        # Save to temporary directory
+        SAVE_DIR = os.path.join(SAVE_DIR, 'tmp/')
+        with open(args.dir_list, 'r') as f:
+            Dirs = f.readlines()
+            Dir = Dirs[args.dir_idx].strip()
+        SCAN_DIR = Dir # Set the scan directory to the one specified by the index
         LOGGER.info(f'Processing single directory: {args.dir_idx}')
-        main(out_name=f'Data_table_{args.dir_idx}.csv', idx=args.dir_idx, dir_list=args.dir_list, SCAN_DIR=SCAN_DIR, SAVE_DIR=SAVE_DIR)
+        main(out_name=f'Data_table_{args.dir_idx}.csv', idx=args.dir_idx, SCAN_DIR=SCAN_DIR, SAVE_DIR=SAVE_DIR)
 
+        if args.dir_idx == len(Dirs) - 1:
+           LOGGER.info('Last script, compiling results')
+            Tables = []
+            while len(Tables) < len(Dirs):
+                LOGGER.info('Waiting for all tables to be compiled')
+                time.sleep(5)
+                Tables = os.listdir(SAVE_DIR)
+                Tables = [table for table in Tables if table.endswith('.csv')]
+            LOGGER.info('All tables present, compiling...')
+            Data_table = pd.DataFrame()
+            for table in Tables:
+                LOGGER.info(f'Compiling {table}')
+                Data_table = pd.concat([Data_table, pd.read_csv(f'{SAVE_DIR}{table}')], ignore_index=True)
+            SAVE_DIR = SAVE_DIR.replace('tmp/', '')
+            Data_table.to_csv(f'{SAVE_DIR}Data_table.csv', index=False)
+            LOGGER.info(f'Compiled results saved to {SAVE_DIR}Data_table.csv')
+            subprocess.run(['rm', '-r', f'{SAVE_DIR}tmp/'], check=True)
+            LOGGER.info(f'Deleted temporary directory {SAVE_DIR}tmp/')
+
+    # Finalize the profiler if enabled
     if PROFILE:
         LOGGER.info('Main function completed')
         yappi.stop()

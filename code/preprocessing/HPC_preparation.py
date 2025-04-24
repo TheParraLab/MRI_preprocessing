@@ -102,7 +102,7 @@ if __name__ == "__main__":
             if not os.path.exists(os.path.join(out_dir, 'tmp/')):
                 os.makedirs(os.path.join(out_dir, 'tmp/'))
                 print(f"Created tmp directory: {os.path.join(out_dir, 'tmp/')}")
-        case '02_parseDicom.py':
+        #case '02_parseDicom.py':
             
     # Get all bottom-most directories in the scan directory
     print('-' * 20)
