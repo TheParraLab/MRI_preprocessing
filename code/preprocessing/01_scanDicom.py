@@ -2,6 +2,7 @@
 import os
 import time
 import argparse
+import subprocess
 # Third-party imports
 import pydicom as pyd
 import numpy as np
@@ -15,10 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from toolbox import get_logger, run_function
 from DICOM import DICOMextract
 
-# Global variables for progress bar
-Progress = None
-manager = Manager()
-progress_queue = manager.Queue()
 
 # Define command line arguments
 parser = argparse.ArgumentParser(description='Extract DICOM data to build Data_table.csv')
@@ -39,37 +36,44 @@ N_TEST = args.test if TEST else 100 # Number of dicom directories to scan if TES
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
 N_CPUS = args.multi if PARALLEL else cpu_count()-1 # Number of cpus to use if PARALLEL is True
 PROFILE = args.profile # If True, the script will run with the profiler enabled
-# Profiler
+# Profiler imports
 if PROFILE:
     import yappi
     import pstats
     import io
 
-# Define necessary parameters
+# Generate logger
 LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
 
 #### Preprocessing | Step 1: Extract DICOM data ####
 # This script scans the input directory for dicom files and extracts necessary header information
 #
-# The extracted information is saved to /FL_system/data/Data_table.csv
-#
-# This step will begin by performing a recursive search for all dicom files in the input directory
-
-# The extracted information will be saved to /data/Data_table.csv
-# NOTE: This script is expected to run inside of the provided control_system docker container and called through the available web interface
+# The extracted information is saved to {SAVE_DIR}/Data_table.csv
 
 #############################
 ## Main functions
 #############################
-def extractDicom(f):
+def extractDicom(f: str):
+    """
+    Extracts DICOM information from a file.
+
+    Args:
+        f (str): Path to the DICOM file.
+
+    Returns:
+        dict: A dictionary containing extracted DICOM information.
+    """
+
     try:
         LOGGER.debug(f'Extracting information for file: {f}')
-        extract = DICOMextract(f)
+        extract = DICOMextract(f) # Initialize the DICOMextract class
 
+        # Extract the necessary information from the DICOM file
         result = {
             'PATH': f,
             'Orientation': extract.Orientation(),
             'ID': extract.ID(),
+            'Accession': extract.Accession(),
             'DATE': extract.Date(),
             'Series_desc': extract.Desc(),
             'Modality': extract.Modality(),
@@ -100,7 +104,6 @@ def find_all_dicom_dirs(directory):
 
     Args:
         directory (str): The root directory to search.
-        debug (int): Debug level for logging.
 
     Returns:
         List[str]: A list of directories containing DICOM files.
@@ -111,8 +114,7 @@ def find_all_dicom_dirs(directory):
         # Check if any file in the current directory ends with '.dcm'
         if any(file.endswith('.dcm') for file in files):
             dicom_dirs.append(root)
-            if debug > 0:
-                LOGGER.debug(f'Found DICOM files in {root}')
+            LOGGER.debug(f'Found DICOM files in {root}')
 
     if not dicom_dirs:
         LOGGER.warning(f'No directories containing DICOM files found in {directory}')
@@ -122,28 +124,40 @@ def find_all_dicom_dirs(directory):
     return dicom_dirs
 
 def findDicom(directory):
-    # Find all dicom files in the directory through a recursive search
-    # Will only record the first file found for each directory if files have the same series number    
+    """
+    Scan a directory for DICOM files and determine directory formatting through SeriesNumber.
+    For each observed series, only the first file is logged.
+
+    Args:
+        directory (str): The directory to scan for DICOM files.
+
+    Returns:
+        List[str]: A list of paths to the DICOM files found in the directory.
+    """
+
     dicom_files = []
 
+    # Walk through the directory and its subdirectories
     for root, dirs, files in os.walk(directory):
         found_series = []
+        # Check if any file in the current directory ends with '.dcm'
         for file in files:
             if file.endswith('.dcm'):
+                # If the file is a dicom file, read it and extract the SeriesNumber
                 file_path = os.path.join(root, file)
-                start_time = time.time()
+                #start_time = time.time()
                 try:
-                    data = pyd.dcmread(file_path, stop_before_pixels=True, force=True)
+                    data = pyd.dcmread(file_path, stop_before_pixels=True, force=True) # Read the DICOM file
                 except Exception as e:
                     LOGGER.error(f'Error reading file {file} in folder {root} | {e}')
                     continue
-                if debug > 0:
-                    LOGGER.debug(f'File {file} read in {time.time() - start_time:.2f} seconds')
-                if data.SeriesNumber in found_series:
+                #LOGGER.debug(f'File {file} read in {time.time() - start_time:.2f} seconds')
+                if data.SeriesNumber in found_series: # Skip if the series number has already been found
                     continue
                 else:
-                    dicom_files.append(os.path.join(root, file))
-                    found_series.append(data.SeriesNumber)       
+                    dicom_files.append(os.path.join(root, file)) # Append the file path to the list
+                    found_series.append(data.SeriesNumber) # Append the series number to the list
+            
         LOGGER.debug(f'{root} contains series {found_series} | {len(found_series)} series found')
     return dicom_files
 
@@ -203,7 +217,7 @@ if __name__ == '__main__':
         yappi.start()
         LOGGER.info('Starting main function')
 
-    # Create the scan directory when necessary
+    # Create the save directory when necessary
     if not os.path.exists(SAVE_DIR):
         # Use try-except to handle directory creation, in case parallel processes try to create the same directory
         try:
@@ -225,10 +239,10 @@ if __name__ == '__main__':
             Dir = Dirs[args.dir_idx].strip()
         SCAN_DIR = Dir # Set the scan directory to the one specified by the index
         LOGGER.info(f'Processing single directory: {args.dir_idx}')
-        main(out_name=f'Data_table_{args.dir_idx}.csv', idx=args.dir_idx, SCAN_DIR=SCAN_DIR, SAVE_DIR=SAVE_DIR)
+        main(out_name=f'Data_table_{args.dir_idx}.csv', SCAN_DIR=SCAN_DIR, SAVE_DIR=SAVE_DIR)
 
         if args.dir_idx == len(Dirs) - 1:
-           LOGGER.info('Last script, compiling results')
+            LOGGER.info('Last script, compiling results')
             Tables = []
             while len(Tables) < len(Dirs):
                 LOGGER.info('Waiting for all tables to be compiled')
@@ -243,8 +257,11 @@ if __name__ == '__main__':
             SAVE_DIR = SAVE_DIR.replace('tmp/', '')
             Data_table.to_csv(f'{SAVE_DIR}Data_table.csv', index=False)
             LOGGER.info(f'Compiled results saved to {SAVE_DIR}Data_table.csv')
-            subprocess.run(['rm', '-r', f'{SAVE_DIR}tmp/'], check=True)
-            LOGGER.info(f'Deleted temporary directory {SAVE_DIR}tmp/')
+            try:
+                subprocess.run(['rm', '-r', f'{SAVE_DIR}tmp/'], check=True)
+                LOGGER.info(f'Deleted temporary directory {SAVE_DIR}tmp/')
+            except Exception as e:
+                LOGGER.error(f'Error deleting temporary directory {SAVE_DIR}tmp/: {e}')
 
     # Finalize the profiler if enabled
     if PROFILE:
