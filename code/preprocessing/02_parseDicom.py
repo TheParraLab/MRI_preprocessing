@@ -4,6 +4,10 @@ import glob
 import threading
 import pickle
 import shutil
+import argparse
+import time
+import subprocess
+
 import pydicom as pyd
 import numpy as np
 import pandas as pd
@@ -14,23 +18,32 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
-from toolbox import ProgressBar, get_logger
+from toolbox import get_logger, run_function
 from DICOM import DICOMfilter, DICOMorder
 
 # Global variables for progress bar
 Progress = None
 manager = Manager()
 disk_space_lock = Lock()
-progress_queue = manager.Queue()
+
+# Set up parsing arguments
+parser = argparse.ArgumentParser(description='Parse DICOM data')
+parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
+parser.add_argument('--save_dir', type=str, default='/FL_system/data/', help='Directory to save the updated tables')
+parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
+parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
+parser.add_argument('--load_table', type=str, default='', help='Load table to use for the job')
+args = parser.parse_args()
+
 
 # Define necessary parameters
-SAVE_DIR = '/FL_system/data/' # Location to saveupdated tables and load the constructed Data_table.csv ['/FL_system/data/']
+SAVE_DIR = args.save_dir
 COMPUTED_FLAGS = ['slope', 'sub', 'subtract', 'secondary']
-DEBUG = 0
+PARALLEL = args.multi is not None
 TEST = False
-PROGRESS = False
 N_TEST = 25
-PARALLEL = True
+N_CPUS = args.multi if PARALLEL else cpu_count() - 1
+
 # Initialize logger
 LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
@@ -67,11 +80,6 @@ if PROFILE:
 ## Parallelization and Progress functions
 #########################################
 # Wrapper for progress updates
-def progress_wrapper(item, target, progress_queue, *args, **kwargs):
-    result = target(item, *args, **kwargs)
-    progress_queue.put((None, f'Processing'))
-    return result
-
 def check_disk_space(directory: str) -> bool:
     """Check if there is enough disk space available."""
     statvfs = os.statvfs(directory)
@@ -79,77 +87,6 @@ def check_disk_space(directory: str) -> bool:
     if available_space < DISK_SPACE_THRESHOLD*2:
         LOGGER.debug(f'Available space: {available_space}')
     return available_space > DISK_SPACE_THRESHOLD
-
-def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
-    """Run a function with a progress bar"""
-    # Initialize using a manager to allow for shared progress queue
-    manager = Manager()
-    progress_queue = manager.Queue()
-    target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
-
-    # Debugging information
-    LOGGER.debug(f'Running {target_name} with progress bar')
-    LOGGER.debug(f'Number of items: {len(items)}')
-    LOGGER.debug(f'Parallel: {Parallel}')
-
-    if PROGRESS:
-        # Initialize progress bar
-        Progress = ProgressBar(len(items))
-        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-        updater_thread.start()
-        
-        # Pass the progress queue to the target function
-        target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
-
-    # Run the target function with a progress bar
-    results = []
-    if Parallel:
-        with ProcessPoolExecutor(max_workers=cpu_count()-1) as executor:
-            futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-            for future in futures:
-                if stop_flag.is_set():
-                    LOGGER.info('stop flag is set, exiting')
-                    break
-                try:
-                    #result = future.result(timeout=600)
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    LOGGER.error(f'Error in parallel processing: {e}', exc_info = True)
-    else:
-        for item in items:
-            if stop_flag.is_set():
-                LOGGER.info('stop flag is set, exiting')
-                break
-            try:
-                result = target(item)
-                results.append(result)
-            except Exception as e:
-                LOGGER.error(f'Error in sequential processing: {e}', exec_info=True)
-
-    if PROGRESS:
-        # Close the progress bar
-        progress_queue.put(None)
-        print('\n')
-        updater_thread.join()
-
-    LOGGER.debug(f'Completed {target_name} with progress bar')
-    LOGGER.debug(f'Number of results: {len(results)}')
-
-    # Check if results is a list of tuples before returning zip(*results)
-    if results and isinstance(results[0], tuple):
-        return zip(*results)
-    return results
-
-def progress_updater(queue, progress_bar):
-    while True:
-        item = queue.get()
-        if item is None:
-            break
-        index, status = item
-        progress_bar.update(index, status)
-
-        queue.task_done()
 
 def save_progress(data, filename):
     """Save progress to a file."""
@@ -186,7 +123,7 @@ def orderDicom(Data_subset):
 def filterDicom(Data_subset):
     # Filter each subset of data based on the criteria
     Data_subset = Data_subset.reset_index(drop=True)
-    filter = DICOMfilter(Data_subset, debug=DEBUG, logger=LOGGER)
+    filter = DICOMfilter(Data_subset, logger=LOGGER, tmp_save=SAVE_DIR.replace('tmp/', 'tmp_data/'))
     filter.removeT2()
     if 'Type' in Data_subset.columns:
         filter.removeComputed(COMPUTED_FLAGS)
@@ -215,9 +152,16 @@ def agg_removed(removed_table: dict):
         Remove_Tables[key] = pd.concat([Remove_Tables[key], value], ignore_index=True)
 
 # Function to initialize the data
-def init_data():
+def init_data(load_table: str='', target: int=None):
     global Data_table
-    Data_table = pd.read_csv(f'{SAVE_DIR}Data_table.csv', low_memory=False)
+    Data_table = pd.read_csv(f'{load_table}', low_memory=False)
+    if target is not None:
+        try:
+            Data_table = Data_table[Data_table['ID'] == target]
+            LOGGER.info(f'Filtering data for target ID: {target}')
+        except Exception as e:
+            LOGGER.error(f'Error filtering data for target ID {target}: {e}')
+            raise
     # Create a unique identifier for each session/exam
     Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
     global Remove_Tables
@@ -259,23 +203,29 @@ def relocate(commands, relocations):
 #############################
 ## Main script
 #############################
-def main():
+def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=None):
     global Data_table, Remove_Tables
+
+    # Create the save directory if it does not exist
+    if not os.path.exists(SAVE_DIR):
+        try:
+            os.makedirs(SAVE_DIR)
+            LOGGER.info(f'Created directory: {SAVE_DIR}')
+        except Exception as e:
+            LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
+    
+    # Print the current configuration
     LOGGER.info('Starting parseDicom: Step 02')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
     LOGGER.info(f'COMPUTED_FLAGS: {COMPUTED_FLAGS}')
-    LOGGER.info(f'DEBUG: {DEBUG}')
     LOGGER.info(f'PARALLEL: {PARALLEL}')
-    if TEST:
-        LOGGER.info(f'TEST: {TEST}')
-        LOGGER.info(f'N_TEST: {N_TEST}')
     if PROFILE:
         LOGGER.info('Profiling enabled')
 
-    # Check if the Data_table_timing.csv already exists
-    if 'Data_table_timing.csv' in os.listdir(SAVE_DIR):
-        LOGGER.error('Data_table_timing.csv already exists')
-        LOGGER.error(f'To reprocess data, please remove Data_table_timing.csv from {SAVE_DIR}')
+    # Check if the output already exists
+    if out_name in os.listdir(SAVE_DIR):
+        LOGGER.error(f'{out_name} already exists. Skipping step 02')
+        LOGGER.error(f'To re-run this step, delete the existing {out_name} file')
         exit()
 
     progress = load_progress('parseDicom_progress.pkl')
@@ -284,7 +234,7 @@ def main():
         temporary_relocation = manager.list(progress)
     else:
         # Load in the data table
-        init_data()
+        init_data(args.load_table, target)
 
         # Get the unique identifiers
         Iden_uniq = np.unique(Data_table['SessionID'])
@@ -296,9 +246,9 @@ def main():
             LOGGER.debug('Running in parallel mode')
 
         # Split the data table into subsets based on the unique identifiers
-        Data_subsets = run_with_progress(split_table, Iden_uniq, Parallel=PARALLEL)
+        Data_subsets = run_function(LOGGER, split_table, Iden_uniq, Parallel=PARALLEL, P_type='process')
         # Filter the data based on the criteria defined in DICOMfilter and filterDicom
-        results, removed, temporary_relocation = run_with_progress(filterDicom, Data_subsets, Parallel=PARALLEL)
+        results, removed, temporary_relocation = run_function(LOGGER, filterDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
         temporary_relocation = list(temporary_relocation)
         temporary_relocation = manager.list([item for sublist in temporary_relocation for item in sublist])
 
@@ -308,7 +258,7 @@ def main():
         Data_table = pd.concat(results)
         Data_table = Data_table.reset_index(drop=True)
         Iden_uniq_after = Data_table['SessionID'].unique()
-        run_with_progress(agg_removed, removed, Parallel=False)
+        run_function(LOGGER, agg_removed, removed, Parallel=False)
         # Display the results of the filtering process
         LOGGER.info('Filtering Results:')
         LOGGER.info(f'Initial number of unique sessions: {len(Iden_uniq)}')
@@ -318,7 +268,7 @@ def main():
             LOGGER.info(f'Number of {key} scans removed: {len(value)}')
 
         # Order the data based on the criteria defined in DICOMorder and orderDicom
-        results = run_with_progress(orderDicom, results, Parallel=PARALLEL)
+        results = run_function(LOGGER, orderDicom, results, Parallel=PARALLEL, P_type='process')
         Data_table = pd.concat(results)
         Data_table = Data_table.reset_index(drop=True)
 
@@ -327,16 +277,16 @@ def main():
             if ID not in Iden_uniq_after:
                 LOGGER.debug(f'Session {ID} was completely removed')
                 fully_removed = pd.concat([fully_removed, PRE_TABLE[PRE_TABLE['SessionID'] == ID]], ignore_index=True)
-        fully_removed.to_csv(f'{SAVE_DIR}fully_removed.csv', index=False)
+        #fully_removed.to_csv(f'{SAVE_DIR}fully_removed.csv', index=False)
         LOGGER.info('Saving sequence information to updated file')
 
         # Save a .csv for each item in the full_removed dictionary
         if not os.path.exists(f'{SAVE_DIR}removal_log'):
             os.mkdir(f'{SAVE_DIR}removal_log')
-        run_with_progress(save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL)
+        run_function(LOGGER, save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL, P_type='process')
 
-        Data_table.to_csv(f'{SAVE_DIR}Data_table_timing.csv', index=False)
-        LOGGER.info('Timing information saved to Data_table_timing.csv')
+        Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False)
+        LOGGER.info(f'Timing information saved to {out_name}.csv')
     LOGGER.info(f'Number of temporary relocations: {len(temporary_relocation)}')
 
 
@@ -344,7 +294,7 @@ def main():
     #exit()
 
 
-    run_with_progress(partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL)
+    run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL, P_type='process')
 
     if not stop_flag.is_set():
         LOGGER.info('redirection complete without stop flag')
@@ -359,17 +309,72 @@ def main():
         LOGGER.info('checkpoint file saved')
 
 if __name__ == '__main__':
+    # Start the profiler if enabled
     if PROFILE:
         LOGGER.info('Profiling enabled')
         yappi.start()
         LOGGER.info('Starting main function')
-        main()
+    
+    # Create the save directory when necessary
+    if not os.path.exists(SAVE_DIR):
+        # Use try-except to handle directory creation, in case parallel processes try to create the same directory
+        try:
+            os.makedirs(SAVE_DIR)
+            LOGGER.info(f'Created directory: {SAVE_DIR}')
+        except Exception as e:
+            LOGGER.error(f'Error creating directory: {e}')
+    
+    # If not running on an HPC
+    if args.dir_idx is None:
+        main(SAVE_DIR=SAVE_DIR)
+    # If running on an HPC
+    else:
+        PARALLEL = False
+        assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
+        # Save to a temporary directory
+        SAVE_DIR = os.path.join(SAVE_DIR, 'tmp/')
+        with open(args.dir_list, 'r') as f:
+            items = f.readlines()
+            target = items[args.dir_idx].strip()
+        LOGGER.info(f'Processing single directory: {args.dir_idx}')
+        main(out_name=f'Data_table_timing_{args.dir_idx}.csv', SAVE_DIR=SAVE_DIR, target=target)
+
+        if args.dir_idx == len(items) - 1:
+            LOGGER.info('Last script, compiling results')
+            Tables = []
+            while len(Tables) < len(items):
+                LOGGER.info('Waiting for all tables to be compiled')
+                time.sleep(5)
+                Tables = os.listdir(SAVE_DIR)
+                Tables = [table for table in Tables if table.endswith('.csv')]
+            LOGGER.info('All tables present, compiling...')
+            Data_table = pd.DataFrame()
+            for table in Tables:
+                LOGGER.info(f'Compiling {table}')
+                try:
+                    tmp_table = pd.read_csv(os.path.join(SAVE_DIR, table))
+                    Data_table = pd.concat([Data_table, tmp_table], ignore_index=True)
+                except pd.errors.EmptyDataError:
+                    LOGGER.error(f'{table} appears to be empty, skipping...')
+                    continue
+                except Exception as e:
+                    LOGGER.error(f'Error compiling {table}: {e}')
+                    break
+            SAVE_DIR = SAVE_DIR.replace('tmp/', '')
+            Data_table.to_csv(f'{SAVE_DIR}Data_table_timing.csv', index=False)
+            LOGGER.info(f'Compiled results saved to {SAVE_DIR}Data_table_timing.csv')
+            try:
+                subprocess.run(['rm', '-r', f'{SAVE_DIR}tmp/'], check=True)
+                LOGGER.info(f'Deleted temporary directory {SAVE_DIR}tmp/')
+            except Exception as e:
+                LOGGER.error(f'Error deleting temporary directory {SAVE_DIR}tmp/: {e}')
+    
+    # Finalize the profiler if enabled
+    if PROFILE:
         LOGGER.info('Main function completed')
         yappi.stop()
         profile_output_path = 'step02_profile.yappi'
         LOGGER.info(f'Writing profile results to {profile_output_path}')
         yappi.get_func_stats().save(profile_output_path, type='pstat')
         LOGGER.info(f'Profile results saved to {profile_output_path}')
-    else:
-        main()
     exit()
