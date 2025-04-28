@@ -4,16 +4,21 @@ import os
 
 from typing import Callable, List, Any
 from functools import partial
-from multiprocessing import cpu_count
+from multiprocessing import cpu_count, Event
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
 def get_logger(name: str, save_dir: str = ''):
     # Check if save_dir exists
     if save_dir and save_dir[-1] != '/':
         save_dir += '/'
-    if save_dir and not os.path.exists(save_dir):
-        os.makedirs(save_dir)
     
+    if save_dir and not os.path.exists(save_dir):
+        # Use try for parallel creation of directories
+        try:
+            os.makedirs(save_dir)
+        except FileExistsError:
+            pass
+
     # Initialize logger
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
@@ -36,7 +41,7 @@ def get_logger(name: str, save_dir: str = ''):
 
     return logger
 
-def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List[Any], Parallel: bool=True, P_type: str='thread', N_CPUS: int=0, *args, **kwargs) -> List[Any]:
+def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List[Any], Parallel: bool=True, P_type: str='thread', N_CPUS: int=0, stop_flag: Event=None, *args, **kwargs) -> List[Any]:
     """Run a function with a list of items in parallel or sequentially.
     Args:
         LOGGER (logging.Logger): Logger object for logging.
@@ -70,6 +75,9 @@ def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List
         with Executor(max_workers=max_workers) as executor:
             futures = [executor.submit(target, item, *args, **kwargs) for item in items]
             for i, future in enumerate(futures):
+                if stop_flag and stop_flag.is_set():
+                    LOGGER.info('Stopping parallel processing due to stop flag')
+                    break
                 try:
                     LOGGER.debug(f'Waiting for future {i} to complete') 
                     result = future.result(timeout=300)
@@ -81,8 +89,11 @@ def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List
                     LOGGER.error(f'Error in parallel processing for item {i}: {e}')
     else:
         for item in items:
+            if stop_flag and stop_flag.is_set():
+                LOGGER.info('Stopping sequential processing due to stop flag')
+                break
             try:
-                result = target(item)
+                result = target(item, *args, **kwargs)
                 results.append(result)
             except Exception as e:
                 LOGGER.error(f'Error in sequential processing: {e}')
