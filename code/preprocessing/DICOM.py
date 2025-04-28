@@ -44,7 +44,15 @@ class DICOMextract:
         except Exception as e:
             self.log_error('Unable to read PatientID', e)
             return self.UNKNOWN
-        
+    
+    def Accession(self) -> str:
+        """Attempts to extract the accession number of the scan"""
+        try:
+            return self.metadata.AccessionNumber
+        except Exception as e:
+            self.log_error('Unable to read AccessionNumber', e)
+            return self.UNKNOWN
+    
     def Date(self) -> str:
         """Attempts to extract the date of the scan"""
         try:
@@ -205,22 +213,35 @@ class DICOMextract:
             return self.UNKNOWN
             
 class DICOMfilter():
-    def __init__(self, dicom_table: pd.DataFrame, logger: logging.Logger = None, debug: int = 0):
+    def __init__(self, dicom_table: pd.DataFrame, logger: logging.Logger = None, debug: int = 0, tmp_save: str='/FL_system/data/tmp/'):
         self.debug = debug
         self.logger = logger or logging.getLogger(__name__)
         self.dicom_table = dicom_table
         self.Session_ID = self.dicom_table['SessionID'].unique()
         self.SIDE = self.majorSide()
         self.removed = {}
+        self.tmp_save = tmp_save
         self.temporary_relocations = []
         assert self.Session_ID.size == 1, 'Multiple Session_IDs found in the table'
         self.logger.debug(f'Analyzing {self.Session_ID}')
+        # Add Valid column
+        self.dicom_table['Valid'] = 1
+
+    def update_valid(self, column: str):
+        """Updates the Valid column based on the provided column"""
+        if column in self.dicom_table.columns:
+            self.dicom_table['Valid'] = np.where(self.dicom_table[column] == 1, 0, 1)
+        else:
+            self.logger.warning(f'Column {column} not found in the table')
+        return self.dicom_table
 
     def removeT2(self):
         """Removes T2 scans from the table"""
         self.removed['T2'] = self.dicom_table[self.dicom_table['Modality'].isin(['T2', 'Unknown'])]
         self.dicom_table = self.dicom_table[self.dicom_table['Modality'].isin(['T1'])]
         self.logger.debug(f'Removed {len(self.removed["T2"])} T2 scans | {self.Session_ID}')
+        #self.dicom_table['Remove_T2'] = self.dicom_table['Modality'].apply(lambda x: 1 if x == 'T1' else 0)
+        #self.update_valid('Remove_T2')
         return self.dicom_table
     
     def removeImplants(self):
@@ -273,12 +294,12 @@ class DICOMfilter():
         self.N_SLICES = self.majorSlices()
         self.removed['Slices'] = self.dicom_table[self.dicom_table['NumSlices']%self.N_SLICES != 0]
         self.dicom_table = self.dicom_table[self.dicom_table['NumSlices']%self.N_SLICES == 0]
-
+        #self.dicom_table['Remove_Slices'] = np.where(self.dicom_table['NumSlices']%self.N_SLICES == 0, 0, 1)
         dicom_copy = self.dicom_table.copy()
         for i in range(len(dicom_copy)):
             if dicom_copy['NumSlices'].iloc[i] != self.N_SLICES:
                 self.logger.debug(f'Identified scan with multiple of {self.N_SLICES} slices | {self.Session_ID}')
-                splitter = DICOMsplit(dicom_copy.iloc[[i]], logger=self.logger, debug=self.debug)
+                splitter = DICOMsplit(dicom_copy.iloc[[i]], logger=self.logger, debug=self.debug, tmp_save=self.tmp_save)
                 self.temporary_relocations.append(splitter.temporary_relocations)
                 # remove the original row entry
                 self.dicom_table = self.dicom_table.drop(self.dicom_table[self.dicom_table['PATH'] == dicom_copy['PATH'].iloc[i]].index)
@@ -286,6 +307,7 @@ class DICOMfilter():
                 self.dicom_table = pd.concat([self.dicom_table, splitter.output_table], ignore_index=True)
                 self.logger.debug(f'Separated scan with {dicom_copy["NumSlices"].iloc[i]} slices into {len(splitter.output_table)} scans | {self.Session_ID}')
         self.logger.debug(f'Removed {len(self.removed["Slices"])} scans with a different number of slices | {self.Session_ID}')
+        #self.update_valid('Remove_Slices')
         return self.dicom_table
 
     def removeComputed(self, flags: list):
@@ -298,12 +320,13 @@ class DICOMfilter():
             removed.append(to_remove)
             # Filter out the identified rows from the dicom_table
             self.dicom_table = self.dicom_table[~self.dicom_table.index.isin(to_remove.index)]
-        
+            # Flag computed scans
+            #self.dicom_table['Remove_Computed'] = np.where(self.dicom_table['Type'].str.contains(flag.upper(), na=False), 1, 0)
         # Concatenate all removed rows into a single DataFrame
         self.removed['Computed'] = pd.concat(removed, ignore_index=True)
         
         self.logger.debug(f'Removed {len(self.removed["Computed"])} scans with computed descriptions | {self.Session_ID}')
-        
+        #self.update_valid('Remove_Computed')
         return self.dicom_table
 
     def removeTimes(self, filter_columns: list):
@@ -324,7 +347,7 @@ class DICOMfilter():
         return self.dicom_table
 
 class DICOMsplit():
-    def __init__(self, dicom_table: pd.DataFrame,  logger: logging.Logger = None, debug: int = 0):
+    def __init__(self, dicom_table: pd.DataFrame,  logger: logging.Logger = None, debug: int = 0, tmp_save: str='/FL_system/data/tmp/'):
         '''
         This class is used to split a single directory with multiple scans into multiple directories of a single scan each.
         The received DataFrame should contain a single Session_ID and directory
@@ -335,7 +358,7 @@ class DICOMsplit():
         # Check if the DataFrame is empty
         if dicom_table.empty:
             raise ValueError('The provided dicom_table is empty.')
-        self.tmp_save = '/FL_system/data/tmp/'
+        self.tmp_save = tmp_save
         if not os.path.exists(self.tmp_save):
             os.makedirs(self.tmp_save)
         self.debug = debug
