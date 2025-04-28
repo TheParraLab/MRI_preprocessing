@@ -6,13 +6,16 @@ import argparse
 import subprocess
 import re
 
+import pandas as pd
+
 # input arguments
 parser = argparse.ArgumentParser(description='Prepare for running jobs on HPC')
-parser.add_argument('--scan_dir', type=str, required=True, help='Directory containing scans to process')
+parser.add_argument('--scan_dir', type=str, required=False, help='Directory containing scans to process')
 parser.add_argument('--out_dir', type=str, required=True, help='Directory to save the output')
 parser.add_argument('--script', type=str, required=True, help='Script path to run on each scan')
 parser.add_argument('--env', type=str, required=True, help='Pyenv path to use for the script')
 parser.add_argument('--partition', type=str, default="", help='Partition to use for the job')
+parser.add_argument('--load_table', type=str, default="", help='Load table to use for the job')
 #parser.add_argument('--test', nargs='?', type=int, const=10, help='Number of test directories to process')
 
 # Get the arguments
@@ -58,13 +61,13 @@ def get_cluster_resources(partition=""):
     except subprocess.CalledProcessError:
         return None, None
 
-def write_dir_list(subdirs, filename):
+def write_dir_list(items: list, filename: str):
     with open(filename, 'w') as f:
-        for subdir in subdirs:
-            f.write(f"{subdir}\n")
+        for item in items:
+            f.write(f"{item}\n")
     print(f"Directory list written to {filename}")
 
-def create_job_script(scan_dir, script, dir_list):
+def create_job_script(scan_dir, script, dir_list, extra_flags="", sbatch_args=""):
     job_name = os.path.basename(script).split('.')[0]
     if '05_alignScans.py' in script:
         # Create a directory list file
@@ -78,43 +81,56 @@ def create_job_script(scan_dir, script, dir_list):
 #SBATCH --error={working_dir}/logs/{job_name}_%j_%A_%a.err
 #SBATCH --cpus-per-task={cpus_per_job}
 #SBATCH --mem={mem_per_job}G
-#SBATCH --array=0-{len(subdirs)-1}
+#SBATCH --array=0-{N-1}
 
 source {env}
 {niftyreg_inclusion}
 
-python3 {script} --dir_idx ${{SLURM_ARRAY_TASK_ID}} --dir_list {dir_list} --save_dir {out_dir}
+python3 {script} --dir_idx ${{SLURM_ARRAY_TASK_ID}} --dir_list {dir_list} --save_dir {out_dir} {extra_flags}
 """
     print(job_script)
     return job_script
 
 if __name__ == "__main__":
     # Check if the scan directory exists
-    if not os.path.exists(scan_dir):
-        raise FileNotFoundError(f"Scan directory {scan_dir} does not exist.")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
         print(f"Created output directory: {out_dir}")
     
     # Perform script-specific processing and checks
-    match script:
+    extra_flags = ""
+    sbatch_args = ""
+    match script.split(os.sep)[-1]:
         case '01_scanDicom.py':
+            print('Input script: 01_scanDicom.py')
+            if not os.path.exists(scan_dir):
+                raise FileNotFoundError(f"Scan directory {scan_dir} does not exist.")
             if not os.path.exists(os.path.join(out_dir, 'tmp/')):
                 os.makedirs(os.path.join(out_dir, 'tmp/'))
                 print(f"Created tmp directory: {os.path.join(out_dir, 'tmp/')}")
-        #case '02_parseDicom.py':
-            
-    # Get all bottom-most directories in the scan directory
-    print('-' * 20)
-    subdirs = os.listdir(scan_dir)
-    subdirs = [os.path.join(scan_dir, d) for d in subdirs]
-    if len(subdirs) <= 10:
-        print('WARNING | Less than 10 directories found. Check the scan directory.')
-    else:
-        print(f"Found {len(subdirs)} directories in {scan_dir}")
-    write_dir_list(subdirs, os.path.join(working_dir, 'list.txt'))
-    print('-' * 20)
+            # Compile a list of directories to process
+            print('-' * 20)
+            subdirs = os.listdir(scan_dir)
+            subdirs = [os.path.join(scan_dir, d) for d in subdirs]
+            N = len(subdirs)
+            if len(subdirs) <= 10:
+                print('WARNING | Less than 10 directories found. Check the scan directory.')
+            else:
+                print(f"Found {N} directories in {scan_dir}")
+            write_dir_list(subdirs, os.path.join(working_dir, 'list.txt'))
+            print('-' * 20)
 
+        case '02_parseDicom.py':
+            print('Input script: 02_parseDicom.py')
+            # Compile a list of IDs to process
+            print('-' * 20)
+            Input_table = pd.read_csv(args.load_table, sep=',')
+            IDs = Input_table['ID'].unique()
+            N = len(IDs)
+            print(f'Found {N} unique IDs in {args.load_table}')
+            write_dir_list(IDs, os.path.join(working_dir, 'list.txt'))
+            print('-' * 20)
+            extra_flags = f'--load_table {args.load_table}'
     # Get cluster-wide idle CPUs and max mem per node
     print('-' * 20)
     idle_cpus, max_mem_mb = get_cluster_resources(partition)
@@ -123,9 +139,9 @@ if __name__ == "__main__":
 
     print(f"Idle CPUs: {idle_cpus}, Max Memory per Node: {max_mem_mb} MB")
     mem_per_job = min(16000, max_mem_mb) // 1024  # Convert to GB
-    cpus_per_job = 1 if idle_cpus >= len(subdirs) else max(1, idle_cpus // len(subdirs))
+    cpus_per_job = 1 if idle_cpus >= N else max(1, idle_cpus // len(subdirs))
     print(f"CPUs per job: {cpus_per_job}, Memory per job: {mem_per_job} GB")
-    print(f"Total jobs: {len(subdirs)}")
+    print(f"Total jobs: {N}")
     print('-' * 20)
 
     # Create the job script
@@ -133,7 +149,7 @@ if __name__ == "__main__":
     # Submit the job script
     job_script_path = os.path.join(working_dir, 'send_job.slurm')
     with open(job_script_path, 'w') as f:
-        f.write(create_job_script(scan_dir, script, os.path.join(working_dir, 'list.txt')))
+        f.write(create_job_script(scan_dir, script, os.path.join(working_dir, 'list.txt'), extra_flags))
     print(f"Job script written to {job_script_path}")
     print('-' * 20)
 
