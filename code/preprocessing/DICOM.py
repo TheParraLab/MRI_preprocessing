@@ -521,6 +521,18 @@ class DICOMorder():
             if self.debug > 0:
                 print(f'Found a single unknown value for {self.dicom_table["SessionID"].unique()}')
                 print(f'Assuming this is a pre scan')
+        elif len(unkonwn_rows) == 2:
+            print(f'Found two unknown values for {self.dicom_table["SessionID"].unique()}')
+            print(f'Analyzing to see if either row includes "FS" in the description')
+            for i in range(len(unknown_rows)):
+                if 'FS' not in unknown_rows['Series_desc'].iloc[i]:
+                    if self.debug > 0:
+                        print(f'Found a FS scan for {self.dicom_table["SessionID"].unique()}')
+                        print(f'Assuming this is a pre scan')
+                    # remove the other row
+                    unknown_rows = unknown_rows.drop(unknown_rows.index[i])
+                    break
+            # check if one of the unknown values is a FS scan
         # return index of unknown row
         return unknown_rows.index              
 
@@ -540,14 +552,21 @@ class DICOMorder():
         pre_value = series_numbers.iloc[0] - 1
 
         pre_indx = self.dicom_table[self.dicom_table['Series'] == pre_value].index
-        if len(pre_indx) == 0:
-            if self.debug > 0:
-                print(f'No pre scan found for {self.dicom_table["SessionID"].unique()}')
-                print(f'WARNING: REMOVING SESSION')
-                pre_indx = self.alternate_pre()
-            #clear dicom table
+        if len(pre_indx) == 1:
+            indx = np.append(indx, pre_indx)
+            self.dicom_table = self.dicom_table.loc[indx]
             return self.dicom_table
+        elif len(pre_indx) == 0:
+            print(f'No pre scan found for {self.dicom_table["SessionID"].unique()}')
+            print(f'Attempting alternate pre scan detection')
+            pre_indx = self.alternate_pre()
         
-        indx = np.append(indx, pre_indx)
-        self.dicom_table = self.dicom_table.loc[indx]
-        return self.dicom_table
+        if len(pre_idx) == 1:
+            indx = np.append(indx, pre_indx)
+            self.dicom_table = self.dicom_table.loc[indx]
+            return self.dicom_table
+        else:
+            print('Alternative pre scan detection failed')
+            print('No pre scan found')
+            print('Returning empty dicom table')
+            self.dicom_table = pd.DataFrame()
