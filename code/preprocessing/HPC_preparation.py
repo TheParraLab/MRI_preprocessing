@@ -5,6 +5,7 @@ import shutil
 import argparse
 import subprocess
 import re
+import pickle
 
 import pandas as pd
 
@@ -16,7 +17,7 @@ parser.add_argument('--script', type=str, required=True, help='Script path to ru
 parser.add_argument('--env', type=str, required=True, help='Pyenv path to use for the script')
 parser.add_argument('--partition', type=str, default="", help='Partition to use for the job')
 parser.add_argument('--load_table', type=str, default="", help='Load table to use for the job')
-#parser.add_argument('--test', nargs='?', type=int, const=10, help='Number of test directories to process')
+parser.add_argument('--test', nargs='?', type=int, const=10, help='Number of test directories to process')
 
 # Get the arguments
 args = parser.parse_args()
@@ -31,6 +32,34 @@ env = args.env
 if env.split('/')[-1] != 'activate':
     env = os.path.join(env, 'bin', 'activate')
 partition = args.partition
+def limit_array_size(items):
+    # Run the scontrol command and get the output
+    output = subprocess.check_output(["scontrol", "show", "config"], text=True)
+
+    # Find the MaxArraySize value in the output
+    max_array_size = None
+    for line in output.splitlines():
+        if "MaxArraySize" in line:
+            max_array_size = int(line.split("=")[1].strip())
+            break
+            
+    print(f"MaxArraySize: {max_array_size}")
+    print('Limiting array size to received limit')
+    # Limit the size of the array to the maximum value
+    if len(items) > max_array_size:
+        items_out = []
+        groupings = len(items) // max_array_size
+        # Creating max_array_size sublists of items
+        for i in range(0,max_array_size):
+            if i < max_array_size - 1:
+                items_out.append(items[i*groupings:(i+1)*groupings])
+            else:
+                items_out.append(items[i*groupings:])
+    else:
+        items_out = items
+    print(f"Number of items: {len(items_out)}")
+    return items_out
+
 
 def get_cluster_resources(partition=""):
     cmd = ["sinfo", "--Format=partition,cpusstate,memory", "--noheader"]
@@ -62,9 +91,11 @@ def get_cluster_resources(partition=""):
         return None, None
 
 def write_dir_list(items: list, filename: str):
-    with open(filename, 'w') as f:
-        for item in items:
-            f.write(f"{item}\n")
+    #with open(filename, 'w') as f:
+    #    for item in items:
+    #        f.write(f"{item}\n")
+    with open(filename, 'wb') as f:
+        pickle.dump(items, f)
     print(f"Directory list written to {filename}")
 
 def create_job_script(scan_dir, script, dir_list, extra_flags="", sbatch_args=""):
@@ -131,6 +162,46 @@ if __name__ == "__main__":
             write_dir_list(IDs, os.path.join(working_dir, 'list.txt'))
             print('-' * 20)
             extra_flags = f'--load_table {args.load_table}'
+
+
+        case '04_saveRAS.py':
+            print('Input script: 04_saveRAS.py')
+            # Compile a list of IDs to process
+            if not os.path.exists(scan_dir):
+                raise FileNotFoundError(f"Scan directory {scan_dir} does not exist.")
+            if not os.path.exists(os.path.join(out_dir, 'tmp/')):
+                os.makedirs(os.path.join(out_dir, 'tmp/'))
+                print(f"Created tmp directory: {os.path.join(out_dir, 'tmp/')}")
+            # Compile a list of directories to process
+            print('-' * 20)
+            subdirs = os.listdir(scan_dir)
+            subdirs = [os.path.join(scan_dir, d) for d in subdirs]
+            print(f"Found {len(subdirs)} directories in {scan_dir}")
+            # Limit the size of the array to the maximum value
+            subdirs = limit_array_size(subdirs)
+            N = len(subdirs)
+            print(f'Proceeding with {N} number of jobs')
+            write_dir_list(subdirs, os.path.join(working_dir, 'list.txt'))
+            print('-' * 20)
+
+        case '05_alignScans.py':
+            print('Input script: 05_alignScans.py')
+            # Compile a list of directories to process
+            print('-' * 20)
+            if not os.path.exists(scan_dir):
+                raise FileNotFoundError(f"Scan directory {scan_dir} does not exist.")
+\
+            subdirs = os.listdir(scan_dir)
+            subdirs = [os.path.join(scan_dir, d) for d in subdirs]
+            subdirs = limit_array_size(subdirs)
+            N = len(subdirs)
+            if len(subdirs) <= 10:
+                print('WARNING | Less than 10 directories found. Check the scan directory.')
+            else:
+                print(f"Found {N} directories in {scan_dir}")
+            write_dir_list(subdirs, os.path.join(working_dir, 'list.txt'))
+            print('-' * 20)
+    
     # Get cluster-wide idle CPUs and max mem per node
     print('-' * 20)
     idle_cpus, max_mem_mb = get_cluster_resources(partition)
