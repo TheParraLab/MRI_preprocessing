@@ -333,9 +333,9 @@ if __name__ == '__main__':
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
         # Save to a temporary directory
         SAVE_DIR = os.path.join(SAVE_DIR, 'tmp/')
-        with open(args.dir_list, 'r') as f:
-            items = f.readlines()
-            target = items[args.dir_idx].strip()
+        with open(args.dir_list, 'rb') as f:
+            items = pickle.load(f)
+        target = items[args.dir_idx].strip()
         LOGGER.info(f'Processing single directory: {args.dir_idx}')
         main(out_name=f'Data_table_timing_{args.dir_idx}.csv', SAVE_DIR=SAVE_DIR, target=target)
 

@@ -170,8 +170,8 @@ if __name__ == '__main__':
         LOGGER.info(f'Number of test sessions: {N_TEST}')
 
     if args.dir_idx is not None:
-        with open(args.dir_list, 'r') as f:
-            Dirs = f.readlines()
+        with open(args.dir_list, 'rb') as f:
+            Dirs = pickle.load(f)
         Dirs = [x.strip() for x in Dirs]
         if args.dir_idx >= len(Dirs):
             LOGGER.error(f'Directory index {args.dir_idx} is out of range. Please provide a valid index.')
