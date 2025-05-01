@@ -1,6 +1,8 @@
 import os
 import pydicom as pyd
 import glob
+import argparse
+import pickle
 import json
 import numpy as np
 import pandas as pd
@@ -13,19 +15,31 @@ from functools import partial
 # Custom Imports
 from toolbox import ProgressBar, get_logger
 
+# Define command line arguments
+parser = argparse.ArgumentParser(description='Convert Nifti files to RAS orientation')
+parser.add_argument('--scan_dir', type=str, required=False, help='Directory containing scans to process')
+parser.add_argument('--save_dir', type=str, required=True, help='Directory to save the output')
+parser.add_argument('--dir_idx', type=int, required=True, help='Index of the directory to process')
+parser.add_argument('--dir_list', type=str, default='list.txt', help='List of directories to process')
+parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
+parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
+args = parser.parse_args()
+
 # Global variables for progress bar
 Progress = None
 manager = Manager()
 progress_queue = manager.Queue()
-LOGGER = get_logger('04_saveRAS', '/FL_system/data/logs/')
 
 # Other global variables
-LOAD_DIR = '/FL_system/data/nifti/'
-SAVE_DIR = '/FL_system/data/RAS/'
+LOAD_DIR = args.scan_dir #'/FL_system/data/nifti/'
+SAVE_DIR = args.save_dir #'/FL_system/data/RAS/'
 TEST = False
 N_TEST = 40
-PARALLEL = True
+PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
+PROFILE = args.profile # If True, the script will run with the profiler enabled
 PROGRESS = False
+
+LOGGER = get_logger('04_saveRAS', f'{SAVE_DIR}/logs/')
 
 debug = 0
 #### Preprocessing | Step 4: Save RAS Nifti Files ####
@@ -91,16 +105,23 @@ def progress_updater(queue, progress_bar):
 
         queue.task_done()
 
-def RAS_convert(dir):
+def RAS_convert(dir: str, save_path=SAVE_DIR):
     # This function converts all nifti files in the input directory to RAS orientation
     # It saves the RAS files in the output directory
     Fils = glob.glob(f'{dir}/*.nii')
+    LOGGER.debug(f'Found {len(Fils)} files in {dir}')
     Fils.sort()
+    save_path = os.path.join(save_path, dir.split(os.sep)[-1])
+    if not os.path.exists(f'{save_path}'):
+        LOGGER.debug(f'Creating directory: {save_path}')
+        os.mkdir(f'{save_path}')
     for ii in Fils:
         if ii.endswith('00a.nii'):
             LOGGER.debug(f'{ii} | found 00a.nii, attempting to isolate FS sample...')
             json_00 = json.load(open(f'{dir}/00.json'))
             json_00a = json.load(open(f'{dir}/00a.json'))
+            LOGGER.debug(f'{dir} | 00_desc: {json_00["SeriesDescription"]}')
+            LOGGER.debug(f'{dir} | 00a_desc: {json_00a["SeriesDescription"]}')  
             if 'FS' in json_00['SeriesDescription']:
                 LOGGER.debug(f'{dir} | Found FS in 00')
                 Fils.remove(f'{dir}/00a.nii')
@@ -109,7 +130,7 @@ def RAS_convert(dir):
                 Fils.remove(f'{dir}/00.nii')
             else:
                 LOGGER.error(f'{dir} | No FS found in 00 or 00a')
-    
+                return
     for ii in Fils:
         LOGGER.debug(f'Processing: {ii}')
 
@@ -142,14 +163,13 @@ def RAS_convert(dir):
     
         # Create a new Nifti1Image with the RAS data and updated affine
         ras_img = nib.Nifti1Image(ras_data, ras_affine)
-        save_path = ii.replace('/data/nifti', '/data/RAS')
-        LOGGER.debug(f'{ii} | Saving: {save_path}')
-        if not os.path.exists(f'{SAVE_DIR}{dir.split(os.sep)[-1]}'):
-            LOGGER.debug(f'Creating directory: {SAVE_DIR}{dir.split(os.sep)[-1]}')
-            os.mkdir(f'{SAVE_DIR}{dir.split(os.sep)[-1]}')
-        if save_path.endswith('00a.nii'):
-            save_path = save_path.replace('00a.nii', '00.nii')
-        nib.save(ras_img,save_path.replace('.nii', '_RAS.nii'))
+        #save_path = ii.replace('/data/nifti', '/data/RAS')
+        if ii.endswith('00a.nii'):
+            ii = ii.replace('00a.nii', '00.nii')
+        ii = ii.replace('.nii', '_RAS.nii')
+        nib.save(ras_img,os.path.join(save_path,ii.split(os.sep)[-1]))
+        LOGGER.debug(f'{ii} | Saving: {os.path.join(save_path,ii.split(os.sep)[-1])}')
+
     return 'completed'
 
 if __name__ == '__main__':
@@ -161,24 +181,41 @@ if __name__ == '__main__':
         LOGGER.info(f'TEST: {TEST}')
         LOGGER.info(f'N_TEST: {N_TEST}')
 
-    Data_table = pd.read_csv('/FL_system/data/Data_table.csv')
-    Data_table_timing = pd.read_csv('/FL_system/data/Data_table_timing.csv')
+    if not os.path.exists(SAVE_DIR):
+        try:
+            os.mkdir(SAVE_DIR)
+            LOGGER.info(f'Created directory: {SAVE_DIR}')
+        except Exception as e:
+            LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
     
-    if os.path.exists(SAVE_DIR) and len(os.listdir(SAVE_DIR)) > 0:
-        LOGGER.error('RAS directory already exists')
-        LOGGER.error('To reprocess data, please remove RAS directory from /FL_system/data/')
-        exit()
-    elif os.path.exists(SAVE_DIR):
-        LOGGER.warning('RAS directory already exists, but is empty')
-        LOGGER.warning('Continuing with processing')
+    # If not running on an HPC
+    if args.dir_idx is None:
+        Dirs = glob.glob(f'{LOAD_DIR}*')
+        if TEST:
+            Dirs = Dirs[:N_TEST]
+        run_with_progress(RAS_convert, Dirs, Parallel=PARALLEL)
     else:
-        LOGGER.info('Creating RAS directory')
-        os.mkdir(SAVE_DIR)
+        assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
+        # Save to temporary directory
+        with open(args.dir_list, 'rb') as f:
+            Dirs = pickle.load(f)
+        Dir = Dirs[args.dir_idx]
+        # Make Dir list if not
+        if type(Dir) == str:
+            LOGGER.debug(f'Converting Dir to list: {Dir}')
+            Dir = [Dir]
+        LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
+        run_with_progress(RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR)
 
-    Dirs = glob.glob(f'{LOAD_DIR}*')
-    if TEST:
-        Dirs = Dirs[:N_TEST]
-    run_with_progress(RAS_convert, Dirs, Parallel=PARALLEL)
+        if args.dir_idx == len(Dirs) - 1:
+            LOGGER.info('Last script, compiling results')
+
+
+    #Data_table = pd.read_csv('/FL_system/data/Data_table.csv')
+    #Data_table_timing = pd.read_csv('/FL_system/data/Data_table_timing.csv')
+    
+
+
     LOGGER.info('Completed saveRAS: Step 04')
     LOGGER.info('All files saved to RAS directory')
     LOGGER.info('Exiting saveRAS: Step 04')
