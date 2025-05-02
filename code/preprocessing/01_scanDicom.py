@@ -3,15 +3,12 @@ import os
 import time
 import argparse
 import subprocess
+import pickle
 # Third-party imports
 import pydicom as pyd
-import numpy as np
 import pandas as pd
 # Function imports
-from multiprocessing import Manager, cpu_count
-from typing import Callable, List, Any
-from functools import partial
-from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import cpu_count
 # Custom imports
 from toolbox import get_logger, run_function
 from DICOM import DICOMextract
