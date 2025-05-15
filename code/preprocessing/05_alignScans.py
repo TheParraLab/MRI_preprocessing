@@ -2,6 +2,7 @@ import os
 import argparse
 import pydicom as pyd
 import glob
+import pickle
 import numpy as np
 import pandas as pd
 import nibabel as nib
@@ -27,6 +28,7 @@ parser.add_argument('--save_dir', type=str, default=f'{BASE_PATH}/data/coreg/', 
 parser.add_argument('--multi', '-m', action='store_true', help='Use multiprocessing')
 parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
 parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
+parser.add_argument('--prune', '-p', action='store_true', help='Enable the deletion of the original scans once aligned')
 args = parser.parse_args()
 
 LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
@@ -39,6 +41,7 @@ TEST = False
 N_TEST = 40
 PARALLAL = args.multi
 PROGRESS = False
+PRUNE = args.prune
 
 #### Preprocessing | Step 5: Align Scans ####
 # This script aims to coregister all session-specific scans to the 01_01 scan
@@ -116,6 +119,9 @@ def align(Dir):
     
     Fils = glob.glob(f'{Dir}/*_RAS.nii')
     Fils.sort()
+    if len(Fils) < 3:
+        LOGGER.error(f'Not enough scans in {Dir}. Found {len(Fils)} scans. Skipping.')
+        return 'Not enough scans'
     LOGGER.info(f'Processing {Dir}')
     if not os.path.exists(f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}'):
         os.mkdir(f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}')
@@ -148,6 +154,7 @@ def align(Dir):
     #os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
     #os.system(f'rm {dest}_aff.txt')
     try:
+        LOGGER.debug(f'Running: reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -be 0.1')
         subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', Fils[0], '-res', f'{dest}.nii', '-be', '0.1'], check=True)
     except subprocess.CalledProcessError as e:
         LOGGER.error(f'Error during coregistration: {e}')
@@ -168,37 +175,73 @@ if __name__ == '__main__':
     if TEST:
         LOGGER.info(f'Running in test mode: {TEST}')
         LOGGER.info(f'Number of test sessions: {N_TEST}')
-
-    if args.dir_idx is not None:
+    if PRUNE:
+        LOGGER.warning(f'Pruning enabled: {PRUNE}')
+    
+    if not os.path.exists(SAVE_DIR):
+        try:
+            os.mkdir(SAVE_DIR)
+            LOGGER.info(f'Created directory: {SAVE_DIR}')
+        except Exception as e:
+            LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
+    
+    # If not running on an HPC
+    if args.dir_idx is None:
+        Dirs = glob.glob(f'{LOAD_DIR}*')
+        if TEST:
+            Dirs = Dirs[:N_TEST]
+        LOGGER.info(f'Processing {len(Dirs)} directories')
+        run_with_progress(align, Dirs, Parallel=PARALLAL)
+    else:
+        # if running on an HPC
+        assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
         with open(args.dir_list, 'rb') as f:
             Dirs = pickle.load(f)
-        Dirs = [x.strip() for x in Dirs]
-        if args.dir_idx >= len(Dirs):
-            LOGGER.error(f'Directory index {args.dir_idx} is out of range. Please provide a valid index.')
-            exit()
-        else:
-            Dir = [Dirs[args.dir_idx]]
-        if not os.path.exists(SAVE_DIR):
-            os.mkdir(SAVE_DIR)
-            LOGGER.warning(f'Created directory: {SAVE_DIR}')
-        LOGGER.info(f'Processing single directory: {Dir}')
-        align(Dir[0])
-        exit()
+        Dir = Dirs[args.dir_idx]
+        # Make Dir list if not
+        if type(Dir) == str:
+            LOGGER.debug(f'Converting Dir to list: {Dir}')
+            Dir = [Dir]
+        LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
+        run_with_progress(align, Dir, Parallel=PARALLAL)
+        Dirs = Dir
+    
+    if PRUNE:
+        LOGGER.info(f'Pruning original scans')
+        for ii in Dirs:
+            if os.path.exists(ii):
+                try:
+                    os.system(f'rm -rf {ii}')
+                    LOGGER.info(f'Deleted: {ii}')
+                except Exception as e:
+                    LOGGER.error(f'Error deleting directory {ii}: {e}')
+            else:
+                LOGGER.warning(f'Directory {ii} does not exist. Skipping deletion.')
+    
+    LOGGER.info('Completed alignScans: Step 05')
+    LOGGER.info('All files saved to coreg directory')
+    LOGGER.info('Exiting alignScans: Step 05')
 
-    if os.path.exists(SAVE_DIR):
-        if len(os.listdir(SAVE_DIR)) > 0:
-            LOGGER.error('Coregistration already complete.')
-            LOGGER.error('To reprocess data, please remove /FL_system/data/coreg/ or remove its contents')
-            exit()
-        else:
-            LOGGER.warning('Coregistration directory is empty. Proceeding with coregistration...')
-    else:
-        os.mkdir(SAVE_DIR)
+    #if args.dir_idx is not None:
+    #    with open(args.dir_list, 'rb') as f:
+    #        Dirs = pickle.load(f)
+    #    Dirs = [x.strip() for x in Dirs]
+    #    if args.dir_idx >= len(Dirs):
+    #        LOGGER.error(f'Directory index {args.dir_idx} is out of range. Please provide a valid index.')
+    #        exit()
+    #    else:
+    #        Dir = [Dirs[args.dir_idx]]
+    #    if not os.path.exists(SAVE_DIR):
+    #        os.mkdir(SAVE_DIR)
+    #        LOGGER.warning(f'Created directory: {SAVE_DIR}')
+    #    LOGGER.info(f'Processing single directory: {Dir}')
+    #    align(Dir[0])
+    #    exit()
 
     # Load the data
-    Dirs = glob.glob(f'{BASE_PATH}/data/RAS/*')
-    if TEST:
-        Dirs = Dirs[:N_TEST]
+    #Dirs = glob.glob(f'{BASE_PATH}/data/RAS/*')
+    #if TEST:
+    #    Dirs = Dirs[:N_TEST]
     
     # Run the coregistration
-    run_with_progress(align, Dirs, Parallel=PARALLAL)
+    #run_with_progress(align, Dirs, Parallel=PARALLAL)

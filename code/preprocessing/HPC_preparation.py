@@ -18,12 +18,14 @@ parser.add_argument('--env', type=str, required=True, help='Pyenv path to use fo
 parser.add_argument('--partition', type=str, default="", help='Partition to use for the job')
 parser.add_argument('--load_table', type=str, default="", help='Load table to use for the job')
 parser.add_argument('--test', nargs='?', type=int, const=10, help='Number of test directories to process')
+parser.add_argument('--prune', '-p', action='store_true', help='Enable the deletion of the source data once processed')
 
 # Get the arguments
 args = parser.parse_args()
 scan_dir = args.scan_dir
 out_dir = args.out_dir
 script = args.script
+prune = args.prune
 # Extract the path to the script
 #script = os.path.abspath(script)
 working_dir = (os.sep).join(script.split(os.sep)[:-1])
@@ -108,8 +110,8 @@ def create_job_script(scan_dir, script, dir_list, extra_flags="", sbatch_args=""
 
     job_script = f"""#!/bin/bash
 #SBATCH --job-name={job_name}
-#SBATCH --output={working_dir}/logs/{job_name}_%j_%A_%a.out
-#SBATCH --error={working_dir}/logs/{job_name}_%j_%A_%a.err
+#SBATCH --output={working_dir}/logs/{job_name}_%A_%a.out
+#SBATCH --error={working_dir}/logs/{job_name}_%A_%a.err
 #SBATCH --cpus-per-task={cpus_per_job}
 #SBATCH --mem={mem_per_job}G
 #SBATCH --array=0-{N-1}
@@ -190,7 +192,7 @@ if __name__ == "__main__":
             print('-' * 20)
             if not os.path.exists(scan_dir):
                 raise FileNotFoundError(f"Scan directory {scan_dir} does not exist.")
-\
+
             subdirs = os.listdir(scan_dir)
             subdirs = [os.path.join(scan_dir, d) for d in subdirs]
             subdirs = limit_array_size(subdirs)
@@ -200,6 +202,9 @@ if __name__ == "__main__":
             else:
                 print(f"Found {N} directories in {scan_dir}")
             write_dir_list(subdirs, os.path.join(working_dir, 'list.txt'))
+            if prune:
+                print('Pruning enabled. Deleting source data after processing.')
+                extra_flags = '--prune'
             print('-' * 20)
     
     # Get cluster-wide idle CPUs and max mem per node
