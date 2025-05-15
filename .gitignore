@@ -15,3 +15,5 @@ mount*
 
 tmp/*
 *.zip
+
+import os.py
