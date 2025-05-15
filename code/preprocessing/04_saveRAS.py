@@ -39,7 +39,7 @@ PARALLEL = args.multi is not None # If True, the script will run with multiproce
 PROFILE = args.profile # If True, the script will run with the profiler enabled
 PROGRESS = False
 
-LOGGER = get_logger('04_saveRAS', f'{SAVE_DIR}/logs/')
+LOGGER = get_logger('04_saveRAS', f'/home/nleotta000/Projects/data/logs/')
 
 debug = 0
 #### Preprocessing | Step 4: Save RAS Nifti Files ####
@@ -111,13 +111,18 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     Fils = glob.glob(f'{dir}/*.nii')
     LOGGER.debug(f'Found {len(Fils)} files in {dir}')
     Fils.sort()
+    Fils = [os.path.split(ii)[-1] for ii in Fils]
     save_path = os.path.join(save_path, dir.split(os.sep)[-1])
     if not os.path.exists(f'{save_path}'):
         LOGGER.debug(f'Creating directory: {save_path}')
         os.mkdir(f'{save_path}')
+    Fils_out = glob.glob(f'{save_path}/*_RAS.nii') or []
+    Fils_out = [os.path.split(ii)[-1] for ii in Fils_out]
+    Fils_out = [ii.replace('_RAS.nii', '.nii') for ii in Fils_out]
+    LOGGER.debug(f'Found {len(Fils_out)} files in {save_path}')
     for ii in Fils:
         if ii.endswith('00a.nii'):
-            LOGGER.debug(f'{ii} | found 00a.nii, attempting to isolate FS sample...')
+            LOGGER.debug(f'{dir} | found 00a.nii, attempting to isolate FS sample...')
             json_00 = json.load(open(f'{dir}/00.json'))
             json_00a = json.load(open(f'{dir}/00a.json'))
             LOGGER.debug(f'{dir} | 00_desc: {json_00["SeriesDescription"]}')
@@ -132,9 +137,15 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
                 LOGGER.error(f'{dir} | No FS found in 00 or 00a')
                 return
     for ii in Fils:
-        LOGGER.debug(f'Processing: {ii}')
+        LOGGER.debug(f'Processing: {os.path.join(dir, ii)}')
+        LOGGER.debug(f'{dir} | Checking if {ii} is in {Fils_out}')
 
-        img = nib.load(ii)
+        if ii in Fils_out:
+            LOGGER.warning(f'{ii} | Already processed, skipping')
+            continue
+        LOGGER.debug(f'{ii} | Not processed, converting to RAS')
+        # Load the Nifti file
+        img = nib.load(os.path.join(dir, ii))
         data = img.get_fdata()
         aff = img.affine
 
@@ -167,8 +178,8 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
         if ii.endswith('00a.nii'):
             ii = ii.replace('00a.nii', '00.nii')
         ii = ii.replace('.nii', '_RAS.nii')
-        nib.save(ras_img,os.path.join(save_path,ii.split(os.sep)[-1]))
-        LOGGER.debug(f'{ii} | Saving: {os.path.join(save_path,ii.split(os.sep)[-1])}')
+        nib.save(ras_img,os.path.join(save_path,ii))
+        LOGGER.debug(f'{dir} | Saving: {os.path.join(save_path,ii)}')
 
     return 'completed'
 
