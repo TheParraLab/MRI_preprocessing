@@ -211,7 +211,14 @@ class DICOMextract:
         except Exception as e:
             self.log_error('Unable to read AcquisitionDuration', e)
             return self.UNKNOWN
-            
+
+    def Name(self) -> str:
+        """Attempts to extract the name of the scan"""
+        try:
+            return self.metadata.PatientName
+        except Exception as e:
+            self.log_error('Unable to read PatientName', e)
+            return self.UNKNOWN  
 class DICOMfilter():
     def __init__(self, dicom_table: pd.DataFrame, logger: logging.Logger = None, debug: int = 0, tmp_save: str='/FL_system/data/tmp/'):
         self.debug = debug

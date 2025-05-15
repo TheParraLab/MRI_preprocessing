@@ -71,6 +71,7 @@ def extractDicom(f: str):
             'Orientation': extract.Orientation(),
             'ID': extract.ID(),
             'Accession': extract.Accession(),
+            'Name': extract.Name(),
             'DATE': extract.Date(),
             'Series_desc': extract.Desc(),
             'Modality': extract.Modality(),
