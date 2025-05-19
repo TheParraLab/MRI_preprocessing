@@ -2,8 +2,10 @@ import os
 import pydicom as pyd
 import glob
 import argparse
+import fcntl
 import pickle
 import json
+import random
 import numpy as np
 import pandas as pd
 import nibabel as nib
@@ -21,7 +23,8 @@ parser.add_argument('--dir_idx', type=int, required=False, help='Index of the di
 parser.add_argument('--dir_list', type=str, default='list.txt', help='List of directories to process')
 parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
 parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
-parser.add_argument('--test', nargs='?', type=int, const=10, help='Number of test directories to process')
+parser.add_argument('--test', nargs='?', type=int, const=10, help='Run in test mode, limit the number of directories to process')
+parser.add_argument('--test-stop', action='store_true', help='Randomly trip the disk space checker to simulate low disk space')
 args = parser.parse_args()
 
 # TODO: Need to update stop_flag into an external file saved into the data/logs/.flag directory
@@ -54,56 +57,94 @@ LOGGER = get_logger('04_saveRAS', f'/FL_system/data/logs/')
 # This script utilizes the nibabel library to convert the nifti files to RAS orientation
 # It requires the nifti files to be present in the LOAD_DIR directory, this is produced in the previous step
 
+def set_flag(flag: str, dir: str='/FL_system/data/logs/.flag'):
+    """Set a flag in the specified directory."""
+    if not os.path.exists(dir):
+        os.mkdir(dir)
+    with open(f'{dir}/{flag}.txt', 'w') as f:
+        f.write('1')
+    LOGGER.warning(f'Set flag: {flag} in {dir}')
+
+def check_flag(flag: str, dir: str='/FL_system/data/logs/.flag') -> bool:
+    """Check if the flag exists in the specified directory."""
+    if not os.path.exists(dir):
+        return False
+    return os.path.exists(f'{dir}/{flag}.txt')
+
+def clear_flag(flag: str, dir: str='/FL_system/data/logs/.flag'):
+    """Clear the flag in the specified directory."""
+    if not os.path.exists(dir):
+        return
+    if os.path.exists(f'{dir}/{flag}.txt'):
+        os.remove(f'{dir}/{flag}.txt')
+        LOGGER.warning(f'Cleared flag: {flag} in {dir}')
+    else:
+        LOGGER.warning(f'Flag: {flag} does not exist in {dir}')
+
 def check_source_files(source_path: str) -> bool:
     """Check if the source path file exists contains files."""
     return (len(glob.glob(f'{source_path}/*')) > 0) or (len(glob.glob(f'{source_path}/*/*')) > 0)
 
 def check_disk_space(directory: str) -> bool:
     """Check if there is enough disk space available."""
+    if args.test_stop and random.random() < 0.1:
+        LOGGER.warning('Simulating low disk space condition for testing')
+        return False
     statvfs = os.statvfs(directory)
     available_space = statvfs.f_frsize * statvfs.f_bavail
     if available_space < DISK_SPACE_THRESHOLD*2:
         LOGGER.debug(f'Available space: {available_space}')
     return available_space > DISK_SPACE_THRESHOLD
 
-def save_progress(data, filename):
-    """Save progress to a file."""
-    LOGGER.info(f'Saving progress to {filename}')
-    if os.path.exists(f'{SAVE_DIR}{filename}'):
-        os.remove(f'{SAVE_DIR}{filename}')
-    with open(f'{SAVE_DIR}{filename}', 'wb') as f:
-        pickle.dump(data, f)
+def update_progress(name: str, value: str, dir: str='/FL_system/data/logs/.progress'):
+    """Acquire lock for the target file and add a line for the current value"""
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+        LOGGER.debug(f'Created directory: {dir}')
+    file_path = os.path.join(dir, f'{name}.txt')
+    LOGGER.debug(f'Obtaining lock for {file_path}')
+    with open(file_path, 'a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        LOGGER.debug(f'Lock acquired for {file_path}')
+        f.write(f'{value}\n')
+    LOGGER.debug(f'Lock released for {file_path}')
 
-def load_progress(filename):
-    """Load progress from a file."""
-    if os.path.exists(f'{SAVE_DIR}{filename}'):
-        LOGGER.info(f'Loading progress from {filename}')
-        with open(f'{SAVE_DIR}{filename}', 'rb') as f:
-            return pickle.load(f)
-    return None
+def check_progress(name: str, value: str, dir: str='/FL_system/data/logs/.progress') -> bool:
+    """Check if the value is already in the progress file"""
+    if not os.path.exists(dir):
+        LOGGER.error(f'Directory {dir} does not exist')
+    file_path = os.path.join(dir, f'{name}.txt')
+    if not os.path.exists(file_path):
+        return False
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+    for line in lines:
+        if line.strip() == value:
+            return True
+    return False
+
+
 
 def RAS_convert(dir: str, save_path=SAVE_DIR):
     # This function converts all nifti files in the input directory to RAS orientation
     # It saves the RAS files in the output directory
 
-    if stop_flag.is_set():
-        LOGGER.info('stop flag is set, exiting')
+    if check_flag('04_saveRAS', dir='/FL_system/data/logs/.flag'):
+        LOGGER.warning('Flag 04_saveRAS is set, exiting...')
+        return
+    if not check_source_files(dir):
+        LOGGER.warning(f'No source files found in {dir}, saving stop flag and exiting...')
+        set_flag('04_saveRAS', dir='/FL_system/data/logs/.flag')
+        return
+    if not check_disk_space(SAVE_DIR):
+        LOGGER.warning(f'Not enough disk space in {SAVE_DIR}, saving stop flag and exiting...')
+        set_flag('04_saveRAS', dir='/FL_system/data/logs/.flag')
         return
     
-    with disk_space_lock:
-        if not check_disk_space(SAVE_DIR):
-            if not stop_flag.is_set():
-                LOGGER.warning('Disk space is running low.  Pausing...')
-                stop_flag.set()
-                LOGGER.warning('Stop flag set')
-            return
-        if not check_source_files(dir):
-            if not stop_flag.is_set():
-                LOGGER.warning(f'No files found in {dir}')
-                stop_flag.set()
-                LOGGER.warning('Stop flag set')
-            return
-        
+    if check_progress('04_saveRAS', dir.split(os.sep)[-1], dir='/FL_system/data/logs/.progress'):
+        LOGGER.warning(f'{dir} is present in progress file, skipping...')
+        return
+    
     Fils = glob.glob(f'{dir}/*.nii')
     LOGGER.debug(f'{dir} | Found {len(Fils)} files')
     Fils.sort()
@@ -177,7 +218,7 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
         ii = ii.replace('.nii', '_RAS.nii')
         nib.save(ras_img,os.path.join(save_path,ii))
         LOGGER.debug(f'{dir} | Saving: {os.path.join(save_path,ii)}')
-
+    update_progress('04_saveRAS', dir.split(os.sep)[-1], dir='/FL_system/data/logs/.progress')
     return 'completed'
 
 if __name__ == '__main__':
@@ -196,6 +237,8 @@ if __name__ == '__main__':
         except Exception as e:
             LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
     
+    clear_flag('04_saveRAS', dir='/FL_system/data/logs/.flag')
+
     # If not running on an HPC
     if args.dir_idx is None:
         Dirs = glob.glob(f'{LOAD_DIR}*')
@@ -216,17 +259,7 @@ if __name__ == '__main__':
         LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
         #run_with_progress(RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR)
         run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', stop_flag=stop_flag)
-
-    #if stop_flag.is_set():
-    #    LOGGER.warning('Execution completed with stop flag set')
-    #    LOGGER.warning('Some files may not have been processed')
-    #    LOGGER.warning('Saving pending tasks to a progress file')
-    #    save_progress(Dirs, 'pending_tasks.pkl')
-
-    #Data_table = pd.read_csv('/FL_system/data/Data_table.csv')
-    #Data_table_timing = pd.read_csv('/FL_system/data/Data_table_timing.csv')
     
-
 
     LOGGER.info('Completed saveRAS: Step 04')
     LOGGER.info('All files saved to RAS directory')
