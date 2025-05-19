@@ -7,109 +7,105 @@ import json
 import numpy as np
 import pandas as pd
 import nibabel as nib
-from multiprocessing import Manager, cpu_count
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-import threading
+from multiprocessing import Manager, cpu_count, Lock
 from typing import Callable, List, Any
 from functools import partial
 # Custom Imports
-from toolbox import ProgressBar, get_logger
+from toolbox import run_function, get_logger
 
 # Define command line arguments
 parser = argparse.ArgumentParser(description='Convert Nifti files to RAS orientation')
 parser.add_argument('--scan_dir', type=str, required=False, help='Directory containing scans to process')
 parser.add_argument('--save_dir', type=str, required=True, help='Directory to save the output')
-parser.add_argument('--dir_idx', type=int, required=True, help='Index of the directory to process')
+parser.add_argument('--dir_idx', type=int, required=False, help='Index of the directory to process')
 parser.add_argument('--dir_list', type=str, default='list.txt', help='List of directories to process')
 parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
 parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
+parser.add_argument('--test', nargs='?', type=int, const=10, help='Number of test directories to process')
 args = parser.parse_args()
+
+# TODO: Need to update stop_flag into an external file saved into the data/logs/.flag directory
+# TODO: Validate the run_function command works as a replacement for run_with_progress
+# TODO: Change progress updating to instead save a list of completed operations instead of logging to-be-completed
 
 # Global variables for progress bar
 #Progress = None
-#manager = Manager()
+manager = Manager()
+disk_space_lock = Lock()
+stop_flag = manager.Event()
 #progress_queue = manager.Queue()
 
 # Other global variables
 LOAD_DIR = args.scan_dir #'/FL_system/data/nifti/'
 SAVE_DIR = args.save_dir #'/FL_system/data/RAS/'
-TEST = False
-N_TEST = 40
+TEST = args.test is not None # If True, the script will run with a limited number of directories
+if TEST:
+    N_TEST = args.test
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
 PROFILE = args.profile # If True, the script will run with the profiler enabled
+DISK_SPACE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 100 GB
 #PROGRESS = False
 
-LOGGER = get_logger('04_saveRAS', f'/home/nleotta000/Projects/data/logs/')
+LOGGER = get_logger('04_saveRAS', f'/FL_system/data/logs/')
 
-debug = 0
 #### Preprocessing | Step 4: Save RAS Nifti Files ####
 # This script is for taking the semi-processed nifti files and saving them into RAS
 #
 # This script utilizes the nibabel library to convert the nifti files to RAS orientation
 # It requires the nifti files to be present in the LOAD_DIR directory, this is produced in the previous step
-#def progress_wrapper(item, target, progress_queue, *args, **kwargs):
-#    result = target(item, *args, **kwargs)
-#    progress_queue.put((None, f'Processing'))
-#    return result
 
-def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
-    """Run a function with a progress bar"""
-    # Initialize using a manager to allow for shared progress queue
-    #manager = Manager()
-    #progress_queue = manager.Queue()
-    target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
+def check_source_files(source_path: str) -> bool:
+    """Check if the source path file exists contains files."""
+    return (len(glob.glob(f'{source_path}/*')) > 0) or (len(glob.glob(f'{source_path}/*/*')) > 0)
 
-    # Debugging information
-    LOGGER.debug(f'Running {target_name} with progress bar')
-    LOGGER.debug(f'Number of items: {len(items)}')
-    LOGGER.debug(f'Parallel: {Parallel}')
+def check_disk_space(directory: str) -> bool:
+    """Check if there is enough disk space available."""
+    statvfs = os.statvfs(directory)
+    available_space = statvfs.f_frsize * statvfs.f_bavail
+    if available_space < DISK_SPACE_THRESHOLD*2:
+        LOGGER.debug(f'Available space: {available_space}')
+    return available_space > DISK_SPACE_THRESHOLD
 
-    # Initialize progress bar
-    #if PROGRESS:
-    ##    Progress = ProgressBar(len(items))
-    #    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-    #    updater_thread.start()
-    
-    # Pass the progress queue to the target function
-    #target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
+def save_progress(data, filename):
+    """Save progress to a file."""
+    LOGGER.info(f'Saving progress to {filename}')
+    if os.path.exists(f'{SAVE_DIR}{filename}'):
+        os.remove(f'{SAVE_DIR}{filename}')
+    with open(f'{SAVE_DIR}{filename}', 'wb') as f:
+        pickle.dump(data, f)
 
-    # Run the target function with a progress bar
-    if Parallel:
-        with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
-            futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-            results = [future.result() for future in futures]
-    else:
-        results = [target(item) for item in items]
-
-    # Close the progress bar
-    #if PROGRESS:
-    #    progress_queue.put(None)
-    #    print('\n')
-    #    updater_thread.join()
-
-    LOGGER.debug(f'Completed {target_name} with progress bar')
-    LOGGER.debug(f'Number of results: {len(results)}')
-
-    # Check if results is a list of tuples before returning zip(*results)
-    if results and isinstance(results[0], tuple):
-        return zip(*results)
-    return results
-
-#def progress_updater(queue, progress_bar):
-##    while True:
-#        item = queue.get()
-#        if item is None:
-#            break
-#        index, status = item
-#        progress_bar.update(index, status)
-#
-#        queue.task_done()
+def load_progress(filename):
+    """Load progress from a file."""
+    if os.path.exists(f'{SAVE_DIR}{filename}'):
+        LOGGER.info(f'Loading progress from {filename}')
+        with open(f'{SAVE_DIR}{filename}', 'rb') as f:
+            return pickle.load(f)
+    return None
 
 def RAS_convert(dir: str, save_path=SAVE_DIR):
     # This function converts all nifti files in the input directory to RAS orientation
     # It saves the RAS files in the output directory
+
+    if stop_flag.is_set():
+        LOGGER.info('stop flag is set, exiting')
+        return
+    
+    with disk_space_lock:
+        if not check_disk_space(SAVE_DIR):
+            if not stop_flag.is_set():
+                LOGGER.warning('Disk space is running low.  Pausing...')
+                stop_flag.set()
+                LOGGER.warning('Stop flag set')
+            return
+        if not check_source_files(dir):
+            if not stop_flag.is_set():
+                LOGGER.warning(f'No files found in {dir}')
+                stop_flag.set()
+                LOGGER.warning('Stop flag set')
+            return
+        
     Fils = glob.glob(f'{dir}/*.nii')
-    LOGGER.debug(f'Found {len(Fils)} files in {dir}')
+    LOGGER.debug(f'{dir} | Found {len(Fils)} files')
     Fils.sort()
     Fils = [os.path.split(ii)[-1] for ii in Fils]
     save_path = os.path.join(save_path, dir.split(os.sep)[-1])
@@ -119,8 +115,9 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     Fils_out = glob.glob(f'{save_path}/*_RAS.nii') or []
     Fils_out = [os.path.split(ii)[-1] for ii in Fils_out]
     Fils_out = [ii.replace('_RAS.nii', '.nii') for ii in Fils_out]
-    LOGGER.debug(f'Found {len(Fils_out)} files in {save_path}')
+    LOGGER.debug(f'{dir} | Found {len(Fils_out)} files in {save_path}')
     for ii in Fils:
+        LOGGER.debug(f'{dir} | Processing: {os.path.join(dir, ii)}')
         if ii.endswith('00a.nii'):
             LOGGER.debug(f'{dir} | found 00a.nii, attempting to isolate FS sample...')
             json_00 = json.load(open(f'{dir}/00.json'))
@@ -129,21 +126,21 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
             LOGGER.debug(f'{dir} | 00a_desc: {json_00a["SeriesDescription"]}')  
             if 'FS' in json_00['SeriesDescription']:
                 LOGGER.debug(f'{dir} | Found FS in 00')
-                Fils.remove(f'{dir}/00a.nii')
+                Fils.remove(f'00a.nii')
             elif 'FS' in json_00a['SeriesDescription']:
                 LOGGER.debug(f'{dir} | Found FS in 00a')
-                Fils.remove(f'{dir}/00.nii')
+                Fils.remove(f'00.nii')
             else:
                 LOGGER.error(f'{dir} | No FS found in 00 or 00a')
                 return
     for ii in Fils:
-        LOGGER.debug(f'Processing: {os.path.join(dir, ii)}')
+        LOGGER.debug(f'{dir} | Processing: {os.path.join(dir, ii)}')
         LOGGER.debug(f'{dir} | Checking if {ii} is in {Fils_out}')
 
         if ii in Fils_out:
-            LOGGER.warning(f'{ii} | Already processed, skipping')
+            LOGGER.warning(f'{dir} | {ii} | Already processed, skipping')
             continue
-        LOGGER.debug(f'{ii} | Not processed, converting to RAS')
+        LOGGER.debug(f'{dir} | {ii} | Not processed, converting to RAS')
         # Load the Nifti file
         img = nib.load(os.path.join(dir, ii))
         data = img.get_fdata()
@@ -204,7 +201,8 @@ if __name__ == '__main__':
         Dirs = glob.glob(f'{LOAD_DIR}*')
         if TEST:
             Dirs = Dirs[:N_TEST]
-        run_with_progress(RAS_convert, Dirs, Parallel=PARALLEL)
+        #run_with_progress(RAS_convert, Dirs, Parallel=PARALLEL)
+        run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', stop_flag=stop_flag)
     else:
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
         # Save to temporary directory
@@ -216,11 +214,14 @@ if __name__ == '__main__':
             LOGGER.debug(f'Converting Dir to list: {Dir}')
             Dir = [Dir]
         LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
-        run_with_progress(RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR)
+        #run_with_progress(RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR)
+        run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', stop_flag=stop_flag)
 
-        if args.dir_idx == len(Dirs) - 1:
-            LOGGER.info('Last script, compiling results')
-
+    #if stop_flag.is_set():
+    #    LOGGER.warning('Execution completed with stop flag set')
+    #    LOGGER.warning('Some files may not have been processed')
+    #    LOGGER.warning('Saving pending tasks to a progress file')
+    #    save_progress(Dirs, 'pending_tasks.pkl')
 
     #Data_table = pd.read_csv('/FL_system/data/Data_table.csv')
     #Data_table_timing = pd.read_csv('/FL_system/data/Data_table_timing.csv')
