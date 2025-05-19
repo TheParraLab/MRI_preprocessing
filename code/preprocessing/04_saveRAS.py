@@ -26,9 +26,9 @@ parser.add_argument('-p', '--profile', action='store_true', help='Run with profi
 args = parser.parse_args()
 
 # Global variables for progress bar
-Progress = None
-manager = Manager()
-progress_queue = manager.Queue()
+#Progress = None
+#manager = Manager()
+#progress_queue = manager.Queue()
 
 # Other global variables
 LOAD_DIR = args.scan_dir #'/FL_system/data/nifti/'
@@ -37,7 +37,7 @@ TEST = False
 N_TEST = 40
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
 PROFILE = args.profile # If True, the script will run with the profiler enabled
-PROGRESS = False
+#PROGRESS = False
 
 LOGGER = get_logger('04_saveRAS', f'/home/nleotta000/Projects/data/logs/')
 
@@ -47,16 +47,16 @@ debug = 0
 #
 # This script utilizes the nibabel library to convert the nifti files to RAS orientation
 # It requires the nifti files to be present in the LOAD_DIR directory, this is produced in the previous step
-def progress_wrapper(item, target, progress_queue, *args, **kwargs):
-    result = target(item, *args, **kwargs)
-    progress_queue.put((None, f'Processing'))
-    return result
+#def progress_wrapper(item, target, progress_queue, *args, **kwargs):
+#    result = target(item, *args, **kwargs)
+#    progress_queue.put((None, f'Processing'))
+#    return result
 
 def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
     """Run a function with a progress bar"""
     # Initialize using a manager to allow for shared progress queue
-    manager = Manager()
-    progress_queue = manager.Queue()
+    #manager = Manager()
+    #progress_queue = manager.Queue()
     target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
 
     # Debugging information
@@ -65,13 +65,13 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     LOGGER.debug(f'Parallel: {Parallel}')
 
     # Initialize progress bar
-    if PROGRESS:
-        Progress = ProgressBar(len(items))
-        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-        updater_thread.start()
+    #if PROGRESS:
+    ##    Progress = ProgressBar(len(items))
+    #    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
+    #    updater_thread.start()
     
     # Pass the progress queue to the target function
-    target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
+    #target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
 
     # Run the target function with a progress bar
     if Parallel:
@@ -82,10 +82,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
         results = [target(item) for item in items]
 
     # Close the progress bar
-    if PROGRESS:
-        progress_queue.put(None)
-        print('\n')
-        updater_thread.join()
+    #if PROGRESS:
+    #    progress_queue.put(None)
+    #    print('\n')
+    #    updater_thread.join()
 
     LOGGER.debug(f'Completed {target_name} with progress bar')
     LOGGER.debug(f'Number of results: {len(results)}')
@@ -95,15 +95,15 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
         return zip(*results)
     return results
 
-def progress_updater(queue, progress_bar):
-    while True:
-        item = queue.get()
-        if item is None:
-            break
-        index, status = item
-        progress_bar.update(index, status)
-
-        queue.task_done()
+#def progress_updater(queue, progress_bar):
+##    while True:
+#        item = queue.get()
+#        if item is None:
+#            break
+#        index, status = item
+#        progress_bar.update(index, status)
+#
+#        queue.task_done()
 
 def RAS_convert(dir: str, save_path=SAVE_DIR):
     # This function converts all nifti files in the input directory to RAS orientation

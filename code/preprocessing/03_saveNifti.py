@@ -11,14 +11,14 @@ import subprocess
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
-from toolbox import ProgressBar, get_logger
+from toolbox import ProgressBar, get_logger, run_function
 from DICOM import DICOMfilter, DICOMorder
 
 # Global variables for progress bar and lock
-Progress = None
+#Progress = None
 manager = Manager()
 disk_space_lock = Lock()
-progress_queue = manager.Queue()
+#progress_queue = manager.Queue()
 LOGGER = get_logger('03_saveNifti', '/FL_system/data/logs/')
 
 # Define necessary directories
@@ -26,7 +26,7 @@ LOAD_DIR = '/FL_system/data/' # Location to load the constructed Data_table_timi
 SAVE_DIR = '/FL_system/data/nifti/' # Location to save the nifti files ['/FL_system/data/nifti/']
 DEBUG = 0
 TEST = False
-PROGRESS = False
+#PROGRESS = False
 N_TEST = 200
 PARALLEL = True
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
@@ -68,18 +68,18 @@ def load_progress(filename):
             return pickle.load(f)
     return None
 
-def progress_wrapper(item, target, progress_queue, *args, **kwargs):
-    if stop_flag.is_set():
-        return
-    result = target(item, *args, **kwargs)
-    progress_queue.put((None, f'Processing'))
-    return result
+#def progress_wrapper(item, target, progress_queue, *args, **kwargs):
+#    if stop_flag.is_set():
+#        return
+#    result = target(item, *args, **kwargs)
+#    progress_queue.put((None, f'Processing'))
+#    return result
 
 def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
     """Run a function with a progress bar"""
     # Initialize using a manager to allow for shared progress queue
-    manager = Manager()
-    progress_queue = manager.Queue()
+    #manager = Manager()
+    #progress_queue = manager.Queue()
     target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
 
     # Debugging information
@@ -88,13 +88,13 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     LOGGER.debug(f'Parallel: {Parallel}')
 
     # Initialize progress bar
-    if PROGRESS:
-        Progress = ProgressBar(len(items))
-        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-        updater_thread.start()
+    #if PROGRESS:
+    #    Progress = ProgressBar(len(items))
+    #    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
+    #    updater_thread.start()
     
     # Pass the progress queue to the target function
-    target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
+    #target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
 
     # Run the target function with a progress bar
     results = []
@@ -123,10 +123,10 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
                 LOGGER.error(f'Error in sequential processing: {e}', exec_info=True)
 
     # Close the progress bar
-    if PROGRESS:
-        progress_queue.put(None)
-        print('\n')
-        updater_thread.join()
+    #if PROGRESS:
+    #    progress_queue.put(None)
+    #    print('\n')
+    #    updater_thread.join()
 
     LOGGER.debug(f'Completed {target_name} with progress bar')
     LOGGER.debug(f'Number of results: {len(results)}')
@@ -136,17 +136,17 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
         return zip(*results)
     return results
 
-def progress_updater(queue, progress_bar):
-    while not stop_flag.is_set():
-        try:
-            item = queue.get(timeout=1)
-            if item is None:
-                break
-            index, status = item
-            progress_bar.update(index, status)
-            queue.task_done()
-        except:
-            continue
+#def progress_updater(queue, progress_bar):
+#    while not stop_flag.is_set():
+##        try:
+ #           item = queue.get(timeout=1)
+ #           if item is None:
+ #               break
+ #           index, status = item
+ #           progress_bar.update(index, status)
+ #           queue.task_done()
+ #       except:
+ #           continue
 
 def run_cmd(command, commands):
     SessionID = command[2].split(os.sep)[-1]
@@ -197,7 +197,7 @@ def run_cmd(command, commands):
     except subprocess.CalledProcessError as e:
         error_message = e.stderr.decode() if e.stderr else 'No error message available'
         LOGGER.error(f'Error converting {command[-1]}: {error_message}')
-    progress_queue.put((None, f'Converting'))
+    #progress_queue.put((None, f'Converting'))
     
 def makeNifti(Data_subset):
     # Convert all dicom files to nifti files
@@ -220,8 +220,8 @@ def makeNifti(Data_subset):
     return commands
 
 def split_table(ID):
-    global progress_queue
-    progress_queue.put((None, f'Splitting {ID}'))
+    #global progress_queue
+    #progress_queue.put((None, f'Splitting {ID}'))
     return Data_table[Data_table['SessionID'] == ID]
 
 if __name__ == '__main__':
