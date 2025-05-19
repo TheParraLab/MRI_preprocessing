@@ -26,6 +26,8 @@ parser.add_argument('-p', '--profile', action='store_true', help='Run with profi
 parser.add_argument('--test', nargs='?', type=int, const=10, help='Run in test mode, limit the number of directories to process')
 parser.add_argument('--test-stop', action='store_true', help='Randomly trip the disk space checker to simulate low disk space')
 args = parser.parse_args()
+# Get script name
+script_name = os.path.basename(__file__).split('.')[0]
 
 # TODO: Need to update stop_flag into an external file saved into the data/logs/.flag directory
 # TODO: Validate the run_function command works as a replacement for run_with_progress
@@ -49,7 +51,7 @@ PROFILE = args.profile # If True, the script will run with the profiler enabled
 DISK_SPACE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 100 GB
 #PROGRESS = False
 
-LOGGER = get_logger('04_saveRAS', f'/FL_system/data/logs/')
+LOGGER = get_logger(script_name, f'/FL_system/data/logs/')
 
 #### Preprocessing | Step 4: Save RAS Nifti Files ####
 # This script is for taking the semi-processed nifti files and saving them into RAS
@@ -57,7 +59,7 @@ LOGGER = get_logger('04_saveRAS', f'/FL_system/data/logs/')
 # This script utilizes the nibabel library to convert the nifti files to RAS orientation
 # It requires the nifti files to be present in the LOAD_DIR directory, this is produced in the previous step
 
-def set_flag(flag: str, dir: str='/FL_system/data/logs/.flag'):
+def set_flag(flag: str=script_name, dir: str='/FL_system/data/logs/.flag'):
     """Set a flag in the specified directory."""
     if not os.path.exists(dir):
         os.mkdir(dir)
@@ -65,13 +67,13 @@ def set_flag(flag: str, dir: str='/FL_system/data/logs/.flag'):
         f.write('1')
     LOGGER.warning(f'Set flag: {flag} in {dir}')
 
-def check_flag(flag: str, dir: str='/FL_system/data/logs/.flag') -> bool:
+def check_flag(flag: str=script_name, dir: str='/FL_system/data/logs/.flag') -> bool:
     """Check if the flag exists in the specified directory."""
     if not os.path.exists(dir):
         return False
     return os.path.exists(f'{dir}/{flag}.txt')
 
-def clear_flag(flag: str, dir: str='/FL_system/data/logs/.flag'):
+def clear_flag(flag: str=script_name, dir: str='/FL_system/data/logs/.flag'):
     """Clear the flag in the specified directory."""
     if not os.path.exists(dir):
         return
@@ -129,19 +131,19 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     # This function converts all nifti files in the input directory to RAS orientation
     # It saves the RAS files in the output directory
 
-    if check_flag('04_saveRAS', dir='/FL_system/data/logs/.flag'):
-        LOGGER.warning('Flag 04_saveRAS is set, exiting...')
+    if check_flag(script_name, dir='/FL_system/data/logs/.flag'):
+        LOGGER.warning(f'Flag {script_name} is set, exiting...')
         return
     if not check_source_files(dir):
         LOGGER.warning(f'No source files found in {dir}, saving stop flag and exiting...')
-        set_flag('04_saveRAS', dir='/FL_system/data/logs/.flag')
+        set_flag(script_name, dir='/FL_system/data/logs/.flag')
         return
     if not check_disk_space(SAVE_DIR):
         LOGGER.warning(f'Not enough disk space in {SAVE_DIR}, saving stop flag and exiting...')
-        set_flag('04_saveRAS', dir='/FL_system/data/logs/.flag')
+        set_flag(script_name, dir='/FL_system/data/logs/.flag')
         return
     
-    if check_progress('04_saveRAS', dir.split(os.sep)[-1], dir='/FL_system/data/logs/.progress'):
+    if check_progress(script_name, dir.split(os.sep)[-1], dir='/FL_system/data/logs/.progress'):
         LOGGER.warning(f'{dir} is present in progress file, skipping...')
         return
     
@@ -218,7 +220,7 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
         ii = ii.replace('.nii', '_RAS.nii')
         nib.save(ras_img,os.path.join(save_path,ii))
         LOGGER.debug(f'{dir} | Saving: {os.path.join(save_path,ii)}')
-    update_progress('04_saveRAS', dir.split(os.sep)[-1], dir='/FL_system/data/logs/.progress')
+    update_progress(script_name, dir.split(os.sep)[-1], dir='/FL_system/data/logs/.progress')
     return 'completed'
 
 if __name__ == '__main__':
