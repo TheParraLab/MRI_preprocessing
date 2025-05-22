@@ -101,7 +101,7 @@ def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List
                 retries = 3
                 while retries > 0:
                     try:
-                        LOGGER.debug(f'Waiting for future {i} to complete') 
+                        LOGGER.debug(f'Waiting for future {i} to complete: {retries} retries left') 
                         result = future.result(timeout=300)
                         results.append(result)
                         LOGGER.debug(f'Future {i} completed successfully')
