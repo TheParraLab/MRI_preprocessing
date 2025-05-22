@@ -90,7 +90,7 @@ def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List
     results = []
     if Parallel:
         max_workers = min(32, 2 * N_CPUS)
-        LOGGER.debug(f'Using ThreadPoolExecutor with max_workers={max_workers}')
+        LOGGER.debug(f'Using {P_type} with max_workers={max_workers}')
         Executor = ThreadPoolExecutor if P_type == 'thread' else ProcessPoolExecutor
         with Executor(max_workers=max_workers) as executor:
             futures = [executor.submit(target, item, *args, **kwargs) for item in items]
@@ -98,15 +98,22 @@ def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List
                 if stop_flag and stop_flag.is_set():
                     LOGGER.info('Stopping parallel processing due to stop flag')
                     break
-                try:
-                    LOGGER.debug(f'Waiting for future {i} to complete') 
-                    result = future.result(timeout=300)
-                    results.append(result)
-                    LOGGER.debug(f'Future {i} completed successfully')
-                except TimeoutError:
-                    LOGGER.error(f'Timeout error for item {i}')
-                except Exception as e:
-                    LOGGER.error(f'Error in parallel processing for item {i}: {e}')
+                retries = 3
+                while retries > 0:
+                    try:
+                        LOGGER.debug(f'Waiting for future {i} to complete') 
+                        result = future.result(timeout=300)
+                        results.append(result)
+                        LOGGER.debug(f'Future {i} completed successfully')
+                        break
+                    except TimeoutError:
+                        LOGGER.error(f'Timeout error for item {i}. Retrying...')
+                        retries -= 1
+                    except Exception as e:
+                        LOGGER.error(f'Error in parallel processing for item {i}: {e}', exc_info=True)
+                        retries -= 1
+                    if retries == 0:
+                        LOGGER.error(f'Max retries reached for item {i}. Skipping...')
     else:
         for item in items:
             if stop_flag and stop_flag.is_set():
