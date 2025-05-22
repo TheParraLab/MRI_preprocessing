@@ -1,13 +1,33 @@
 import time
 import logging
 import os
+import fcntl
 
 from typing import Callable, List, Any
 from functools import partial
 from multiprocessing import cpu_count, Event
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
+class FileHandlerWithLock(logging.FileHandler):
+    """Custom FileHandler that uses a file lock to prevent concurrent writes."""
+    def emit(self, record):
+        with open(self.baseFilename, self.mode) as f:
+            fcntl.flock(f, fcntl.LOCK_EX)  # Acquire exclusive lock
+            try:
+                self.stream = f
+                super().emit(record)
+            finally:
+                self.stream = None
+                fcntl.flock(f, fcntl.LOCK_UN)  # Release lock
+
 def get_logger(name: str, save_dir: str = ''):
+    """Create a logger for the given name and save directory.
+    Args:
+        name (str): Name of the logger.
+        save_dir (str): Directory to save the log file.
+    Returns:
+        logging.Logger: Configured logger object.
+    """
     # Check if save_dir exists
     if save_dir and save_dir[-1] != '/':
         save_dir += '/'
@@ -24,7 +44,7 @@ def get_logger(name: str, save_dir: str = ''):
     logger.setLevel(logging.DEBUG)
 
     # Create file handler which logs even debug messages
-    fh = logging.FileHandler(save_dir + name + '.log')
+    fh = FileHandlerWithLock(save_dir + name + '.log')
     fh.setLevel(logging.DEBUG)
 
     # Create console handler with a higher log level

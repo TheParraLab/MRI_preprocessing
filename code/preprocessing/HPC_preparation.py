@@ -27,8 +27,10 @@ out_dir = args.out_dir
 script = args.script
 prune = args.prune
 # Extract the path to the script
-#script = os.path.abspath(script)
+script = os.path.abspath(script)
 working_dir = (os.sep).join(script.split(os.sep)[:-1])
+flag_dir = (os.sep).join(script.split(os.sep)[:-3]) + os.sep + 'data' + os.sep + 'logs' + os.sep + '.flag' + os.sep
+print(f"Flag directory: {flag_dir}")
 print(f"Working directory: {working_dir}")
 env = args.env
 if env.split('/')[-1] != 'activate':
@@ -130,6 +132,12 @@ if __name__ == "__main__":
         os.makedirs(out_dir)
         print(f"Created output directory: {out_dir}")
     
+    # Clear flags
+    try:
+        shutil.rmtree(flag_dir, ignore_errors=True)
+    except Exception as e:
+        print(f"Flag directory {flag_dir} does not exist. Skipping removal. | {e}")
+
     # Perform script-specific processing and checks
     extra_flags = ""
     sbatch_args = ""
