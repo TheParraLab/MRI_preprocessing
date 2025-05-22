@@ -145,16 +145,28 @@ def findDicom(directory):
                 file_path = os.path.join(root, file)
                 #start_time = time.time()
                 try:
-                    data = pyd.dcmread(file_path, stop_before_pixels=True, force=True) # Read the DICOM file
+                    # Validate if the file is a DICOM file
+                    if not pyd.misc.is_dicom(file_path):
+                        LOGGER.warning(f'Skipping non-DICOM file: {file_path}')
+                        continue
+                    # Read the DICOM file
+                    data = pyd.dcmread(file_path, stop_before_pixels=True, force=True)
+                except pyd.errors.InvalidDicomError as ide:
+                    LOGGER.error(f'Invalid DICOM file {file_path}: {ide}')
+                    continue
                 except Exception as e:
-                    LOGGER.error(f'Error reading file {file} in folder {root} | {e}')
+                    LOGGER.error(f'Error reading file {file} in folder {root} | {e}', )
                     continue
                 #LOGGER.debug(f'File {file} read in {time.time() - start_time:.2f} seconds')
-                if data.SeriesNumber in found_series: # Skip if the series number has already been found
+                
+                # Check if the series number has already been found
+                if hasattr(data, 'SeriesNumber') and data.SeriesNumber in found_series:
                     continue
+                elif hasattr(data, 'SeriesNumber'):
+                    dicom_files.append(file_path)
+                    found_series.append(data.SeriesNumber)
                 else:
-                    dicom_files.append(os.path.join(root, file)) # Append the file path to the list
-                    found_series.append(data.SeriesNumber) # Append the series number to the list
+                    LOGGER.warning(f'File {file_path} does not have a SeriesNumber attribute')
             
         LOGGER.debug(f'{root} contains series {found_series} | {len(found_series)} series found')
     return dicom_files
