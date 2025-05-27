@@ -73,6 +73,7 @@ def extractDicom(f: str):
             'Accession': extract.Accession(),
             'Name': extract.Name(),
             'DATE': extract.Date(),
+            'DOB': extract.DOB(),
             'Series_desc': extract.Desc(),
             'Modality': extract.Modality(),
             'AcqTime': extract.Acq(),
