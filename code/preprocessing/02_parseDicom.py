@@ -247,6 +247,7 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
 
         # Split the data table into subsets based on the unique identifiers
         Data_subsets = run_function(LOGGER, split_table, Iden_uniq, Parallel=PARALLEL, P_type='process')
+        #Data_subsets = [group for _, group in Data_table.groupby('SessionID')]
         # Filter the data based on the criteria defined in DICOMfilter and filterDicom
         results, removed, temporary_relocation = run_function(LOGGER, filterDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
         temporary_relocation = list(temporary_relocation)

@@ -88,46 +88,57 @@ def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List
 
     # Run the target function with a progress bar
     results = []
-    if Parallel:
-        max_workers = min(32, 2 * N_CPUS)
-        LOGGER.debug(f'Using {P_type} with max_workers={max_workers}')
-        Executor = ThreadPoolExecutor if P_type == 'thread' else ProcessPoolExecutor
-        with Executor(max_workers=max_workers) as executor:
-            futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-            for i, future in enumerate(futures):
-                if stop_flag and stop_flag.is_set():
-                    LOGGER.info('Stopping parallel processing due to stop flag')
-                    break
-                retries = 3
-                while retries > 0:
-                    try:
-                        LOGGER.debug(f'Waiting for future {i} to complete: {retries} retries left') 
-                        result = future.result(timeout=300)
-                        results.append(result)
-                        LOGGER.debug(f'Future {i} completed successfully')
+    try:
+        if Parallel:
+            max_workers = min(32, 2 * N_CPUS)
+            LOGGER.debug(f'Using {P_type} with max_workers={max_workers}')
+            Executor = ThreadPoolExecutor if P_type == 'thread' else ProcessPoolExecutor
+            with Executor(max_workers=max_workers) as executor:
+                futures = [executor.submit(target, item, *args, **kwargs) for item in items]
+                for i, future in enumerate(futures):
+                    if stop_flag and stop_flag.is_set():
+                        LOGGER.info('Stopping parallel processing due to stop flag')
                         break
-                    except TimeoutError:
-                        LOGGER.error(f'Timeout error for item {i}. Retrying...')
-                        retries -= 1
-                    except Exception as e:
-                        LOGGER.error(f'Error in parallel processing for item {i}: {e}', exc_info=True)
-                        retries -= 1
-                    if retries == 0:
-                        LOGGER.error(f'Max retries reached for item {i}. Skipping...')
-    else:
-        for item in items:
-            if stop_flag and stop_flag.is_set():
-                LOGGER.info('Stopping sequential processing due to stop flag')
-                break
-            try:
-                result = target(item, *args, **kwargs)
-                results.append(result)
-            except Exception as e:
-                LOGGER.error(f'Error in sequential processing: {e}')
-
-
-    LOGGER.debug(f'Completed {target_name} {" in parallel" if Parallel else "sequentially"}')
-    LOGGER.debug(f'Number of results: {len(results)}')
+                    retries = 3
+                    while retries > 0:
+                        try:
+                            LOGGER.debug(f'Waiting for future {i} to complete: {retries} retries left') 
+                            result = future.result(timeout=300)
+                            results.append(result)
+                            LOGGER.debug(f'Future {i} completed successfully')
+                            break
+                        except TimeoutError:
+                            LOGGER.error(f'Timeout error for item {i}. Retrying...')
+                            retries -= 1
+                        except KeyboardInterrupt:
+                            LOGGER.error('KeyboardInterrupt received. Stopping processing.')
+                            if stop_flag:
+                                stop_flag.set()
+                            for f in futures:
+                                f.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        except Exception as e:
+                            LOGGER.error(f'Error in parallel processing for item {i}: {e}', exc_info=True)
+                            retries -= 1
+                        if retries == 0:
+                            LOGGER.error(f'Max retries reached for item {i}. Skipping...')
+        else:
+            for item in items:
+                if stop_flag and stop_flag.is_set():
+                    LOGGER.info('Stopping sequential processing due to stop flag')
+                    break
+                try:
+                    result = target(item, *args, **kwargs)
+                    results.append(result)
+                except Exception as e:
+                    LOGGER.error(f'Error in sequential processing: {e}')
+    except KeyboardInterrupt:
+        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
+        if stop_flag:
+            stop_flag.set()
+    finally:
+        LOGGER.debug(f'Completed {target_name} {" in parallel" if Parallel else "sequentially"}')
+        LOGGER.debug(f'Number of results: {len(results)}')
 
     # Check if results is a list of tuples before returning zip(*results)
     if results and isinstance(results[0], tuple):

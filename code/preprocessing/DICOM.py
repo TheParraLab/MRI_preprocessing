@@ -13,7 +13,7 @@ class DICOMextract:
 
     def __init__(self, file_path: str, debug: int = 0):
         self.debug = debug
-        self.metadata = pyd.dcmread(file_path)
+        self.metadata = pyd.dcmread(file_path, stop_before_pixels=True)
         self.metadata.filepath = file_path
     
     def log_error(self, message, exception=None):
@@ -218,7 +218,16 @@ class DICOMextract:
             return self.metadata.PatientName
         except Exception as e:
             self.log_error('Unable to read PatientName', e)
-            return self.UNKNOWN  
+            return self.UNKNOWN
+        
+    def DOB(self) -> str:
+        """Attempts to extract the date of birth of the patient"""
+        try:
+            return self.metadata.PatientBirthDate
+        except Exception as e:
+            self.log_error('Unable to read PatientBirthDate', e)
+            return self.UNKNOWN
+        
 class DICOMfilter():
     def __init__(self, dicom_table: pd.DataFrame, logger: logging.Logger = None, debug: int = 0, tmp_save: str='/FL_system/data/tmp/'):
         self.debug = debug
@@ -528,7 +537,7 @@ class DICOMorder():
             if self.debug > 0:
                 print(f'Found a single unknown value for {self.dicom_table["SessionID"].unique()}')
                 print(f'Assuming this is a pre scan')
-        elif len(unkonwn_rows) == 2:
+        elif len(unknown_rows) == 2:
             print(f'Found two unknown values for {self.dicom_table["SessionID"].unique()}')
             print(f'Analyzing to see if either row includes "FS" in the description')
             for i in range(len(unknown_rows)):
@@ -568,7 +577,7 @@ class DICOMorder():
             print(f'Attempting alternate pre scan detection')
             pre_indx = self.alternate_pre()
         
-        if len(pre_idx) == 1:
+        if len(pre_indx) == 1:
             indx = np.append(indx, pre_indx)
             self.dicom_table = self.dicom_table.loc[indx]
             return self.dicom_table
