@@ -38,7 +38,7 @@ args = parser.parse_args()
 
 # Define necessary parameters
 SAVE_DIR = args.save_dir
-COMPUTED_FLAGS = ['slope', 'sub', 'subtract', 'secondary']
+COMPUTED_FLAGS = ['slope', 'sub', 'subtract']#, 'secondary'] # Keywords to identify derived images, removed secondary  for now due to some primary images being marked as such.
 PARALLEL = args.multi is not None
 TEST = False
 N_TEST = 25
@@ -130,9 +130,7 @@ def filterDicom(Data_subset):
     else:
         LOGGER.error("'Type' column not found in Data_subset")#filter.removeImplants()
     #filter.removeSide()
-    filter.removeSlices()
-    # Check if 'Type' column exists before removing computed flags
-
+    #filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
     #filter.removeTimes(['TriTime']) # Omitted, Pre scans have unknown trigger time
     #filter.removeDWI()
 
