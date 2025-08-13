@@ -135,23 +135,53 @@ class DICOMextract:
     def LR(self) -> str:
         """Attempts to extract the laterality of the scan"""
         # TODO: Does metadata contain the filepath or is the file path required as an argument?
-
+        # Adding in multiple robust mechanisms to attempt to determine if the scan is left or right
         # Find all adjacent files in the directory
-        directory = os.path.dirname(self.metadata.filepath)
-        files = glob.glob(os.path.join(directory, '*.dcm'))
+        ###### Old method using ImageOrientationPatient, not reliable ######
+        #directory = os.path.dirname(self.metadata.filepath)
+        #files = glob.glob(os.path.join(directory, '*.dcm'))
+        #try:
+        #    rcsCoordX1 = self.metadata.ImageOrientationPatient[0]
+        #    metadata = pyd.dcmread(files[-1])
+        #    rcsCoordX2 = metadata.ImageOrientationPatient[0]
+        #    if np.mean([rcsCoordX1, rcsCoordX2]) > 0:
+        #        laterality = 'left'
+        #    elif np.mean([rcsCoordX1, rcsCoordX2]) < 0:
+        #        laterality = 'right'
+        #    return laterality
+        #except Exception as e:
+        #    self.log_error('Unable to read ImageOrientationPatient', e)
+        #    return self.UNKNOWN
+        ######## New method using Laterality tag if available ######
+        laterality = getattr(self.metadata, 'Laterality', '').strip().lower()
+        if laterality in ['l', 'left']:
+            return 'left'
+        elif laterality in ['r', 'right']:
+            return 'right'
+        elif laterality in ['b', 'bilateral']:
+            return 'bilateral'
+        # Secondary method using SeriesDescription
+        desc = getattr(self.metadata, 'SeriesDescription', '').lower()
+        if 'bilateral' in desc or ('left' in desc and 'right' in desc):
+            return 'bilateral'
+        elif 'left' in desc:
+            return 'left'
+        elif 'right' in desc:
+            return 'right'
+        # Fallback to using ImageOrientationPatient where needed
         try:
             rcsCoordX1 = self.metadata.ImageOrientationPatient[0]
-            metadata = pyd.dcmread(files[-1])
-            rcsCoordX2 = metadata.ImageOrientationPatient[0]
+            directory = os.path.dirname(self.metadata.filepath)
+            files = sorted(glob.glob(directory, '*.dcm'))
+            rcsCoordX2 = pyd.dcmread(files[-1], stop_before_pixels=True).ImageOrientationPatient[0]
             if np.mean([rcsCoordX1, rcsCoordX2]) > 0:
-                laterality = 'left'
+                return 'left'
             elif np.mean([rcsCoordX1, rcsCoordX2]) < 0:
-                laterality = 'right'
-            return laterality
+                return 'right'
         except Exception as e:
             self.log_error('Unable to read ImageOrientationPatient', e)
-            return self.UNKNOWN
-        
+        return self.UNKNOWN
+
     def Thickness(self) -> Union[float, str]:
         """Attempts to extract the slice thickness of the scan [in mm]"""
         try:
@@ -340,7 +370,6 @@ class DICOMfilter():
             #self.dicom_table['Remove_Computed'] = np.where(self.dicom_table['Type'].str.contains(flag.upper(), na=False), 1, 0)
         # Concatenate all removed rows into a single DataFrame
         self.removed['Computed'] = pd.concat(removed, ignore_index=True)
-        
         self.logger.debug(f'Removed {len(self.removed["Computed"])} scans with computed descriptions | {self.Session_ID}')
         #self.update_valid('Remove_Computed')
         return self.dicom_table
@@ -362,6 +391,76 @@ class DICOMfilter():
         self.logger.debug(f'Removed {len(self.removed["DWI"])} DWI scans | {self.Session_ID}')
         return self.dicom_table
 
+    def isolate_sequence(self):
+        """Isolates the sequence of scans based on SeriesNumber"""
+        # TODO: should also choose between DISCO or steady state scans based on availability
+        self.dicom_table = self.dicom_table.sort_values(by='Series')
+        series = self.dicom_table['Series'].values # Assumption: Series is not repeated within a single session
+        # TODO: Series number will be repeated for scans with  multiple volumes stacked into a single file, account for this here or by having the table fill in nly pre is stored seperatelyh, w2ith post sequence as 1 file (see 16-328 protocol)
+        groups = np.concatenate(([0], np.cumsum(np.diff(series) != 1)))
+        self.dicom_table['Series_group'] = groups
+
+        n_groups = np.max(groups) + 1
+        # Removiing groups that don't meet the minimum number of images
+        for i in range(n_groups):
+            n  = np.sum(groups == i)
+            if n < 3:
+                self.dicom_table = self.dicom_table.loc[~(self.dicom_table['Series_group'] == i)]
+
+        # Now making sure that each sequence has a valid pre scan
+        # ASSUMPTION: pre scan contains 'pre' in the Series_desc
+        groups = self.dicom_table['Series_group'].unique()
+        for i in groups:
+            desc = self.dicom_table.loc[self.dicom_table['Series_group'] == i, 'Series_desc']
+            pre_desc = [s for s in desc if 'pre' in s.lower()]
+            if len(pre_desc) != 1:
+                self.logger.error(f'Pre scan detection error for group {i} | {self.Session_ID}')
+                # If no pre scan is found, remove the entire group
+                if len(pre_desc) == 0:
+                    self.logger.error(f'No pre scan found for group {i} | {self.Session_ID}')
+                    self.dicom_table = self.dicom_table.loc[~(self.dicom_table['Series_group'] == i)]
+                else:
+                    # When multiple scans found, log error but keep data for review
+                    self.logger.error(f'Multiple pre scans found for group {i} | {self.Session_ID}')
+            n = self.dicom_table.loc[(self.dicom_table['Series_group'] == i)*(self.dicom_table['Series_desc'] == pre_desc[0]), 'Series']
+            N = self.dicom_table.loc[self.dicom_table['Series_group'] == i, 'Series'].nunique()
+            min_N = np.min(N)
+            if n != min_N:
+                self.logger.error(f'Pre scan is not the first scan in group {i} | {self.Session_ID}')
+                # CHeck if more than 3 scans exist starting from the pre scan
+                if np.sum( N >= min_N) >= 3:
+                    self.logger.error(f'More than 3 scans exist starting from the pre scan in group {i} | {self.Session_ID}')
+                    # REmoving scans from before the pre scan
+                    self.dicom_table = self.dicom_table.loc[~((self.dicom_table['Series_group'] == i)*(self.dicom_table['Series'] < n))]
+                else:
+                    self.logger.error(f'Not enough scans exist starting from the pre scan in group {i} | {self.Session_ID}')
+                    # Removing the entire group
+                    self.dicom_table = self.dicom_table.loc[~(self.dicom_table['Series_group'] == i)]
+
+        groups = self.dicom_table['Series_group'].unique()
+        if len(groups) == 1:
+            self.logger.debug(f'Single sequence found | {self.Session_ID}')
+            return self.dicom_table
+        
+        # Still has multiple sequences, check for DISCO or steady state\
+        # ASSUMPTION: DISCO scans contain 'disco' in the Series_desc
+        # If DISCO and steady state scans are both found, prioritize steady state scans
+        for i in groups:
+            desc = self.dicom_table.loc[self.dicom_table['Series_group'] == i, 'Series_desc']
+            if any('disco' in s.lower() for s in desc):
+                self.logger.debug(f'DISCO sequence found in group {i} | {self.Session_ID}')
+                self.dicom_table = self.dicom_table.loc[~(self.dicom_table['Series_group'] == i)]
+            else:
+                self.logger.error(f'No DISCO or steady state sequence found in group {i} | {self.Session_ID}')
+
+        groups = self.dicom_table['Series_group'].unique()
+        if len(groups) == 1:
+            self.logger.debug(f'Single sequence found, returning simplified session data | {self.Session_ID}')
+            return self.dicom_table
+        else:
+            self.logger.error(f'Multiple sequences found after filtering, additional logic required to solve | {self.Session_ID}')
+            return self.dicom_table
+        
 class DICOMsplit():
     def __init__(self, dicom_table: pd.DataFrame,  logger: logging.Logger = None, debug: int = 0, tmp_save: str='/FL_system/data/tmp/'):
         '''
