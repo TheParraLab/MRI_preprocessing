@@ -133,7 +133,7 @@ def filterDicom(Data_subset):
     #filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
     #filter.removeTimes(['TriTime']) # Omitted, Pre scans have unknown trigger time
     #filter.removeDWI()
-
+    filter.isolate_sequence() # Attempt to isolatethe primary sequence of scans
     return filter.dicom_table, filter.removed, filter.temporary_relocations
 
 # Function to split the data table based on the unique identifier
