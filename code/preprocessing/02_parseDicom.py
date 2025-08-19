@@ -17,6 +17,7 @@ from multiprocessing import Queue, Manager, cpu_count, Lock
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from typing import Callable, List, Any
 from functools import partial
+from collections import defaultdict
 # Custom imports
 from toolbox import get_logger, run_function
 from DICOM import DICOMfilter, DICOMorder
@@ -33,6 +34,7 @@ parser.add_argument('--save_dir', type=str, default='/FL_system/data/', help='Di
 parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
 parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
 parser.add_argument('--load_table', type=str, default='', help='Load table to use for the job')
+parser.add_argument('--filter_only', action='store_true', help='Run only the filtering step without ordering')
 args = parser.parse_args()
 
 
@@ -146,7 +148,7 @@ def split_table(ID):
 def agg_removed(removed_table: dict):
     global Remove_Tables
     for key, value in removed_table.items():
-        assert key in Remove_Tables, f'Key {key} not found in Remove_Tables'
+        #assert key in Remove_Tables, f'Key {key} not found in Remove_Tables'
         Remove_Tables[key] = pd.concat([Remove_Tables[key], value], ignore_index=True)
 
 # Function to initialize the data
@@ -163,10 +165,14 @@ def init_data(load_table: str='', target: int=None):
     # Create a unique identifier for each session/exam
     Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
     global Remove_Tables
-    Remove_Tables = {}
-    Remove_Tables['T2'] = pd.DataFrame()
-    Remove_Tables['Slices'] = pd.DataFrame()
-    Remove_Tables['Computed'] = pd.DataFrame()
+    Remove_Tables = defaultdict(pd.DataFrame)  # Use defaultdict to initialize empty DataFrames for each key
+    #Remove_Tables = {}
+    #Remove_Tables['T2'] = pd.DataFrame()
+    #Remove_Tables['Slices'] = pd.DataFrame()
+    #Remove_Tables['Computed'] = pd.DataFrame()
+    #Remove_Tables['No_pre'] = pd.DataFrame()
+    #Remove_Tables['DISCO'] = pd.DataFrame()
+    #Remove_Tables['No_post'] = pd.DataFrame()
 
 def relocate(commands, relocations):
     if not commands:
@@ -265,7 +271,15 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         LOGGER.info(f'Number of removed sessions: {len(Iden_uniq) - len(Iden_uniq_after)}')
         for key, value in Remove_Tables.items():
             LOGGER.info(f'Number of {key} scans removed: {len(value)}')
-
+        LOGGER.info(f'Saving filtered data to {SAVE_DIR}Data_table_filtered.csv')
+        Data_table.to_csv(f'{SAVE_DIR}Data_table_filtered.csv', index=False)
+        # Save a .csv for each item in the full_removed dictionary
+        if not os.path.exists(f'{SAVE_DIR}removal_log'):
+            os.mkdir(f'{SAVE_DIR}removal_log')
+        run_function(LOGGER, save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL, P_type='process')
+        if args.filter_only:
+            LOGGER.info('Filter only mode enabled. Exiting after filtering step.')
+            return
         # Order the data based on the criteria defined in DICOMorder and orderDicom
         results = run_function(LOGGER, orderDicom, results, Parallel=PARALLEL, P_type='process')
         Data_table = pd.concat(results)
@@ -279,10 +293,6 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         #fully_removed.to_csv(f'{SAVE_DIR}fully_removed.csv', index=False)
         LOGGER.info('Saving sequence information to updated file')
 
-        # Save a .csv for each item in the full_removed dictionary
-        if not os.path.exists(f'{SAVE_DIR}removal_log'):
-            os.mkdir(f'{SAVE_DIR}removal_log')
-        run_function(LOGGER, save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL, P_type='process')
 
         Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False)
         LOGGER.info(f'Timing information saved to {out_name}.csv')
