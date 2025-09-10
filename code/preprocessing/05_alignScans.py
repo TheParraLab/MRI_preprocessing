@@ -13,7 +13,7 @@ from functools import partial
 import subprocess
 import threading
 
-from toolbox import ProgressBar, get_logger
+from toolbox import ProgressBar, get_logger, run_function
 #BASE_PATH = '/FL_system'
 BASE_PATH = '/home/nleotta000/Projects/'
 # Global variables for progress bar and lock
@@ -191,7 +191,8 @@ if __name__ == '__main__':
         if TEST:
             Dirs = Dirs[:N_TEST]
         LOGGER.info(f'Processing {len(Dirs)} directories')
-        run_with_progress(align, Dirs, Parallel=PARALLAL)
+        #run_with_progress(align, Dirs, Parallel=PARALLAL)
+        run_function(align, Dirs, Parallel=PARALLAL, P_type = 'Process')
     else:
         # if running on an HPC
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
@@ -203,7 +204,8 @@ if __name__ == '__main__':
             LOGGER.debug(f'Converting Dir to list: {Dir}')
             Dir = [Dir]
         LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
-        run_with_progress(align, Dir, Parallel=PARALLAL)
+        #run_with_progress(align, Dir, Parallel=PARALLAL)
+        run_function(align, Dir, Parallel=PARALLAL, P_type = 'Process') 
         Dirs = Dir
     
     if PRUNE:

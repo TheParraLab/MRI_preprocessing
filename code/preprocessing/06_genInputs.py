@@ -20,7 +20,7 @@ LOGGER = get_logger('06_genInputs', '/FL_system/data/logs/')
 LOAD_DIR = '/FL_system/data/coreg/'
 SAVE_DIR = '/FL_system/data/inputs/'
 DEBUG = 0
-TEST = True
+TEST = False
 N_TEST = 40
 PARALLAL = True
 PROGRESS = False
@@ -90,6 +90,19 @@ def generate_slopes(SessionID):
     # Should generate 2 slopes
     # Slope 1 - between 00 and 01
     # Slope 2 - between 01 and 0X
+    if os.path.exists(SAVE_DIR + f'/{SessionID}'):
+        LOGGER.warning(f'{SessionID} | Directory already exists')
+        # Check for files in the directory
+        if len(os.listdir(SAVE_DIR + f'/{SessionID}')) < 3:
+            LOGGER.warning(f'{SessionID} | Directory does not have necessary files, reprocessing')
+            os.rmdir(SAVE_DIR + f'/{SessionID}')
+        else:
+            LOGGER.debug(f'{SessionID} | Directory exists and has necessary files, skipping')
+            return
+    else:
+        LOGGER.debug(f'{SessionID} | Creating saving directory for inputs')
+    os.mkdir(SAVE_DIR + f'/{SessionID}')
+
     LOGGER.debug(f'Generating slopes for session: {SessionID}')
     
     Fils = glob.glob(f'{LOAD_DIR}/{SessionID}/*.nii')
@@ -114,13 +127,14 @@ def generate_slopes(SessionID):
     #LOGGER.debug(f'{SessionID} | Scan Duration | {Data["ScanDur"].values}')
     
     # Check trigger time is not unkown for any of the scans
-    if 'Unknown' in Data['TriTime'][1:].values:
+    Times = [Data['TriTime'].iloc[ii] for ii in sorting] #Loading Times in ms
+    Scan_Duration = [Data['ScanDur'].iloc[ii] for ii in sorting] #Loading Scan Duration in us
+    if 'Unknown' in Times[1:]:
         LOGGER.error(f'{SessionID} | Trigger time is unknown for the post scan, cannot calculate slopes')
         return
     else:
-        Times = [Data['TriTime'].iloc[ii] for ii in sorting] #Loading Times in ms
         # Check for scan duration us known for the pre scan
-        if 'Unknown' in Data['ScanDur'][0].values:
+        if Scan_Duration[0] == 'Unknown':
             LOGGER.warning(f'{SessionID} | Scan duration is unknown for the pre scan, attempting to estimate from acquision times')
             try:
                 AcqTime = [Data['AcqTime'].iloc[ii] for ii in sorting] #Loading AcqTime in hh:mm:ss 
@@ -186,9 +200,6 @@ def generate_slopes(SessionID):
         data0[np.isnan(data0)] = 0
         D[:,:,:,ii] = data0
     D[np.isnan(D)] = 0
-
-    LOGGER.debug(f'{SessionID} | Creating saving directory for inputs')
-    os.mkdir(SAVE_DIR + f'/{SessionID}')
 
     ###################################
     # Calculating slope 1 (enhancement)
@@ -262,7 +273,7 @@ if __name__ == '__main__':
     if TEST:
         session = session[:N_TEST]
         Dirs = Dirs[:N_TEST]
-
+    session = Dirs
     N = len(Dirs)
     k = 0
     
@@ -272,8 +283,8 @@ if __name__ == '__main__':
     # Check if inputs have already been generated
     if os.path.exists(SAVE_DIR):
         print('Inputs already generated')
-        print('To reprocess data, please remove /data/inputs')
-        exit()
+        #print('To reprocess data, please remove /data/inputs')
+        #exit()
     else:
         # Create directory for saving inputs
         os.mkdir(SAVE_DIR)
