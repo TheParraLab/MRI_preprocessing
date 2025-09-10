@@ -20,7 +20,7 @@ from functools import partial
 from collections import defaultdict
 # Custom imports
 from toolbox import get_logger, run_function
-from DICOM import DICOMfilter, DICOMorder
+from DICOM import DICOMfilter, DICOMorder, DICOMsplit
 
 # Global variables for progress bar
 Progress = None
@@ -115,11 +115,29 @@ def save_to_csv(tup):
 
 # Function to order the DICOM data
 def orderDicom(Data_subset):
+    # Trigger time is in ms post injection
+    # Acq time is in HHMMSS format
     Data_subset = Data_subset.reset_index(drop=True)
+    SessionID = Data_subset['SessionID'].values[0]
     order = DICOMorder(Data_subset, logger=LOGGER)
-    order.order('TriTime')
-    order.findPre()
-    return order.dicom_table
+    order.order('TriTime', secondary_param='AcqTime')
+    if order.dicom_table.empty:
+        LOGGER.error(f'No scans remaining after ordering for {SessionID}')
+        return order.dicom_table
+    else:
+        order.findPre()
+        return order.dicom_table
+
+# Function to split scans with multiple post images in a single directory
+def splitDicom(Data_subset):
+    Data_subset = Data_subset.reset_index(drop=True)
+    splitter = DICOMsplit(Data_subset, logger=LOGGER)
+    if splitter.SCAN:
+        splitter.scan_all()
+        splitter.sort_scans()
+        return splitter.dicom_table, splitter.temporary_relocations
+    else:
+        return Data_subset, []
 
 # Function to filter the DICOM data
 def filterDicom(Data_subset):
@@ -129,8 +147,10 @@ def filterDicom(Data_subset):
     filter.removeT2()
     if 'Type' in Data_subset.columns:
         filter.removeComputed(COMPUTED_FLAGS)
+        filter.enforcePrimary()  # Ensure only primary scans are kept
     else:
         LOGGER.error("'Type' column not found in Data_subset")#filter.removeImplants()
+    
     #filter.removeSide()
     #filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
     #filter.removeTimes(['TriTime']) # Omitted, Pre scans have unknown trigger time
@@ -175,6 +195,9 @@ def init_data(load_table: str='', target: int=None):
     #Remove_Tables['No_post'] = pd.DataFrame()
 
 def relocate(commands, relocations):
+    LOGGER.debug(f'Relocate called with {len(commands)} commands')
+    LOGGER.debug(f'Current relocations: {len(relocations)}')
+    LOGGER.debug(f'First command: {commands[0] if commands else "None"}')
     if not commands:
         LOGGER.warning('No commands supplied to relocate')
         return
@@ -199,11 +222,16 @@ def relocate(commands, relocations):
             LOGGER.warning(f'{dest} already exists')
     try:
         for command in commands:
+            LOGGER.debug(f'Copying {command[0]} to {command[1]}')
             shutil.copy(command[0], command[1])
         with disk_space_lock:
             relocations.remove(commands)
     except Exception as e:
         LOGGER.error(f'Error in relocating files: {e}', exc_info=True)
+
+def chunk_list(lst, chunk_size):
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
 #############################
 ## Main script
 #############################
@@ -254,49 +282,90 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         #Data_subsets = [group for _, group in Data_table.groupby('SessionID')]
         # Filter the data based on the criteria defined in DICOMfilter and filterDicom
         results, removed, temporary_relocation = run_function(LOGGER, filterDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
-        temporary_relocation = list(temporary_relocation)
-        temporary_relocation = manager.list([item for sublist in temporary_relocation for item in sublist])
+        #temporary_relocation = list(temporary_relocation)
+        #temporary_relocation = manager.list([item for sublist in temporary_relocation for item in sublist])
 
         # Filtered results and removed scans are concatenated into a single table
         results = list(results)
+        results = [df for df in results if not df.empty]
         removed = list(removed)
         Data_table = pd.concat(results)
         Data_table = Data_table.reset_index(drop=True)
         Iden_uniq_after = Data_table['SessionID'].unique()
+        Iden_uniq_after_clean = []
+        for i in Iden_uniq_after:
+            if i[-2:] in ('_a', '_b', '_l', '_r'):
+                Iden_uniq_after_clean.append(i[:-2])
+            else:
+                Iden_uniq_after_clean.append(i)
+        Iden_uniq_after_clean = list(set(Iden_uniq_after_clean)) # Get unique IDs without laterality suffix
         run_function(LOGGER, agg_removed, removed, Parallel=False)
+
         # Display the results of the filtering process
         LOGGER.info('Filtering Results:')
         LOGGER.info(f'Initial number of unique sessions: {len(Iden_uniq)}')
-        LOGGER.info(f'Final number of unique sessions: {len(Iden_uniq_after)}')
-        LOGGER.info(f'Number of removed sessions: {len(Iden_uniq) - len(Iden_uniq_after)}')
+        LOGGER.info(f'Final number of unique sessions: {len(Iden_uniq_after_clean)}')
+        LOGGER.info(f'Final number of sesions, including laterality suffix: {len(Iden_uniq_after)}')
+        LOGGER.info(f'Number of removed sessions: {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
+
         for key, value in Remove_Tables.items():
-            LOGGER.info(f'Number of {key} scans removed: {len(value)}')
+            Rem_ID = value['SessionID'].unique()
+            Gone_ID = set(Rem_ID) - set(Iden_uniq_after_clean)
+            LOGGER.info(f'===== {key} =====')
+            LOGGER.info(f'  Number of unique sessions missing from final output: {len(Gone_ID)}')
+            LOGGER.info(f'  Number of scans removed: {len(value)}')
         LOGGER.info(f'Saving filtered data to {SAVE_DIR}Data_table_filtered.csv')
         Data_table.to_csv(f'{SAVE_DIR}Data_table_filtered.csv', index=False)
+
+
         # Save a .csv for each item in the full_removed dictionary
         if not os.path.exists(f'{SAVE_DIR}removal_log'):
             os.mkdir(f'{SAVE_DIR}removal_log')
         run_function(LOGGER, save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL, P_type='process')
-        if args.filter_only:
-            LOGGER.info('Filter only mode enabled. Exiting after filtering step.')
-            return
-        # Order the data based on the criteria defined in DICOMorder and orderDicom
-        results = run_function(LOGGER, orderDicom, results, Parallel=PARALLEL, P_type='process')
-        Data_table = pd.concat(results)
-        Data_table = Data_table.reset_index(drop=True)
-
         fully_removed = pd.DataFrame()
         for ID in Iden_uniq:
             if ID not in Iden_uniq_after:
                 LOGGER.debug(f'Session {ID} was completely removed')
                 fully_removed = pd.concat([fully_removed, PRE_TABLE[PRE_TABLE['SessionID'] == ID]], ignore_index=True)
-        #fully_removed.to_csv(f'{SAVE_DIR}fully_removed.csv', index=False)
-        LOGGER.info('Saving sequence information to updated file')
+        if not fully_removed.empty:
+            fully_removed.to_csv(f'{SAVE_DIR}removal_log/Removed_fully.csv', index=False)
+            LOGGER.info(f'Saved fully removed sessions to {SAVE_DIR}removal_log/Removed_fully.csv')
+        if args.filter_only:
+            LOGGER.info('Filter only mode enabled. Exiting after filtering step.')
+            return
+
+        # Resplit the filtered data table into subsets based on the unique identifiers
+        Data_subsets = run_function(LOGGER, split_table, Iden_uniq_after, Parallel=PARALLEL, P_type='process')
+
+        # Seperating scans which contain multiple post images in a single directory
+        results, redirections = run_function(LOGGER, splitDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
+        results = [df for df in results if not df.empty]
+        Data_table = pd.concat(results)
+        Data_table = Data_table.reset_index(drop=True)
+        temporary_relocation = manager.list([item for sublist in redirections for item in sublist])
+        Iden_uniq_after = Data_table['SessionID'].unique()
+        LOGGER.info(f'Updated number of scans after splitting multi-post scans: {len(Data_table)}')
+        LOGGER.info(f'Updated number of unique sessions after splitting multi-post scans: {len(Iden_uniq_after)}')
+        LOGGER.info(f'Number of temporary relocations after splitting multi-post scans: {len(temporary_relocation)}')
+        LOGGER.debug(f'Temporary relocations example [first 3 entries]: {temporary_relocation[0:3]}')
+        # subgrouping temporary_relocation into 100n item chunks for processing
+        temporary_relocation = list(chunk_list(list(temporary_relocation), 100))
 
 
+        Data_table.to_csv(f'{SAVE_DIR}Data_table_split.csv', index=False)
+        Data_subsets = run_function(LOGGER, split_table, Data_table['SessionID'].unique(), Parallel=PARALLEL, P_type='process')
+
+        # Order the data based on the criteria defined in DICOMorder and orderDicom
+        results = run_function(LOGGER, orderDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
+        Data_table = pd.concat(results)
+        Data_table = Data_table.reset_index(drop=True)
+        LOGGER.info('')
+        LOGGER.info('Ordering complete')
+        LOGGER.info(f'Final number of unique sessions: {len(Data_table["SessionID"].unique())}')
+        LOGGER.info(f'Final number of scans: {len(Data_table)}')
+        LOGGER.info(f'Saving ordered data to {SAVE_DIR}{out_name}')
         Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False)
-        LOGGER.info(f'Timing information saved to {out_name}.csv')
-    LOGGER.info(f'Number of temporary relocations: {len(temporary_relocation)}')
+
 
 
     #save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
