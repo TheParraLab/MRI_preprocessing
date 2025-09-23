@@ -9,7 +9,7 @@ services:
     volumes:
       # Mounts the host's Docker socket to the container
       # This allows the container to manage other containers
-      - /var/run/docker.sock:/var/run/docker.sock
+      # - /var/run/docker.sock:/var/run/docker.sock
       ######################################################
       - ${PROJECT_DIRECTORY_PATH}:/FL_system
       #- ${PROJECT_DIRECTORY_PATH}/data:/data

@@ -68,12 +68,7 @@ def load_progress(filename):
             return pickle.load(f)
     return None
 
-#def progress_wrapper(item, target, progress_queue, *args, **kwargs):
-#    if stop_flag.is_set():
-#        return
-#    result = target(item, *args, **kwargs)
-#    progress_queue.put((None, f'Processing'))
-#    return result
+
 
 def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
     """Run a function with a progress bar"""

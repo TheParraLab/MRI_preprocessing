@@ -15,7 +15,7 @@
 
 ## Features
 
-- Displays an interactive webserver for easy control of the preprocessing process
+- Displays an interactive webserver for easy control of the preprocessing process (Pending update)
 - Takes in raw DICOM directory, analyzes its contents, and produces model inputs with little to no manual intervention
 - DICOM headers will be scaned and parsed during processing, a full list of necessary DICOM attributes will be provided in this README at a future date.
 ---

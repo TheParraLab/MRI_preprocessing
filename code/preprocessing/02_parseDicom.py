@@ -1,21 +1,21 @@
 # Package imports
 import os
-import glob
-import threading
+#import glob
+#import threading
 import pickle
 import shutil
 import argparse
 import time
 import subprocess
 
-import pydicom as pyd
+#import pydicom as pyd
 import numpy as np
 import pandas as pd
-import statistics as stat
+#import statistics as stat
 # Function imports
-from multiprocessing import Queue, Manager, cpu_count, Lock
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from typing import Callable, List, Any
+from multiprocessing import Manager, cpu_count, Lock#, Queue
+#from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+#from typing import Callable, List, Any
 from functools import partial
 from collections import defaultdict
 # Custom imports
@@ -33,7 +33,7 @@ parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, h
 parser.add_argument('--save_dir', type=str, default='/FL_system/data/', help='Directory to save the updated tables')
 parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
 parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
-parser.add_argument('--load_table', type=str, default='', help='Load table to use for the job')
+parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv', help='Load table to use for the job')
 parser.add_argument('--filter_only', action='store_true', help='Run only the filtering step without ordering')
 args = parser.parse_args()
 
@@ -55,8 +55,8 @@ stop_flag = manager.Event()
 PROFILE = False
 if PROFILE:
     import yappi
-    import pstats
-    import io
+    #import pstats
+    #import io
     #yappi.set_clock_type('cpu')
 
 #### Preprocessing | Step 2: Parse DICOM data ####
