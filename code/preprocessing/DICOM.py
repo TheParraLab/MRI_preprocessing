@@ -399,11 +399,25 @@ class DICOMfilter():
         self.removed['Not_Primary'] = self.dicom_table.loc[self.dicom_table['Type'].str.contains('PRIMARY', na=False) == False]
         return self.dicom_table
 
+    def detect_DISCO(self):
+        """Detects and removes DISCO scans if steady state scans are also present"""
+        disco_pattern = re.compile(r'disco', re.IGNORECASE)
+    
+        is_disco = self.dicom_table.loc[self.dicom_table['Series_desc'].str.contains(disco_pattern, na=False)]
+        not_disco = self.dicom_table.loc[~self.dicom_table['Series_desc'].str.contains(disco_pattern, na=False)]
+        self.logger.debug(f'Detected {len(is_disco)} DISCO scans and {len(not_disco)} non-DISCO scans | {self.Session_ID}')
+        
+        return
+
     def isolate_sequence(self):
 
         ### Remove localizer scans
         self.removed['Localizer'] = self.dicom_table[self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('loc', na=False)]
         self.dicom_table = self.dicom_table[~self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('loc', na=False)]
+
+        ## Attempting to detect DISCO sequences
+        # Removes DISCO sequences if steady state sequences are also present
+        self.detect_DISCO()
 
         ### Sessions must have at least 2 scans to be considered valid
         if len(self.dicom_table) < 2:
