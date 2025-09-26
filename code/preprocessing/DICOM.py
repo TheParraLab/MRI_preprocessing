@@ -417,7 +417,7 @@ class DICOMfilter():
 
         ## Attempting to detect DISCO sequences
         # Removes DISCO sequences if steady state sequences are also present
-        self.detect_DISCO()
+        #self.detect_DISCO()
 
         ### Sessions must have at least 2 scans to be considered valid
         if len(self.dicom_table) < 2:
