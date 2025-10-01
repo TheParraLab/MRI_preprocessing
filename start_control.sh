@@ -1,6 +1,11 @@
 echo "This script must be run from the base project directory"
 echo "i.e. the directory containing the start_control.sh file itself"
 
+# Prompt the user for webserver option
+echo "Do you want to start the webserver component? (y/n) [default: y]:"
+read start_webserver
+start_webserver=${start_webserver:-y}
+
 # Prompt the user for the data directory path
 echo "Please enter the raw data path:"
 read data_directory_path
@@ -32,10 +37,22 @@ fi
 
 # Use the provided path as a volume in Docker Compose
 # Previously exported paths are used as environment variables in the docker-compose.yml files
-if [ "$WSL" = true ]; then
-  echo "Using docker-compose-wsl.yml"
-  docker compose -f ./control_system/docker-compose-wsl.yml up --build
-else
+if [ "$start_webserver" = "y" ] || [ "$start_webserver" = "Y" ]; then
+  echo "Starting with webserver component..."
+  if [ "$WSL" = true ]; then
+    echo "Using docker-compose-wsl.yml"
+    docker compose -f ./control_system/docker-compose-wsl.yml up --build
+  else
     echo "Using docker-compose.yml"
-  docker compose -f ./control_system/docker-compose.yml up --build
+    docker compose -f ./control_system/docker-compose.yml up --build
+  fi
+else
+  echo "Starting without webserver component..."
+  if [ "$WSL" = true ]; then
+    echo "Using docker-compose-wsl-no-web.yml"
+    docker compose -f ./control_system/docker-compose-wsl-no-web.yml up --build
+  else
+    echo "Using docker-compose-no-web.yml"
+    docker compose -f ./control_system/docker-compose-no-web.yml up --build
+  fi
 fi

@@ -43,8 +43,29 @@
 
 ## Usage
 
-When started with 'start_control.sh', you will be asked to provide the path to the raw data on your local system. This supplied directory will be placed at /FL_system/data/raw/ within the docker container.
-After this is provided, the system will start up and be accessible on port 5000 (Note: The current webserver is under development and not finalized, it should not be exposed outside the network)
+When started with 'start_control.sh', you will be prompted with:
+1. Whether you want to start the webserver component (y/n, default: y)
+2. The path to the raw data on your local system
+
+This supplied directory will be placed at /FL_system/data/raw/ within the docker container.
+
+### With Webserver (default)
+If you choose to start with the webserver, the system will be accessible on port 5000 for easy control of the preprocessing process. (Note: The current webserver is under development and not finalized, it should not be exposed outside the network)
+
+### Without Webserver (CLI only)
+If you choose to run without the webserver, the container will start with just the preprocessing capabilities. You can then execute preprocessing commands by:
+
+**Option 1: Using the convenience script**
+```bash
+bash access_preprocessing.sh
+```
+
+**Option 2: Direct Docker access**
+```bash
+docker exec -it control bash
+cd /FL_system/code/preprocessing/
+# Run individual preprocessing scripts or the full pipeline
+```
 
 ### Preprocessing
 

@@ -42,6 +42,9 @@ EXPOSE 5000
 ENV FLASK_APP=app.py
 ENV FLASK_ENG=development
 
-# Run app.py when the container launches
-#CMD ["flask", "run", "--host=0.0.0.0"]
-CMD ["python", "app.py"]
+# Create a startup script to conditionally run the webserver
+COPY startup.sh /startup.sh
+RUN chmod +x /startup.sh
+
+# Run startup script when the container launches
+CMD ["/startup.sh"]
