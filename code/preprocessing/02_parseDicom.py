@@ -201,6 +201,13 @@ def relocate(commands, relocations):
     if not commands:
         LOGGER.warning('No commands supplied to relocate')
         return
+    destinations = [cmd[1] for cmd in commands]
+    destinations = list(set(destinations))
+    for dest in destinations:
+        if not os.path.exists(dest):
+            os.makedirs(dest)
+        else:
+            LOGGER.warning(f'{dest} already exists')
     with disk_space_lock:
         try:
             LOGGER.debug(commands[0][1])
@@ -213,13 +220,6 @@ def relocate(commands, relocations):
                 stop_flag.set()
                 LOGGER.warning('Stop flag set')
             return
-    destinations = [cmd[1] for cmd in commands]
-    destinations = list(set(destinations))
-    for dest in destinations:
-        if not os.path.exists(dest):
-            os.makedirs(dest)
-        else:
-            LOGGER.warning(f'{dest} already exists')
     try:
         for command in commands:
             LOGGER.debug(f'Copying {command[0]} to {command[1]}')
