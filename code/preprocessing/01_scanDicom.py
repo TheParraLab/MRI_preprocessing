@@ -97,23 +97,42 @@ def extractDicom(f: str):
         LOGGER.error(f'Error extracting information for file: {f} | {e}')
         return None
 
-def find_all_dicom_dirs(directory):
+def find_all_dicom_dirs(directory, N_test=None):
     """
-    Find all directories containing DICOM files (.dcm) in the given directory.
+    Find all directories containing MRI DICOM files (.dcm) in the given directory.
 
     Args:
         directory (str): The root directory to search.
+        N_test (int, optional): If provided, limits the search to the first N_test directories found.
 
     Returns:
         List[str]: A list of directories containing DICOM files.
     """
     dicom_dirs = []
-
+    N_found = 0
     for root, _, files in os.walk(directory, followlinks=False):
         # Check if any file in the current directory ends with '.dcm'
-        if any(file.endswith('.dcm') for file in files):
+        has_mri = False
+        for file in files:
+            if file.endswith('.dcm'):
+                file_path = os.path.join(root, file)
+                try:
+                    dcm = pyd.dcmread(file_path, stop_before_pixels=True, force=True)
+                    if hasattr(dcm, 'Modality') and dcm.Modality == 'MR':
+                        has_mri = True
+                        break
+                except Exception:
+                    LOGGER.debug(f'Skipping non-MRI file: {file_path}')
+                    continue
+            else:
+                LOGGER.debug(f'Skipping non-DICOM file: {os.path.join(root, file)}')
+            
+        if has_mri: 
             dicom_dirs.append(root)
-            LOGGER.debug(f'Found DICOM files in {root}')
+            N_found += 1
+            if N_test is not None and N_found >= N_test:
+                break
+            LOGGER.debug(f'Found DICOM files for MRI in {root}')
 
     if not dicom_dirs:
         LOGGER.warning(f'No directories containing DICOM files found in {directory}')
@@ -203,10 +222,12 @@ def main(out_name='Data_table.csv', SAVE_DIR='', SCAN_DIR=''):
 
     # Finding main directory and subdirectories
     LOGGER.info('Finding all directories containing DICOM files')
-    dicom_dirs = find_all_dicom_dirs(SCAN_DIR)
     if TEST:
-        dicom_dirs = dicom_dirs[:N_TEST]
-        LOGGER.info(f'Running in test mode with {N_TEST} directories')
+        LOGGER.info(f'Running in test mode with a maximum of {N_TEST} directories')
+    dicom_dirs = find_all_dicom_dirs(SCAN_DIR, N_test=N_TEST if TEST else None)
+    #if TEST:
+        #dicom_dirs = dicom_dirs[:N_TEST]
+        #LOGGER.info(f'Running in test mode with {N_TEST} directories')
 
     # Scan the directories for dicom files
     LOGGER.info('Analyzing DICOM directories')
