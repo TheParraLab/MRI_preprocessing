@@ -4,6 +4,7 @@ import time
 import argparse
 import subprocess
 import pickle
+import random
 # Third-party imports
 import pydicom as pyd
 import pandas as pd
@@ -23,6 +24,8 @@ parser.add_argument('--save_dir', nargs='?', default='/FL_system/data/', type=st
 parser.add_argument('--scan_dir', nargs='?', default='/FL_system/data/raw/', type=str, help='Location to recursively scan for dicom files (default: /FL_system/data/raw/)')
 parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
 parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
+parser.add_argument('--sample-pct', type=float, default=0.0, help='Percent of .dcm files to sample per directory (0 = full scan)')
+parser.add_argument('--sample-seed', type=int, default=None, help='Optional random seed for sampling reproducibility')
 args = parser.parse_args()
 
 # Apply cli arguments
@@ -33,6 +36,10 @@ N_TEST = args.test if TEST else 100 # Number of dicom directories to scan if TES
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
 N_CPUS = args.multi if PARALLEL else cpu_count()-1 # Number of cpus to use if PARALLEL is True
 PROFILE = args.profile # If True, the script will run with the profiler enabled
+SAMPLE_PCT = args.sample_pct
+SAMPLE_SEED = args.sample_seed
+if SAMPLE_SEED is not None:
+    random.seed(SAMPLE_SEED)
 # Profiler imports
 if PROFILE:
     import yappi
@@ -157,40 +164,61 @@ def findDicom(directory):
 
     # Walk through the directory and its subdirectories
     for root, dirs, files in os.walk(directory):
-        found_series = []
-        # Check if any file in the current directory ends with '.dcm'
-        for file in files:
-            if file.endswith('.dcm'):
-                # If the file is a dicom file, read it and extract the SeriesNumber
-                file_path = os.path.join(root, file)
-                #start_time = time.time()
-                try:
-                    # Validate if the file is a DICOM file
-                    if not pyd.misc.is_dicom(file_path):
-                        LOGGER.warning(f'Skipping non-DICOM file: {file_path}')
-                        continue
-                    # Read the DICOM file
-                    data = pyd.dcmread(file_path, stop_before_pixels=True, force=True)
-                except pyd.errors.InvalidDicomError as ide:
-                    LOGGER.error(f'Invalid DICOM file {file_path}: {ide}')
-                    continue
-                except Exception as e:
-                    LOGGER.error(f'Error reading file {file} in folder {root} | {e}', )
-                    continue
-                #LOGGER.debug(f'File {file} read in {time.time() - start_time:.2f} seconds')
-                
-                # Check if the series number has already been found
-                if hasattr(data, 'SeriesNumber') and data.SeriesNumber in found_series:
-                    continue
-                elif hasattr(data, 'SeriesNumber'):
-                    dicom_files.append(file_path)
-                    found_series.append(data.SeriesNumber)
-                else:
-                    LOGGER.warning(f'File {file_path} does not have a SeriesNumber attribute')
-            
-        LOGGER.debug(f'{root} contains series {found_series} | {len(found_series)} series found')
-    return dicom_files
+        # Efficiently get candidate filenames with .dcm extension
+        dcm_candidates = [f for f in files if f.lower().endswith('.dcm')]
+        if not dcm_candidates:
+            continue
 
+        # Decide whether to sample by percentage
+        if SAMPLE_PCT and SAMPLE_PCT > 0 and len(dcm_candidates) > 1:
+            k = max(1, int(len(dcm_candidates) * (SAMPLE_PCT / 100.0)))
+            # If k >= len, just scan all
+            if k >= len(dcm_candidates):
+                sample_list = dcm_candidates
+                fallback_allowed = False
+            else:
+                sample_list = random.sample(dcm_candidates, k)
+                fallback_allowed = True
+        else:
+            sample_list = dcm_candidates
+            fallback_allowed = False
+
+        found_series = {}
+
+        # Try sampled candidates first
+        for fname in sample_list:
+            path = os.path.join(root, fname)
+            try:
+                data = pyd.dcmread(path, stop_before_pixels=True, force=True)
+            except Exception as e:
+                LOGGER.debug(f'Skipping unreadable/non-DICOM file: {path} | {e}')
+                continue
+            series = getattr(data, 'SeriesNumber', None)
+            if series is not None and series not in found_series:
+                found_series[series] = path
+
+        # If sampling was used and results are ambiguous (none or multiple series), fall back to full scan
+        if fallback_allowed and (len(found_series) == 0 or len(found_series) > 1):
+            LOGGER.debug(f'Ambiguous sampling in {root} (found series={list(found_series.keys())}), falling back to full scan')
+            full_found = {}
+            for fname in dcm_candidates:
+                path = os.path.join(root, fname)
+                try:
+                    data = pyd.dcmread(path, stop_before_pixels=True, force=True)
+                except Exception:
+                    continue
+                series = getattr(data, 'SeriesNumber', None)
+                if series is not None and series not in full_found:
+                    full_found[series] = path
+            found_series = full_found
+
+        # Record the first file for each detected series
+        for series, path in found_series.items():
+            dicom_files.append(path)
+
+        LOGGER.debug(f'{root} contains series {sorted(found_series.keys())} | {len(found_series)} series found')
+
+    return dicom_files
 #############################
 ## Main script
 #############################
