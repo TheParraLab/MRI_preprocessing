@@ -5,6 +5,8 @@ import argparse
 import subprocess
 import pickle
 import random
+from pathlib import Path
+import json
 # Third-party imports
 import pydicom as pyd
 import pandas as pd
@@ -26,6 +28,8 @@ parser.add_argument('--dir_idx', type=int, help='Index of the folder to process 
 parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
 parser.add_argument('--sample-pct', type=float, default=0.0, help='Percent of .dcm files to sample per directory (0 = full scan)')
 parser.add_argument('--sample-seed', type=int, default=None, help='Optional random seed for sampling reproducibility')
+parser.add_argument('--checkpoint-dir', type=str, default=None, help='Directory to store checkpoint files (default: <SAVE_DIR>/checkpoints/)')
+parser.add_argument('--resume', action='store_true', help='Resume from available checkpoints if present')
 args = parser.parse_args()
 
 # Apply cli arguments
@@ -40,6 +44,9 @@ SAMPLE_PCT = args.sample_pct
 SAMPLE_SEED = args.sample_seed
 if SAMPLE_SEED is not None:
     random.seed(SAMPLE_SEED)
+# Checkpointing settings
+CHECKPOINT_DIR = args.checkpoint_dir
+RESUME = args.resume
 # Profiler imports
 if PROFILE:
     import yappi
@@ -48,6 +55,49 @@ if PROFILE:
 
 # Generate logger
 LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
+
+def _ensure_checkpoint_dir():
+    """Return checkpoint directory path, creating it if necessary."""
+    global CHECKPOINT_DIR
+    if CHECKPOINT_DIR is None:
+        CHECKPOINT_DIR = os.path.join(SAVE_DIR, 'checkpoints/')
+    try:
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    except Exception:
+        # If we can't create the checkpoint dir, fallback to SAVE_DIR
+        CHECKPOINT_DIR = SAVE_DIR
+    return CHECKPOINT_DIR
+
+def save_checkpoint(name: str, obj):
+    """Atomically save checkpoint object to PICKLE file in checkpoint dir.
+
+    name: base name without extension (e.g., 'dirs', 'dicom_files', 'info')
+    """
+    d = _ensure_checkpoint_dir()
+    tmp_path = os.path.join(d, f'.{name}.tmp')
+    final_path = os.path.join(d, f'{name}.pkl')
+    try:
+        with open(tmp_path, 'wb') as f:
+            pickle.dump(obj, f)
+        os.replace(tmp_path, final_path)
+        LOGGER.info(f'Wrote checkpoint: {final_path}')
+    except Exception as e:
+        LOGGER.error(f'Failed to write checkpoint {final_path}: {e}')
+
+def load_checkpoint(name: str):
+    """Load checkpoint object if it exists, else return None."""
+    d = CHECKPOINT_DIR or os.path.join(SAVE_DIR, 'checkpoints/')
+    path = os.path.join(d, f'{name}.pkl')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'rb') as f:
+            obj = pickle.load(f)
+        LOGGER.info(f'Loaded checkpoint: {path}')
+        return obj
+    except Exception as e:
+        LOGGER.error(f'Failed to load checkpoint {path}: {e}')
+        return None
 
 #### Preprocessing | Step 1: Extract DICOM data ####
 # This script scans the input directory for dicom files and extracts necessary header information
@@ -252,21 +302,69 @@ def main(out_name='Data_table.csv', SAVE_DIR='', SCAN_DIR=''):
     LOGGER.info('Finding all directories containing DICOM files')
     if TEST:
         LOGGER.info(f'Running in test mode with a maximum of {N_TEST} directories')
-    dicom_dirs = find_all_dicom_dirs(SCAN_DIR, N_test=N_TEST if TEST else None)
+    # Try to resume from checkpoint if requested
+    dicom_dirs = None
+    if RESUME:
+        try:
+            _ensure_checkpoint_dir()
+            dicom_dirs = load_checkpoint('dirs')
+        except Exception:
+            dicom_dirs = None
+
+    if dicom_dirs is None:
+        dicom_dirs = find_all_dicom_dirs(SCAN_DIR, N_test=N_TEST if TEST else None)
+        try:
+            save_checkpoint('dirs', dicom_dirs)
+        except Exception:
+            pass
     #if TEST:
         #dicom_dirs = dicom_dirs[:N_TEST]
         #LOGGER.info(f'Running in test mode with {N_TEST} directories')
 
     # Scan the directories for dicom files
     LOGGER.info('Analyzing DICOM directories')
-    dicom_files = run_function(LOGGER, findDicom, dicom_dirs, Parallel=PARALLEL, P_type='thread')
-    dicom_files = [f for sublist in dicom_files for f in sublist] # Flatten the list of lists
+    # Attempt to resume dicom_files from checkpoint
+    dicom_files = None
+    if RESUME:
+        try:
+            dicom_files = load_checkpoint('dicom_files')
+        except Exception:
+            dicom_files = None
+
+    if dicom_files is None:
+        dicom_files = run_function(LOGGER, findDicom, dicom_dirs, Parallel=PARALLEL, P_type='thread')
+        dicom_files = [f for sublist in dicom_files for f in sublist] # Flatten the list of lists
+        try:
+            save_checkpoint('dicom_files', dicom_files)
+        except Exception:
+            pass
     LOGGER.info(f'Found {len(dicom_files)} dicom files in the input directory')
     # Extract the dicom information
     LOGGER.info('Extracting information from dicom files')
-    INFO = run_function(LOGGER, extractDicom, dicom_files, Parallel=PARALLEL, P_type='thread')
+    # Attempt to resume INFO from checkpoint
+    INFO = None
+    if RESUME:
+        try:
+            INFO = load_checkpoint('info')
+        except Exception:
+            INFO = None
+
+    if INFO is None:
+        INFO = run_function(LOGGER, extractDicom, dicom_files, Parallel=PARALLEL, P_type='thread')
+        try:
+            save_checkpoint('info', INFO)
+        except Exception:
+            pass
+
     Data_table = pd.DataFrame(INFO) # Convert the extracted information to a pandas dataframe
-    Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False) # Save the extracted information to a csv file
+    # Write Data_table to CSV atomically
+    out_path = os.path.join(SAVE_DIR, out_name)
+    tmp_out = out_path + '.tmp'
+    try:
+        Data_table.to_csv(tmp_out, index=False)
+        os.replace(tmp_out, out_path)
+    except Exception as e:
+        LOGGER.error(f'Failed to write output CSV {out_path}: {e}')
     LOGGER.info(f'DICOM information extraction completed and saved to {out_name}')
 
 
