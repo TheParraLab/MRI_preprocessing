@@ -1,0 +1,7 @@
+pytest>=7.0
+pydicom>=2.3
+pytest-cov
+numpy
+pandas
+scipy
+matplotlib

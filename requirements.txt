@@ -1,0 +1,20 @@
+# General runtime requirements for MRI_preprocessing
+# For development and testing see `requirements-dev.txt`.
+
+numpy>=1.23
+pandas>=1.5
+scipy>=1.9
+matplotlib>=3.5
+pydicom>=2.3
+nibabel>=3.2
+
+# Optional utilities that may be used by scripts/tests
+tqdm>=4.60
+
+# Note: the web control UI (under `control_system/app`) is Docker-only and
+# its dependencies (Flask, Flask-SocketIO, etc.) are intentionally not listed
+# here. If you run the web UI outside Docker you'll need to install those
+# packages separately inside an environment managed by you.
+# Notes:
+# - Testing and development tools (pytest, pytest-cov, etc.) are listed in requirements-dev.txt
+# - Pin versions more tightly for reproducible deployments if desired
