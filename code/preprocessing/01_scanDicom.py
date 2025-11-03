@@ -4,6 +4,9 @@ import time
 import argparse
 import subprocess
 import pickle
+import random
+from pathlib import Path
+import json
 # Third-party imports
 import pydicom as pyd
 import pandas as pd
@@ -23,6 +26,10 @@ parser.add_argument('--save_dir', nargs='?', default='/FL_system/data/', type=st
 parser.add_argument('--scan_dir', nargs='?', default='/FL_system/data/raw/', type=str, help='Location to recursively scan for dicom files (default: /FL_system/data/raw/)')
 parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
 parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
+parser.add_argument('--sample-pct', type=float, default=0.0, help='Percent of .dcm files to sample per directory (0 = full scan)')
+parser.add_argument('--sample-seed', type=int, default=None, help='Optional random seed for sampling reproducibility')
+parser.add_argument('--checkpoint-dir', type=str, default=None, help='Directory to store checkpoint files (default: <SAVE_DIR>/checkpoints/)')
+parser.add_argument('--resume', action='store_true', help='Resume from available checkpoints if present')
 args = parser.parse_args()
 
 # Apply cli arguments
@@ -33,6 +40,13 @@ N_TEST = args.test if TEST else 100 # Number of dicom directories to scan if TES
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
 N_CPUS = args.multi if PARALLEL else cpu_count()-1 # Number of cpus to use if PARALLEL is True
 PROFILE = args.profile # If True, the script will run with the profiler enabled
+SAMPLE_PCT = args.sample_pct
+SAMPLE_SEED = args.sample_seed
+if SAMPLE_SEED is not None:
+    random.seed(SAMPLE_SEED)
+# Checkpointing settings
+CHECKPOINT_DIR = args.checkpoint_dir
+RESUME = args.resume
 # Profiler imports
 if PROFILE:
     import yappi
@@ -41,6 +55,49 @@ if PROFILE:
 
 # Generate logger
 LOGGER = get_logger('01_scanDicom', f'{SAVE_DIR}/logs/')
+
+def _ensure_checkpoint_dir():
+    """Return checkpoint directory path, creating it if necessary."""
+    global CHECKPOINT_DIR
+    if CHECKPOINT_DIR is None:
+        CHECKPOINT_DIR = os.path.join(SAVE_DIR, 'checkpoints/')
+    try:
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    except Exception:
+        # If we can't create the checkpoint dir, fallback to SAVE_DIR
+        CHECKPOINT_DIR = SAVE_DIR
+    return CHECKPOINT_DIR
+
+def save_checkpoint(name: str, obj):
+    """Atomically save checkpoint object to PICKLE file in checkpoint dir.
+
+    name: base name without extension (e.g., 'dirs', 'dicom_files', 'info')
+    """
+    d = _ensure_checkpoint_dir()
+    tmp_path = os.path.join(d, f'.{name}.tmp')
+    final_path = os.path.join(d, f'{name}.pkl')
+    try:
+        with open(tmp_path, 'wb') as f:
+            pickle.dump(obj, f)
+        os.replace(tmp_path, final_path)
+        LOGGER.info(f'Wrote checkpoint: {final_path}')
+    except Exception as e:
+        LOGGER.error(f'Failed to write checkpoint {final_path}: {e}')
+
+def load_checkpoint(name: str):
+    """Load checkpoint object if it exists, else return None."""
+    d = CHECKPOINT_DIR or os.path.join(SAVE_DIR, 'checkpoints/')
+    path = os.path.join(d, f'{name}.pkl')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'rb') as f:
+            obj = pickle.load(f)
+        LOGGER.info(f'Loaded checkpoint: {path}')
+        return obj
+    except Exception as e:
+        LOGGER.error(f'Failed to load checkpoint {path}: {e}')
+        return None
 
 #### Preprocessing | Step 1: Extract DICOM data ####
 # This script scans the input directory for dicom files and extracts necessary header information
@@ -97,23 +154,42 @@ def extractDicom(f: str):
         LOGGER.error(f'Error extracting information for file: {f} | {e}')
         return None
 
-def find_all_dicom_dirs(directory):
+def find_all_dicom_dirs(directory, N_test=None):
     """
-    Find all directories containing DICOM files (.dcm) in the given directory.
+    Find all directories containing MRI DICOM files (.dcm) in the given directory.
 
     Args:
         directory (str): The root directory to search.
+        N_test (int, optional): If provided, limits the search to the first N_test directories found.
 
     Returns:
         List[str]: A list of directories containing DICOM files.
     """
     dicom_dirs = []
-
+    N_found = 0
     for root, _, files in os.walk(directory, followlinks=False):
         # Check if any file in the current directory ends with '.dcm'
-        if any(file.endswith('.dcm') for file in files):
+        has_mri = False
+        for file in files:
+            if file.endswith('.dcm'):
+                file_path = os.path.join(root, file)
+                try:
+                    dcm = pyd.dcmread(file_path, stop_before_pixels=True, force=True)
+                    if hasattr(dcm, 'Modality') and dcm.Modality == 'MR':
+                        has_mri = True
+                        break
+                except Exception:
+                    LOGGER.debug(f'Skipping non-MRI file: {file_path}')
+                    continue
+            else:
+                LOGGER.debug(f'Skipping non-DICOM file: {os.path.join(root, file)}')
+            
+        if has_mri: 
             dicom_dirs.append(root)
-            LOGGER.debug(f'Found DICOM files in {root}')
+            N_found += 1
+            if N_test is not None and N_found >= N_test:
+                break
+            LOGGER.debug(f'Found DICOM files for MRI in {root}')
 
     if not dicom_dirs:
         LOGGER.warning(f'No directories containing DICOM files found in {directory}')
@@ -138,40 +214,61 @@ def findDicom(directory):
 
     # Walk through the directory and its subdirectories
     for root, dirs, files in os.walk(directory):
-        found_series = []
-        # Check if any file in the current directory ends with '.dcm'
-        for file in files:
-            if file.endswith('.dcm'):
-                # If the file is a dicom file, read it and extract the SeriesNumber
-                file_path = os.path.join(root, file)
-                #start_time = time.time()
-                try:
-                    # Validate if the file is a DICOM file
-                    if not pyd.misc.is_dicom(file_path):
-                        LOGGER.warning(f'Skipping non-DICOM file: {file_path}')
-                        continue
-                    # Read the DICOM file
-                    data = pyd.dcmread(file_path, stop_before_pixels=True, force=True)
-                except pyd.errors.InvalidDicomError as ide:
-                    LOGGER.error(f'Invalid DICOM file {file_path}: {ide}')
-                    continue
-                except Exception as e:
-                    LOGGER.error(f'Error reading file {file} in folder {root} | {e}', )
-                    continue
-                #LOGGER.debug(f'File {file} read in {time.time() - start_time:.2f} seconds')
-                
-                # Check if the series number has already been found
-                if hasattr(data, 'SeriesNumber') and data.SeriesNumber in found_series:
-                    continue
-                elif hasattr(data, 'SeriesNumber'):
-                    dicom_files.append(file_path)
-                    found_series.append(data.SeriesNumber)
-                else:
-                    LOGGER.warning(f'File {file_path} does not have a SeriesNumber attribute')
-            
-        LOGGER.debug(f'{root} contains series {found_series} | {len(found_series)} series found')
-    return dicom_files
+        # Efficiently get candidate filenames with .dcm extension
+        dcm_candidates = [f for f in files if f.lower().endswith('.dcm')]
+        if not dcm_candidates:
+            continue
 
+        # Decide whether to sample by percentage
+        if SAMPLE_PCT and SAMPLE_PCT > 0 and len(dcm_candidates) > 1:
+            k = max(1, int(len(dcm_candidates) * (SAMPLE_PCT / 100.0)))
+            # If k >= len, just scan all
+            if k >= len(dcm_candidates):
+                sample_list = dcm_candidates
+                fallback_allowed = False
+            else:
+                sample_list = random.sample(dcm_candidates, k)
+                fallback_allowed = True
+        else:
+            sample_list = dcm_candidates
+            fallback_allowed = False
+
+        found_series = {}
+
+        # Try sampled candidates first
+        for fname in sample_list:
+            path = os.path.join(root, fname)
+            try:
+                data = pyd.dcmread(path, stop_before_pixels=True, force=True)
+            except Exception as e:
+                LOGGER.debug(f'Skipping unreadable/non-DICOM file: {path} | {e}')
+                continue
+            series = getattr(data, 'SeriesNumber', None)
+            if series is not None and series not in found_series:
+                found_series[series] = path
+
+        # If sampling was used and results are ambiguous (none or multiple series), fall back to full scan
+        if fallback_allowed and (len(found_series) == 0 or len(found_series) > 1):
+            LOGGER.debug(f'Ambiguous sampling in {root} (found series={list(found_series.keys())}), falling back to full scan')
+            full_found = {}
+            for fname in dcm_candidates:
+                path = os.path.join(root, fname)
+                try:
+                    data = pyd.dcmread(path, stop_before_pixels=True, force=True)
+                except Exception:
+                    continue
+                series = getattr(data, 'SeriesNumber', None)
+                if series is not None and series not in full_found:
+                    full_found[series] = path
+            found_series = full_found
+
+        # Record the first file for each detected series
+        for series, path in found_series.items():
+            dicom_files.append(path)
+
+        LOGGER.debug(f'{root} contains series {sorted(found_series.keys())} | {len(found_series)} series found')
+
+    return dicom_files
 #############################
 ## Main script
 #############################
@@ -203,21 +300,71 @@ def main(out_name='Data_table.csv', SAVE_DIR='', SCAN_DIR=''):
 
     # Finding main directory and subdirectories
     LOGGER.info('Finding all directories containing DICOM files')
-    dicom_dirs = find_all_dicom_dirs(SCAN_DIR)
     if TEST:
-        dicom_dirs = dicom_dirs[:N_TEST]
-        LOGGER.info(f'Running in test mode with {N_TEST} directories')
+        LOGGER.info(f'Running in test mode with a maximum of {N_TEST} directories')
+    # Try to resume from checkpoint if requested
+    dicom_dirs = None
+    if RESUME:
+        try:
+            _ensure_checkpoint_dir()
+            dicom_dirs = load_checkpoint('dirs')
+        except Exception:
+            dicom_dirs = None
+
+    if dicom_dirs is None:
+        dicom_dirs = find_all_dicom_dirs(SCAN_DIR, N_test=N_TEST if TEST else None)
+        try:
+            save_checkpoint('dirs', dicom_dirs)
+        except Exception:
+            pass
+    #if TEST:
+        #dicom_dirs = dicom_dirs[:N_TEST]
+        #LOGGER.info(f'Running in test mode with {N_TEST} directories')
 
     # Scan the directories for dicom files
     LOGGER.info('Analyzing DICOM directories')
-    dicom_files = run_function(LOGGER, findDicom, dicom_dirs, Parallel=PARALLEL, P_type='thread')
-    dicom_files = [f for sublist in dicom_files for f in sublist] # Flatten the list of lists
+    # Attempt to resume dicom_files from checkpoint
+    dicom_files = None
+    if RESUME:
+        try:
+            dicom_files = load_checkpoint('dicom_files')
+        except Exception:
+            dicom_files = None
+
+    if dicom_files is None:
+        dicom_files = run_function(LOGGER, findDicom, dicom_dirs, Parallel=PARALLEL, P_type='thread')
+        dicom_files = [f for sublist in dicom_files for f in sublist] # Flatten the list of lists
+        try:
+            save_checkpoint('dicom_files', dicom_files)
+        except Exception:
+            pass
     LOGGER.info(f'Found {len(dicom_files)} dicom files in the input directory')
     # Extract the dicom information
     LOGGER.info('Extracting information from dicom files')
-    INFO = run_function(LOGGER, extractDicom, dicom_files, Parallel=PARALLEL, P_type='thread')
+    # Attempt to resume INFO from checkpoint
+    INFO = None
+    if RESUME:
+        try:
+            INFO = load_checkpoint('info')
+        except Exception:
+            INFO = None
+
+    if INFO is None:
+        INFO = run_function(LOGGER, extractDicom, dicom_files, Parallel=PARALLEL, P_type='thread')
+        try:
+            save_checkpoint('info', INFO)
+        except Exception:
+            pass
+
     Data_table = pd.DataFrame(INFO) # Convert the extracted information to a pandas dataframe
-    Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False) # Save the extracted information to a csv file
+    # Write Data_table to CSV atomically
+    out_path = os.path.join(SAVE_DIR, out_name)
+    tmp_out = out_path + '.tmp'
+    try:
+        Data_table.to_csv(tmp_out, index=False)
+        os.replace(tmp_out, out_path)
+    except Exception as e:
+        LOGGER.error(f'Failed to write output CSV {out_path}: {e}')
     LOGGER.info(f'DICOM information extraction completed and saved to {out_name}')
 
 

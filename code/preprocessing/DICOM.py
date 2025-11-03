@@ -689,24 +689,11 @@ class DICOMsplit():
         # Get the common element of all paths
         self.directory = os.path.commonpath(self.dicom_table['PATH'].tolist())
         self.logger.debug(f'Found common path: {self.directory} | [{self.Session_ID}]')
-        ### Temporarily fixing directory from other systems
-        if 'MSKCC_16-328' in self.Session_ID:
-            self.logger.debug(f'Fixing directory path for MSKCC_16-328 | [{self.Session_ID}]')
-            self.directory.replace('/FL_system/data/raw/', '/FL_system/data/raw/16-328/')
-            for i in range(len(self.dicom_table)):
-                self.dicom_table.at[i, 'PATH'] = self.dicom_table.at[i, 'PATH'].replace('/FL_system/data/raw/', '/FL_system/data/raw/16-328/')
-        elif 'RIA_19-093' in self.Session_ID:
-            self.logger.debug(f'Fixing directory path for RIA_19-093 | [{self.Session_ID}]')
-            self.directory.replace('/mnt/XNAT/19-093/', '/FL_system/data/raw/19-093/')
-            for i in range(len(self.dicom_table)):
-                self.dicom_table.at[i, 'PATH'] = self.dicom_table.at[i, 'PATH'].replace('/mnt/XNAT/19-093/', '/FL_system/data/raw/19-093/')
-        elif 'RIA_20-425' in self.Session_ID:
-            self.logger.debug(f'Fixing directory path for RIA_20-425 | [{self.Session_ID}]')
-            self.directory.replace('/FL_system/data/raw/', '/FL_system/data/raw/20-425/')
-            for i in range(len(self.dicom_table)):
-                self.dicom_table.at[i, 'PATH'] = self.dicom_table.at[i, 'PATH'].replace('/FL_system/data/raw/', '/FL_system/data/raw/20-425/')
-        else:
-            self.logger.error(f'Unable to determine protocol for path correction | [{self.Session_ID}]')
+        # Legacy path-correction removed.
+        # Previously this block attempted to rewrite paths for datasets imported from other systems
+        # (MSKCC_16-328, RIA_19-093, RIA_20-425). Path normalization should be handled upstream
+        # (when constructing the DataFrame) or via a dedicated migration script. If live
+        # corrections are required again, reintroduce a small, well-tested helper here.
 
         # Determine expectations for the scan
         self.scan_path = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'PATH'].values[0]
@@ -785,7 +772,7 @@ class DICOMsplit():
                 slices = self.scan_results.loc[self.scan_results['TriTime'] == i, 'Slice'].to_list()
                 slices.sort()
                 if len(slices) != self.expected_slices:
-                    self.logger.warning(f'Unexpected number of slices {len(slices)} found for trigger time {i}, expected {expected_slices} | [{self.Session_ID}]')
+                    self.logger.warning(f'Unexpected number of slices {len(slices)} found for trigger time {i}, expected {self.expected_slices} | [{self.Session_ID}]')
                     return
                 # Add new row to the dicom table
                 self.dicom_table = pd.concat([self.dicom_table, self.scan_results.loc[(self.scan_results['TriTime'] == i)&(self.scan_results['Slice'] == slices[0])]], ignore_index=True)
