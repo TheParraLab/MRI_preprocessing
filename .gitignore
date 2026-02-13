@@ -19,3 +19,4 @@ tmp/*
 import os.py
 
 reset_02.sh
+*.log
