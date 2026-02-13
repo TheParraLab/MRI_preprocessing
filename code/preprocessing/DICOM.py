@@ -402,29 +402,60 @@ class DICOMfilter():
     def detect_DISCO(self):
         """Detects and removes DISCO scans if steady state scans are also present"""
         disco_pattern = re.compile(r'disco', re.IGNORECASE)
-    
-        is_disco = self.dicom_table.loc[self.dicom_table['Series_desc'].str.contains(disco_pattern, na=False)]
-        not_disco = self.dicom_table.loc[~self.dicom_table['Series_desc'].str.contains(disco_pattern, na=False)]
-        self.logger.debug(f'Detected {len(is_disco)} DISCO scans and {len(not_disco)} non-DISCO scans | {self.Session_ID}')
-        
+        self.dicom_table['IS_DISCO'] = self.dicom_table['Series_desc'].str.contains(disco_pattern, na=False)
+        is_disco = self.dicom_table.loc[self.dicom_table['IS_DISCO'] == True]
+        not_disco = self.dicom_table.loc[self.dicom_table['IS_DISCO'] == False]
+        if not_disco['Pre_scan'].sum() >= 1:
+            not_disco = not_disco.loc[(not_disco['Pre_scan'] == 1)| (not_disco['Post_scan'] == 1)]
+
+        if len(not_disco) > 2 and len(is_disco) > 0:
+            self.logger.debug(f'Detected {len(is_disco)} DISCO scans and {len(not_disco)} non-DISCO scans, selected NON_DISCO | {self.Session_ID}')
+            # Need to check if non-disco represent a full sequence
+            self.removed['DISCO'] = is_disco
+            self.dicom_table = not_disco
+            #print('------')
+            #print('NON DISCO SELECTED')
+            #print('------')
+            #print('DISCO')
+            #print(is_disco)
+            #print("NON DISCO")
+            #print(not_disco)
+            #input('Please review DISCO detection')
+        elif len(not_disco) < 3:
+            self.logger.debug(f'Detected {len(is_disco)} DISCO scans and {len(not_disco)} non-DISCO scans, selected DISCO | {self.Session_ID}')
+            self.removed['NON_DISCO'] = not_disco
+            self.dicom_table = is_disco
+            #print('------')
+            #print('DISCO SELECTED')
+            #print('------')
+            #print('DISCO')
+            #print(is_disco)
+            #print("NON DISCO")
+            #print(not_disco)
+            #input('Please review DISCO detection')
         return
 
     def isolate_sequence(self):
 
         ### Remove localizer scans
-        self.removed['Localizer'] = self.dicom_table[self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('loc', na=False)]
-        self.dicom_table = self.dicom_table[~self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('loc', na=False)]
+        self.removed['Localizer'] = self.dicom_table[self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('loc', na=False) | self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('calib', na=False)]
+        self.dicom_table = self.dicom_table[~self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('loc', na=False) & ~self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('calib', na=False)]
+
+        #self.dicom_table['IS_DISCO'] == False
+
+        self.dicom_table['Post_scan'] = self.dicom_table['Series_desc'].apply(lambda x: 1 if 'post' in str(x).lower() else 0)
+        self.dicom_table['Pre_scan'] = self.dicom_table['Series_desc'].apply(lambda x: 1 if 'pre' in str(x).lower() else 0)
 
         ## Attempting to detect DISCO sequences
         # Removes DISCO sequences if steady state sequences are also present
-        #self.detect_DISCO()
+        self.detect_DISCO()
 
         ### Sessions must have at least 2 scans to be considered valid
-        if len(self.dicom_table) < 2:
-            self.logger.debug(f'Not enough scans to isolate sequence | {self.Session_ID}')
-            self.removed['Too_few_scans'] = self.dicom_table.copy()
-            self.dicom_table = pd.DataFrame()
-            return self.dicom_table
+        #if len(self.dicom_table) < 2:
+        #    self.logger.debug(f'Not enough scans to isolate sequence | {self.Session_ID}')
+        #    self.removed['Too_few_scans'] = self.dicom_table.copy()
+        #    self.dicom_table = pd.DataFrame()
+        #    return self.dicom_table
 
         ### Fixing laterality from series description
         mask_unknown = self.dicom_table['Lat'].fillna('').str.lower() == 'unknown'
@@ -432,8 +463,6 @@ class DICOMfilter():
         self.dicom_table.loc[mask_unknown & self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('right', na=False), 'Lat'] = 'right'
         self.dicom_table.loc[mask_unknown & self.dicom_table['Series_desc'].fillna('').str.lower().str.contains('bilateral', na=False), 'Lat'] = 'bilateral'
         ### Use Series Description to identify pre and post scans   
-        self.dicom_table['Post_scan'] = self.dicom_table['Series_desc'].apply(lambda x: 1 if 'post' in str(x).lower() else 0)
-        self.dicom_table['Pre_scan'] = self.dicom_table['Series_desc'].apply(lambda x: 1 if 'pre' in str(x).lower() else 0)
 
         mask_both = (self.dicom_table['Post_scan'].astype(int) == 1) & (self.dicom_table['Pre_scan'].astype(int) == 1)
         if mask_both.sum() > 0:

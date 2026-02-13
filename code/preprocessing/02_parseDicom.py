@@ -35,6 +35,7 @@ parser.add_argument('--dir_idx', type=int, help='Index of the folder to process 
 parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
 parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv', help='Load table to use for the job')
 parser.add_argument('--filter_only', action='store_true', help='Run only the filtering step without ordering')
+parser.add_argument('--move', action='store_true', help='Move files to temporary locations')
 args = parser.parse_args()
 
 
@@ -45,6 +46,7 @@ PARALLEL = args.multi is not None
 TEST = False
 N_TEST = 25
 N_CPUS = args.multi if PARALLEL else cpu_count() - 1
+MOVE = args.move
 
 # Initialize logger
 LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
@@ -267,7 +269,9 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
     else:
         # Load in the data table
         init_data(args.load_table, target)
-
+        
+        # TEMP - REMOVE 16-328 protocol
+        Data_table = Data_table[Data_table['ID'].apply(lambda x: x.split('_')[1]) != '16-328']
         # Get the unique identifiers
         Iden_uniq = np.unique(Data_table['SessionID'])
         PRE_TABLE = Data_table.copy()
@@ -278,8 +282,8 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
             LOGGER.debug('Running in parallel mode')
 
         # Split the data table into subsets based on the unique identifiers
-        Data_subsets = run_function(LOGGER, split_table, Iden_uniq, Parallel=PARALLEL, P_type='process')
-        #Data_subsets = [group for _, group in Data_table.groupby('SessionID')]
+        #Data_subsets = run_function(LOGGER, split_table, Iden_uniq, Parallel=PARALLEL, P_type='process')
+        Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
         # Filter the data based on the criteria defined in DICOMfilter and filterDicom
         results, removed, temporary_relocation = run_function(LOGGER, filterDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
         #temporary_relocation = list(temporary_relocation)
@@ -371,8 +375,8 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
     #save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
     #exit()
 
-
-    run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL, P_type='process')
+    if MOVE:
+        run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL, P_type='process')
 
     if not stop_flag.is_set():
         LOGGER.info('redirection complete without stop flag')
