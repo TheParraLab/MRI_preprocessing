@@ -131,7 +131,7 @@ def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List
                     result = target(item, *args, **kwargs)
                     results.append(result)
                 except Exception as e:
-                    LOGGER.error(f'Error in sequential processing: {e}')
+                    LOGGER.exception(f'Error in sequential processing')
     except KeyboardInterrupt:
         LOGGER.error('KeyboardInterrupt received. Stopping processing.')
         if stop_flag:
