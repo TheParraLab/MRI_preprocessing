@@ -27,31 +27,43 @@ Progress = None
 manager = Manager()
 disk_space_lock = Lock()
 
-# Set up parsing arguments
-parser = argparse.ArgumentParser(description='Parse DICOM data')
-parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
-parser.add_argument('--save_dir', type=str, default='/FL_system/data/', help='Directory to save the updated tables')
-parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
-parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
-parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv', help='Load table to use for the job')
-parser.add_argument('--filter_only', action='store_true', help='Run only the filtering step without ordering')
-parser.add_argument('--move', action='store_true', help='Move files to temporary locations')
-args = parser.parse_args()
+def parse_args():
+    parser = argparse.ArgumentParser(description='Parse DICOM data')
+    parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
+    parser.add_argument('--save_dir', type=str, default='/FL_system/data/', help='Directory to save the updated tables')
+    parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
+    parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
+    parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv', help='Load table to use for the job')
+    parser.add_argument('--filter_only', action='store_true', help='Run only the filtering step without ordering')
+    parser.add_argument('--move', action='store_true', help='Move files to temporary locations')
+    return parser.parse_args()
 
 
 # Define necessary parameters
-SAVE_DIR = args.save_dir
+args = None
+SAVE_DIR = ''
 COMPUTED_FLAGS = ['slope', 'sub', 'subtract']#, 'secondary'] # Keywords to identify derived images, removed secondary  for now due to some primary images being marked as such.
-PARALLEL = args.multi is not None
+DESCRIPTION_FLAGS= ['loc', 'pjn', 'calib']
+PARALLEL = False
 TEST = False
 N_TEST = 25
-N_CPUS = args.multi if PARALLEL else cpu_count() - 1
-MOVE = args.move
+N_CPUS = cpu_count() - 1
+MOVE = False
 
 # Initialize logger
-LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
+LOGGER = None
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
-stop_flag = manager.Event()
+stop_flag = None
+
+def configure_runtime(parsed_args):
+    global args, SAVE_DIR, PARALLEL, N_CPUS, MOVE, LOGGER, stop_flag
+    args = parsed_args
+    SAVE_DIR = args.save_dir
+    PARALLEL = args.multi is not None
+    N_CPUS = args.multi if PARALLEL else cpu_count() - 1
+    MOVE = args.move
+    LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
+    stop_flag = manager.Event()
 
 # Profiler
 PROFILE = False
@@ -68,7 +80,7 @@ if PROFILE:
 #
 # The following filters are applied to the data:
 # - T2 modality
-# - Breast implants | TODO: Implement alternative filtering not based on breast size
+# - Breast implants | Scans with breast implants are identified and removed based on the SeriesDescription and Type fields
 # - Laterality | Majority side is determined and scans not on the majority side are removed
 # - Number of slices | Majority number of slices is determined and scans not having the majority number of slices are removed
 # - Derived images | SeriesDescription and Type are checked for keywords indicating derived images
@@ -145,20 +157,21 @@ def splitDicom(Data_subset):
 def filterDicom(Data_subset):
     # Filter each subset of data based on the criteria
     Data_subset = Data_subset.reset_index(drop=True)
-    filter = DICOMfilter(Data_subset, logger=LOGGER, tmp_save=SAVE_DIR.replace('tmp/', 'tmp_data/'))
-    filter.removeT2()
-    if 'Type' in Data_subset.columns:
-        filter.removeComputed(COMPUTED_FLAGS)
-        filter.enforcePrimary()  # Ensure only primary scans are kept
-    else:
-        LOGGER.error("'Type' column not found in Data_subset")#filter.removeImplants()
-    
-    #filter.removeSide()
-    #filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
-    #filter.removeTimes(['TriTime']) # Omitted, Pre scans have unknown trigger time
-    #filter.removeDWI()
-    filter.isolate_sequence() # Attempt to isolatethe primary sequence of scans
-    return filter.dicom_table, filter.removed, filter.temporary_relocations
+    dicom_filter = DICOMfilter(Data_subset, logger=LOGGER, tmp_save=SAVE_DIR.replace('tmp/', 'tmp_data/'))
+    dicom_filter.Types(COMPUTED_FLAGS)
+    dicom_filter.Description(DESCRIPTION_FLAGS)
+        
+    #filter.removeImplants()
+    #dicom_filter.removeSide()
+    #dicom_filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
+    #dicom_filter.removeTimes(['TriTime']) # Omitted, Pre scans have unknown trigger time
+    #dicom_filter.removeDWI()
+    dicom_filter.isolate_sequence() # Attempt to isolatethe primary sequence of scans
+    if len(dicom_filter.dicom_table) == 0:
+        LOGGER.error(f'No scans remaining after filtering for {Data_subset["SessionID"].values[0]}')
+    #else:    
+        #dicom_filter.print_table(columns=['Series_desc', 'NumSlices', 'TriTime', 'Type', 'Series', 'IS_DISCO', 'Pre_scan', 'Post_scan'])
+    return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
 # Function to split the data table based on the unique identifier
 def split_table(ID):
@@ -271,7 +284,7 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         init_data(args.load_table, target)
         
         # TEMP - REMOVE 16-328 protocol
-        Data_table = Data_table[Data_table['ID'].apply(lambda x: x.split('_')[1]) != '16-328']
+        #Data_table = Data_table[Data_table['ID'].apply(lambda x: x.split('_')[1]) != '16-328']
         # Get the unique identifiers
         Iden_uniq = np.unique(Data_table['SessionID'])
         PRE_TABLE = Data_table.copy()
@@ -339,7 +352,8 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
             return
 
         # Resplit the filtered data table into subsets based on the unique identifiers
-        Data_subsets = run_function(LOGGER, split_table, Iden_uniq_after, Parallel=PARALLEL, P_type='process')
+        #Data_subsets = run_function(LOGGER, split_table, Iden_uniq_after, Parallel=PARALLEL, P_type='process')
+        Data_subsets = [group.copy() for id, group in Data_table.groupby('SessionID') if id in Iden_uniq_after]
 
         # Seperating scans which contain multiple post images in a single directory
         results, redirections = run_function(LOGGER, splitDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
@@ -370,7 +384,10 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         LOGGER.info(f'Saving ordered data to {SAVE_DIR}{out_name}')
         Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False)
 
-
+    # Saving temporary relocation list to a file for review and running later
+    with open(f'{SAVE_DIR}temporary_relocation.pkl', 'wb') as f:
+        pickle.dump(list(temporary_relocation), f)
+    print('Temporary relocation list saved to temporary_relocation.pkl')
 
     #save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
     #exit()
@@ -391,6 +408,7 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         LOGGER.info('checkpoint file saved')
 
 if __name__ == '__main__':
+    configure_runtime(parse_args())
     # Start the profiler if enabled
     if PROFILE:
         LOGGER.info('Profiling enabled')
