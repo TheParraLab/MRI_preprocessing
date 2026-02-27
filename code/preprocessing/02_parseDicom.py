@@ -7,6 +7,8 @@ import shutil
 import argparse
 import time
 import subprocess
+import re
+import random
 
 #import pydicom as pyd
 import numpy as np
@@ -166,11 +168,58 @@ def filterDicom(Data_subset):
     #dicom_filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
     #dicom_filter.removeTimes(['TriTime']) # Omitted, Pre scans have unknown trigger time
     #dicom_filter.removeDWI()
-    dicom_filter.isolate_sequence() # Attempt to isolatethe primary sequence of scans
+
+    # Labelling DISCO scans
+    disco_pattern = re.compile(r'disco', re.IGNORECASE)
+    dicom_filter.dicom_table['IS_DISCO'] = dicom_filter.dicom_table['Series_desc'].str.contains(disco_pattern, na=False)
+    
+    if dicom_filter.dicom_table['IS_DISCO'].sum() > 0:
+        # If DISCO files are found
+        dicom_filter.logger.debug(f'DISCO scans detected | {dicom_filter.Session_ID}')
+        dicom_filter.disco_table = dicom_filter.dicom_table.loc[dicom_filter.dicom_table['IS_DISCO'] == True]
+        dicom_filter.dicom_table = dicom_filter.dicom_table.loc[dicom_filter.dicom_table['IS_DISCO'] == False]
+        if len(dicom_filter.dicom_table) > 2:
+            # Attempt to isolate the primary sequence of scans using steady state information
+            dicom_filter.logger.debug(f'Will attempt to determine steady state sequence | {dicom_filter.Session_ID}')
+            if not dicom_filter.isolate_sequence():
+                # If unable to isolate the sequence using steady state information, attempt to use DISCO information to isolate the sequence
+                dicom_filter.logger.debug(f'Failed to isolate steady state sequence | {dicom_filter.Session_ID}')
+                dicom_filter.logger.debug(f'Attempting to solve with disco | {dicom_filter.Session_ID}')
+                dicom_filter.dicom_table = dicom_filter.disco_table
+                if not dicom_filter.isolate_sequence(): # If DISCO isolation fails, return an empty table
+                    # If steady state and disco both fail
+                    dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
+                    dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+                    dicom_filter.dicom_table = pd.DataFrame()
+                else:
+                    dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
+            else:
+                dicom_filter.logger.debug(f'Sequence isolated using steady state information | {dicom_filter.Session_ID}')
+        elif len(dicom_filter.disco_table) > 2:
+            # If not enough steady state information to isolate the sequence, attempt to use DISCO information to isolate the sequence
+            dicom_filter.logger.debug(f'Forced to utilize DISCO, not enough steady state information [{len(dicom_filter.dicom_table)}] | {dicom_filter.Session_ID}')
+            dicom_filter.dicom_table = dicom_filter.disco_table
+            if not dicom_filter.isolate_sequence(): # Attempt to isolate the primary sequence of scans using DISCO
+                dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
+                dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+                dicom_filter.dicom_table = pd.DataFrame()
+            else:
+                dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
+        else:
+            dicom_filter.logger.error(f'Not enough scans to identify sequence [DISCO or SS] | {dicom_filter.Session_ID}')
+            dicom_filter.removed['Sequence_Failure'] = pd.concat([dicom_filter.dicom_table, dicom_filter.disco_table])
+            dicom_filter.dicom_table = pd.DataFrame()
+    else:
+        dicom_filter.logger.debug(f'No DISCO scans detected | {dicom_filter.Session_ID}')
+        if dicom_filter.isolate_sequence():
+            dicom_filter.logger.debug(f'Sequence isolated using steady state information | {dicom_filter.Session_ID}')
+        else:
+            dicom_filter.logger.debug(f'Failed to isolate sequence using steady state information | {dicom_filter.Session_ID}')
+            dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+            dicom_filter.dicom_table = pd.DataFrame()
     if len(dicom_filter.dicom_table) == 0:
         LOGGER.error(f'No scans remaining after filtering for {Data_subset["SessionID"].values[0]}')
-    #else:    
-        #dicom_filter.print_table(columns=['Series_desc', 'NumSlices', 'TriTime', 'Type', 'Series', 'IS_DISCO', 'Pre_scan', 'Post_scan'])
+    
     return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
 # Function to split the data table based on the unique identifier
@@ -284,7 +333,7 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         init_data(args.load_table, target)
         
         # TEMP - REMOVE 16-328 protocol
-        #Data_table = Data_table[Data_table['ID'].apply(lambda x: x.split('_')[1]) != '16-328']
+        #Data_table = Data_table[Data_table['ID'].apply(lambda x: x.split('_')[1]) == '20-425']
         # Get the unique identifiers
         Iden_uniq = np.unique(Data_table['SessionID'])
         PRE_TABLE = Data_table.copy()
@@ -293,10 +342,10 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
             LOGGER.info(f'Running in test mode with {N_TEST} sessions')
         if PARALLEL:
             LOGGER.debug('Running in parallel mode')
-
         # Split the data table into subsets based on the unique identifiers
         #Data_subsets = run_function(LOGGER, split_table, Iden_uniq, Parallel=PARALLEL, P_type='process')
         Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
+        random.shuffle(Data_subsets)
         # Filter the data based on the criteria defined in DICOMfilter and filterDicom
         results, removed, temporary_relocation = run_function(LOGGER, filterDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
         #temporary_relocation = list(temporary_relocation)

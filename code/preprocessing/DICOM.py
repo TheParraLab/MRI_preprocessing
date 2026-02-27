@@ -439,6 +439,11 @@ class DICOMfilter():
         self.dicom_table = self.dicom_table.loc[self.dicom_table['Type'].str.contains('PRIMARY', na=False)]
         self.removed['Not_Primary'] = self.dicom_table.loc[self.dicom_table['Type'].str.contains('PRIMARY', na=False) == False]
         return self.dicom_table
+    
+    def isolate_DISCO(self):
+        self.disco_table = self.dicom_table.loc[self.dicom_table['IS_DISCO'] == True]
+        self.dicom_table = self.dicom_table.loc[self.dicom_table['IS_DISCO'] == False]
+        return
 
     def detect_DISCO(self):
         """Detects and removes DISCO scans if steady state scans are also present"""
@@ -565,9 +570,11 @@ class DICOMfilter():
             args:
             - arr: numpy array, the boolean array resulting from a given filter (e.g. series description or trigger time), which has already been determined to contain 2 candidates
             - action: string, either 'check' or 'apply', determines whether the function should simply check for the presence of adjacent series numbers, or also apply filtering to keep the newer scan and remove the older scan. Default is 'check'
+            
+            TODO: Should this be replaced by preferentially selecting fat saturated?
             '''
             assert arr.sum() == 2, 'Too many candidates to check for duplicates'
-            series_nums = self.dicom_table.loc[arr, 'SeriesNumber'].values
+            series_nums = self.dicom_table.loc[arr, 'Series'].values
             if np.abs(series_nums[0] - series_nums[1]) == 1:
                 self.logger.debug(f'Found adjacent series numbers among candidates, likely duplicate scans | {self.Session_ID}')
                 # Keep the newer scan (higher series number)
@@ -801,7 +808,6 @@ class DICOMfilter():
         self.dicom_table['Post_scan'] = 0
         self.dicom_table['Pre_scan'] = 0
 
-
         # FINDING POST SEQUENCE
         post_success = self.detect_post('check')
         if (not post_success) and (not self.multiple_lat):
@@ -815,8 +821,22 @@ class DICOMfilter():
                 post_success = self.detect_post('check')
                 if post_success:
                     self.logger.debug(f'Post sequence detection solved by finding pre first... | {self.Session_ID}')
+                else:
+                    self.logger.error(f'Unable to solve post detection by solving pre first... | {self.Session_ID}')
+                    self.removed['Post_Failure'] = self.dicom_table
+                    self.dicom_table = pd.DataFrame()
+                    return False
             elif pre_success:
                 self.logger.debug(f'Pre scan detection passed before post, no change in laterality detection... | {self.Session_ID}')
+                self.apply_slices(use='pre')
+                post_success = self.detect_post('check')
+                if post_success:
+                    self.logger.debug(f'Post sequence detection solved by finding pre first... | {self.Session_ID}')
+                else:
+                    self.logger.error(f'Unable to solve post detection by solving pre first... | {self.Session_ID}')
+                    self.removed['Post_Failure'] = self.dicom_table
+                    self.dicom_table = pd.DataFrame()
+                    return False
             elif self.multiple_lat:
                 # If detect_pre flipped multiple_lat
                 self.logger.debug(f'Multiple laterality discerned from pre status, pre failure...| {self.Session_ID}')
@@ -825,19 +845,25 @@ class DICOMfilter():
                 if post_success:
                     # If post detection now workd, continue to applying post detection
                     self.logger.debug(f'Post detection failure ameliorated through laterality separation | {self.Session_ID}')
+                    self.detect_post('apply')
+                    self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1]
+                    self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0]
+                    self.apply_slices(use='post')
+                    self.logger.debug(f'Successfully detected post sequence | {self.Session_ID}')
+                    self.print_table(self.dicom_post, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
                 else:
                     # If post detection still fails, remove
                     self.logger.error(f'Failure to solve by performing pre first | {self.Session_ID}')
                     self.removed['Post_Failure'] = self.dicom_table
                     self.dicom_table = pd.DataFrame()
-                    return self.dicom_table
+                    return False
 
         elif (not post_success):
             # Post failure with multiple lateralites detected, cuurrently unable to continue
             self.logger.error(f'Failure in detecting post sequence, clearing entry... | {self.Session_ID}')
             self.removed['Post_Failure'] = self.dicom_table
             self.dicom_table = pd.DataFrame()
-            return self.dicom_table
+            return False
         else:
             # Post sequence can be determined immediately, detect and filter
             self.detect_post('apply')
@@ -857,7 +883,7 @@ class DICOMfilter():
             self.logger.error(f'Failure in detecting pre sequence | {self.Session_ID}')
             self.removed['Pre_Failure'] = self.dicom_table
             self.dicom_table = pd.DataFrame()
-            return self.dicom_table
+            return False
         elif pre_success:
             self.detect_pre('apply')
             self.dicom_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]
@@ -869,10 +895,9 @@ class DICOMfilter():
         self.dicom_post['Post_scan'] = True
         self.dicom_table = pd.concat([self.dicom_pre, self.dicom_post])
 
-        # FINDING NUMBER OF SLICES
+        # FINDING NUMBER OF SLICES - not needed anymore? solved by .apply_slices()?
         expected_slices = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()
         expected_slices = [x for x in expected_slices if not any((x != y) and (x % y == 0) for y in expected_slices)] # new addition
-
         self.removed['invalid_slices'] = self.dicom_table[~self.dicom_table['NumSlices'].apply(lambda x: any(s % x == 0 for s in expected_slices))]
         self.dicom_table = self.dicom_table[self.dicom_table['NumSlices'].apply(lambda x: any(s % x == 0 for s in expected_slices))]
 
@@ -880,7 +905,7 @@ class DICOMfilter():
             self.logger.debug(f'Multiple post scans with different number of slices detected {expected_slices} | {self.Session_ID}')
             self.removed['Multiple_post_slices'] = self.dicom_table.copy()
             self.dicom_table = pd.DataFrame()
-            return self.dicom_table
+            return False
         elif (len(expected_slices) == 2):
             if not self.multiple_lat:
                 self.logger.debug(f'Only one detected side {self.dicom_table.loc[self.dicom_table["Post_scan"] == 1, "Lat"].unique()} for multiple expected slice numbers {expected_slices} | {self.Session_ID}')
@@ -896,7 +921,7 @@ class DICOMfilter():
                 self.logger.debug(f'Too many lateralities detected {sides} | {self.Session_ID}')
                 self.removed['Multiple_laterality'] = self.dicom_table.copy()
                 self.dicom_table = pd.DataFrame()
-                return self.dicom_table
+                return False
 
         elif len(expected_slices) == 1:
             self.logger.debug(f'Detected single slice number expectation {expected_slices[0]} for post scans | {self.Session_ID}')
@@ -921,17 +946,30 @@ class DICOMfilter():
             self.detect_pre()
             if self.dicom_table.empty:
                 self.logger.debug(f'Pre scan detection failure, unable to isolate sequence | {self.Session_ID}')
-                return self.dicom_table
-
+                return False
         self.dicom_table = pd.concat([self.dicom_post, self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]])
 
-        #self.dicom_table = self.dicom_table.loc[(self.dicom_table['Post_scan'] == 1)|(self.dicom_table['Pre_scan'] == 1)]
-        self.print_table(columns=['Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'IS_DISCO', 'Pre_scan', 'Post_scan'])
-        ## Attempting to detect DISCO sequences
-        # Removes DISCO sequences if steady state sequences are also present
-        return self.dicom_table
-        self.detect_DISCO()
+        # self.dicom_table = self.dicom_table.loc[(self.dicom_table['Post_scan'] == 1)|(self.dicom_table['Pre_scan'] == 1)]
+        laterality = self.dicom_table.loc[self.dicom_table['Pre_scan']  == 1, 'Lat'].unique()
+        if len(laterality) > 1:
+            self.logger.debug(f'Multiple sides detected {laterality}, appending Session_ID with laterality | {self.Session_ID}')
+            SessionID = self.Session_ID
+            for lat in laterality:
+                if lat.lower() == 'left':
+                    self.dicom_table.loc[self.dicom_table['Lat'].str.lower() == lat.lower(), 'SessionID'] = str(SessionID[0]) + '_l'
+                elif lat.lower() == 'right':
+                    self.dicom_table.loc[self.dicom_table['Lat'].str.lower() == lat.lower(), 'SessionID'] = str(SessionID[0]) + '_r'
+                elif lat.lower() == 'unknown_a':
+                    self.dicom_table.loc[self.dicom_table['Lat'].str.lower() == lat.lower(), 'SessionID'] = str(SessionID[0]) + '_a'
+                elif lat.lower() == 'unknown_b':
+                    self.dicom_table.loc[self.dicom_table['Lat'].str.lower() == lat.lower(), 'SessionID'] = str(SessionID[0]) + '_b'
+                elif lat.lower() == 'bilateral':
+                    self.logger.error(f'Multiple laterality detected including bilateral, unable to append Session_ID [unexpected behavior] | {self.Session_ID}')
 
+
+
+        self.print_table(columns=['Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'IS_DISCO', 'Pre_scan', 'Post_scan'])
+        return True
         ### Use Series Description to identify pre and post scans   
 
 
@@ -1022,26 +1060,6 @@ class DICOMfilter():
                     self.dicom_table = self.dicom_table[~((self.dicom_table['Pre_scan'] == 1) & (self.dicom_table['Lat'].str.lower() == 'right') & (self.dicom_table['Series_desc'].str.lower().str.contains('non fat sat')))]
 
         # Check only 1 pre per side, if nto, remove side with multiple pre scans
-
-        #Isolating scans that are detected as pre or post scans
-        self.removed['Not_pre_post'] = self.dicom_table[(self.dicom_table['Post_scan'] == 0) & (self.dicom_table['Pre_scan'] == 0)]
-        self.dicom_table = self.dicom_table[(self.dicom_table['Post_scan'] == 1) | (self.dicom_table['Pre_scan'] == 1)]
-        #Appending Session_ID with laterality if multiple sides detected
-        if len(laterality) > 1:
-            self.logger.debug(f'Multiple sides detected {laterality}, appending Session_ID with laterality | {self.Session_ID}')
-            SessionID = self.Session_ID
-            for lat in laterality:
-                if lat.lower() == 'left':
-                    self.dicom_table.loc[self.dicom_table['Lat'].str.lower() == lat.lower(), 'SessionID'] = str(SessionID[0]) + '_l'
-                elif lat.lower() == 'right':
-                    self.dicom_table.loc[self.dicom_table['Lat'].str.lower() == lat.lower(), 'SessionID'] = str(SessionID[0]) + '_r'
-                elif lat.lower() == 'unknown_a':
-                    self.dicom_table.loc[self.dicom_table['Lat'].str.lower() == lat.lower(), 'SessionID'] = str(SessionID[0]) + '_a'
-                elif lat.lower() == 'unknown_b':
-                    self.dicom_table.loc[self.dicom_table['Lat'].str.lower() == lat.lower(), 'SessionID'] = str(SessionID[0]) + '_b'
-                elif lat.lower() == 'bilateral':
-                    self.logger.error(f'Multiple laterality detected including bilateral, unable to append Session_ID [unexpected behavior] | {self.Session_ID}')
-
         # Removing samples with less than 3 scans per side
         IDs = self.dicom_table['SessionID'].unique()
         for ID in IDs:
