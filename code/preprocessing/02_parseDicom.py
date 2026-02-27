@@ -309,7 +309,8 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
             LOGGER.info(f'Created directory: {SAVE_DIR}')
         except Exception as e:
             LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
-    
+            exit()
+            
     # Print the current configuration
     LOGGER.info('Starting parseDicom: Step 02')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
