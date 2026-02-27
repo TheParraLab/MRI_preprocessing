@@ -261,7 +261,6 @@ document.addEventListener('containersContentLoaded', function () {
             outputElement.innerHTML = '';
         }
     })
-    // TODO: Use superlink terminal output to monitor number of connected clients
     // possibly display visual representations for each client in a custom container
     // report status of client
     socket.on('command_status', function(msg) { 

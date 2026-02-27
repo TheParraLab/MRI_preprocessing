@@ -6,8 +6,6 @@ import ctypes
 # This script installs Docker and NVIDIA Container Toolkit on Linux.
 # It also checks for the presence of a GPU and configures Docker to use the GPU.
 ###############################################################################
-#TODO CHECKS:
-# Windows setup pending implementation, unnecessary?
 
 def run_as_admin(command):
     """Run a command in an elevated Command Prompt window and wait for it to complete."""

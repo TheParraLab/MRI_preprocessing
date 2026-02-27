@@ -35,7 +35,6 @@ def get_container_name(action):
 
 def extract_node_id(log_line):
     # Extract node ID from log line
-    # TODO: update function to map node ID to human-readable name
     print(log_line)
     # Match node creation
     match = re.search(r'INFO\s*:\s*\[Fleet.CreateNode\]\s*Created\s*node_id=(-?\d+)', log_line)
