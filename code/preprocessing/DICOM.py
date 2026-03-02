@@ -381,6 +381,10 @@ class DICOMfilter():
             self.removed['invalid_slices'] = self.dicom_table[~self.dicom_table['NumSlices'].apply(lambda x: any(s % x == 0 for s in self.post_slices))]
             self.dicom_table = self.dicom_table[self.dicom_table['NumSlices'].apply(lambda x: any(s % x == 0 for s in self.post_slices))]
             self.logger.debug(f'Removed {len(self.removed["invalid_slices"])} scans with invalid number of slices [expected {self.post_slices} removed {self.removed["invalid_slices"]["NumSlices"].unique()}] | {self.Session_ID}')
+        elif use.lower() == 'pre':
+            self.logger.warning(f'Pre slices not defined, cannot apply slice filtering | {self.Session_ID}')
+        elif use.lower() == 'post':
+            self.logger.warning(f'Post slices not defined, cannot apply slice filtering | {self.Session_ID}')
         else:
             self.logger.warning(f'Invalid use parameter: {use}. Must be either "pre" or "post" | {self.Session_ID}')
         return self.dicom_table
@@ -610,7 +614,7 @@ class DICOMfilter():
             self.apply_slices(use='post')
             
         pre_found_sd = pre_series_desc()
-        if check_array(pre_found_sd, 'Series Description', action):
+        if check_array(pre_found_sd, 'Series Description', action) and check_slices(pre_found_sd, action):
             self.dicom_table['Pre_scan'] = pre_found_sd
             return True
         elif (pre_found_sd).sum() == 2:
@@ -621,19 +625,8 @@ class DICOMfilter():
                 self.dicom_table['Pre_scan'] = pre_found_sd
                 return True
                 
-
-        elif (pre_found_sd).sum() == 2:
-            # Check if multiple lat is possible but ambigious
-            unique_slices = self.dicom_table.loc[pre_found_sd, 'NumSlices'].unique()
-            if len(unique_slices) == 2:
-                self.multiple_lat = True
-                self.logger.debug(f'Multiple pre scans detected with different number of slices, setting multiple_lat to True | {self.Session_ID}')
-                return True
-            else:
-                self.logger.debug(f'Multiple pre scans detected with same number of slices, multiple_lat remains False | {self.Session_ID}')
-
         pre_found_tt = pre_trigger_time()
-        if check_array(pre_found_tt, 'Trigger Time', action):
+        if check_array(pre_found_tt, 'Trigger Time', action) and check_slices(pre_found_tt, action):
             self.logger.debug(f'Succesfully detected pre scan using trigger time, no need for further filtering | {self.Session_ID}')
             self.dicom_table['Pre_scan'] = pre_found_tt
             return True
