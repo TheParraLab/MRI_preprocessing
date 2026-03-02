@@ -355,15 +355,15 @@ def init_data(load_table: str='', target: str=None) -> None:
 
 def relocate(commands: list, relocations: list) -> None:
     """
-    Relocate files to new paths based on provided commands.
+    Create symbolic links to raw DICOM files based on provided commands to save disk space.
 
     Args:
-        commands (list): List of [source, destination] pairs.
+        commands (list): List of [source_path, destination_path] pairs.
         relocations (list): Global list of pending relocations, synchronized across processes.
 
-    TODO: Thread-safety check: `shutil.copy` may hit race conditions if multiple processes
+    TODO: Thread-safety check: creating links may hit race conditions if multiple processes
           attempt to create or interact with the exact same parent directories simultaneously
-          despite `os.makedirs`. Consider robust directory locking or centralized moving.
+          despite `os.makedirs`. Consider robust directory locking or centralized linking.
     """
     LOGGER.debug(f'Relocate called with {len(commands)} commands')
     LOGGER.debug(f'Current relocations: {len(relocations)}')
@@ -371,33 +371,56 @@ def relocate(commands: list, relocations: list) -> None:
     if not commands:
         LOGGER.warning('No commands supplied to relocate')
         return
-    destinations = [cmd[1] for cmd in commands]
+
+    # Extract all destination directory paths from the command list
+    destinations = [os.path.dirname(cmd[1]) for cmd in commands]
     destinations = list(set(destinations))
     for dest in destinations:
         if not os.path.exists(dest):
-            os.makedirs(dest)
+            try:
+                os.makedirs(dest, exist_ok=True)
+            except Exception as e:
+                LOGGER.error(f'Failed to create destination directory {dest}: {e}')
         else:
-            LOGGER.warning(f'{dest} already exists')
+            LOGGER.debug(f'{dest} already exists')
+
+    # Check disk space based on the first destination parent (optional, but kept for safety)
     with disk_space_lock:
         try:
+            parent_dir = os.path.dirname(os.path.dirname(commands[0][1]))
             LOGGER.debug(commands[0][1])
-            LOGGER.debug('/'.join(commands[0][1].split('/')[0:-2]))
-        except:
-            LOGGER.warning(commands)
-        if not check_disk_space('/'.join(commands[0][1].split('/')[0:-2])):
+            LOGGER.debug(parent_dir)
+        except Exception as e:
+            LOGGER.warning(f'Failed parsing parent dir for disk check: {e} | {commands}')
+            parent_dir = None
+
+        if parent_dir and not check_disk_space(parent_dir):
             if not stop_flag.is_set():
-                LOGGER.warning('Disk space is running low.  Pausing...')
+                LOGGER.warning('Disk space is running low. Pausing...')
                 stop_flag.set()
                 LOGGER.warning('Stop flag set')
             return
+
     try:
-        for command in commands:
-            LOGGER.debug(f'Copying {command[0]} to {command[1]}')
-            shutil.copy(command[0], command[1])
+        for source_path, dest_path in commands:
+            LOGGER.debug(f'Creating symlink from {source_path} to {dest_path}')
+            # Ensure the source file actually exists before linking
+            if not os.path.exists(source_path):
+                LOGGER.warning(f'Source file missing, cannot link: {source_path}')
+                continue
+
+            # Create symlink if it doesn't already exist at the destination
+            if not os.path.exists(dest_path) and not os.path.islink(dest_path):
+                os.symlink(source_path, dest_path)
+            elif os.path.islink(dest_path):
+                LOGGER.debug(f'Symlink already exists at {dest_path}')
+            else:
+                LOGGER.warning(f'File (not link) already exists at {dest_path}')
+
         with disk_space_lock:
             relocations.remove(commands)
     except Exception as e:
-        LOGGER.error(f'Error in relocating files: {e}', exc_info=True)
+        LOGGER.error(f'Error in creating symlinks: {e}', exc_info=True)
 
 def chunk_list(lst: list, chunk_size: int):
     """Yield successive chunk_size-sized chunks from lst."""
