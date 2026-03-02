@@ -21,8 +21,6 @@ export PROJECT_DIRECTORY_PATH="${project_directory_path}"
 # Raw Data Path
 export DATA_DIRECTORY_PATH="${data_directory_path}"
 
-docker network create flwr-network
-
 # Check if running in WSL, WSL2, or Linux
 if grep -qi Microsoft /proc/version; then
   echo "Running on WSL"

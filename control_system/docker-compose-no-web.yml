@@ -26,9 +26,3 @@ services:
       - NO_WEBSERVER=true
     # Override the default command to skip the Flask app
     command: ["bash", "-c", "echo 'MRI Preprocessing container started without webserver' && tail -f /dev/null"]
-    networks:
-      - flwr-network
-  
-networks:
-  flwr-network:
-    external: true

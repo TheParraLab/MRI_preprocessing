@@ -27,9 +27,3 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - FLASK_ENV=development
       - FLASK_RUN_HOST=0.0.0.0
-    networks:
-      - flwr-network
-  
-networks:
-  flwr-network:
-    external: true

@@ -52,8 +52,8 @@ import pydicom as pyd
 import pandas as pd
 
 # Function imports
-from multiprocessing import cpu_count
-
+from multiprocessing import cpu_count, Event
+import threading
 # Custom imports
 from toolbox import get_logger, run_function
 from DICOM import DICOMextract
@@ -177,6 +177,70 @@ def load_checkpoint(name: str) -> Optional[Any]:
 #
 # The extracted information is saved to {SAVE_DIR}/Data_table.csv
 
+def _has_dcm_magic(path: str) -> bool:
+    """Cheap check for DICOM preamble + 'DICM' marker at offset 128."""
+    try:
+        with open(path, 'rb') as f:
+            f.seek(128)
+            return f.read(4) == b'DICM'
+    except Exception:
+        return False
+
+def _dir_contains_mr(item):
+    """Worker to check one directory for at least one MR DICOM.
+    `item` is a tuple (dirpath, filenames_list).
+    Returns dirpath if MR found, else None.
+    """
+    dirpath, filenames = item
+    # cooperative cancellation: if another worker already found enough dirs
+    # Filter candidate names with .dcm extension first
+    candidates = [fn for fn in filenames if fn.lower().endswith('.dcm')]
+    if not candidates:
+        return None
+
+    # Optional deterministic sampling hook if desired:
+    # rng = random.Random(SAMPLE_SEED) if SAMPLE_SEED is not None else random
+    # if SAMPLE_PCT and SAMPLE_PCT > 0:
+    #     k = max(1, int(len(candidates) * (SAMPLE_PCT / 100.0)))
+    #     if k < len(candidates):
+    #         candidates = rng.sample(candidates, k)
+
+    # First pass: check magic bytes to avoid pydicom overhead
+    likely = []
+    fallback = []
+    for fn in candidates:
+        p = os.path.join(dirpath, fn)
+        if _has_dcm_magic(p):
+            likely.append(p)
+        else:
+            fallback.append(p)
+
+    # Check likely files with pydicom until we find MR
+    for p in likely:
+        try:
+            dcm = pyd.dcmread(p, stop_before_pixels=True, force=False)
+            if getattr(dcm, 'Modality', None) == 'MR':
+                # If shared counter provided, increment and set stop flag when threshold reached
+                    return dirpath
+        except Exception:
+            # ignore and continue
+            continue
+
+    # Fallback: some valid files may not have the DICM magic; check fallback list
+    for p in fallback:
+        try:
+            dcm = pyd.dcmread(p, stop_before_pixels=True, force=False)
+            if getattr(dcm, 'Modality', None) == 'MR':
+                return dirpath
+        except Exception:
+            continue
+
+    return None
+
+
+# ...existing code...
+
+
 #############################
 ## Main functions
 #############################
@@ -249,6 +313,7 @@ def find_all_dicom_dirs(directory: str, N_test: Optional[int] = None) -> List[st
     Returns:
         List[str]: A list of directory paths containing valid MRI DICOM files.
     """
+    dir_items = []
     dicom_dirs = []
     N_found = 0
     for root, _, files in os.walk(directory, followlinks=False):
@@ -281,6 +346,8 @@ def find_all_dicom_dirs(directory: str, N_test: Optional[int] = None) -> List[st
     else:
         LOGGER.info(f'Found {len(dicom_dirs)} directories containing DICOM files')
 
+    if N_test is not None:
+        return dicom_dirs[:N_test]
     return dicom_dirs
 
 def findDicom(directory: str) -> List[str]:
@@ -310,13 +377,15 @@ def findDicom(directory: str) -> List[str]:
 
         # Decide whether to sample by percentage to improve performance on large directories
         if SAMPLE_PCT and SAMPLE_PCT > 0 and len(dcm_candidates) > 1:
+            # Use a local RNG for deterministic sampling when SAMPLE_SEED is set
+            rng = random.Random(SAMPLE_SEED) if SAMPLE_SEED is not None else random
             k = max(1, int(len(dcm_candidates) * (SAMPLE_PCT / 100.0)))
             # If k >= len, just scan all
             if k >= len(dcm_candidates):
                 sample_list = dcm_candidates
                 fallback_allowed = False
             else:
-                sample_list = random.sample(dcm_candidates, k)
+                sample_list = rng.sample(dcm_candidates, k)
                 fallback_allowed = True
         else:
             sample_list = dcm_candidates
@@ -383,7 +452,7 @@ def main(out_name: str = 'Data_table.csv', SAVE_DIR: str = '', SCAN_DIR: str = '
         None
     """
     # Validate input directories
-    assert os.path.exists(SCAN_DIR), f'SAVE_DIR {SCAN_DIR} does not exist. Please provide a valid directory.'
+    assert os.path.exists(SCAN_DIR), f'SCAN_DIR {SCAN_DIR} does not exist. Please provide a valid directory.'
 
     # Create the save directory if it does not exist
     if not os.path.exists(SAVE_DIR):
