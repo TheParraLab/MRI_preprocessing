@@ -9,9 +9,23 @@ import re
 import shutil
 
 class DICOMextract:
+    """
+    Class for extracting relevant metadata from DICOM files.
+    """
     UNKNOWN = 'Unknown'
 
     def __init__(self, file_path: str, debug: int = 0):
+        """
+        Initialize the extractor with a DICOM file path.
+
+        Args:
+            file_path (str): The path to the DICOM file.
+            debug (int): Debug level for logging.
+
+        TODO: Consider lazy loading or selective tag reading if parsing thousands
+              of massive files. `stop_before_pixels=True` helps, but further pydicom
+              optimizations exist (e.g., `specific_tags`).
+        """
         self.debug = debug
         self.metadata = pyd.dcmread(file_path, stop_before_pixels=True)
         self.metadata.filepath = file_path
@@ -23,7 +37,13 @@ class DICOMextract:
             logging.error(message)
 
     def Orientation(self) -> Union[int, str]:
-        """Attempts to extract the orientation of the scan"""
+        """
+        Attempts to extract the orientation of the scan.
+
+        Returns:
+            Union[int, str]: Integer representing orientation (0 = sagittal, 1 = coronal,
+                             2 = axial) or UNKNOWN.
+        """
         try:
             tmp = self.metadata.ImageOrientationPatient
             imgOri = np.concatenate([np.reshape(tmp[:3], (1,3)), np.reshape(tmp[3:], (1,3))])
@@ -134,8 +154,16 @@ class DICOMextract:
             return self.UNKNOWN
         
     def LR(self) -> str:
-        """Attempts to extract the laterality of the scan"""
-        # TODO: Does metadata contain the filepath or is the file path required as an argument?
+        """
+        Attempts to extract the laterality of the scan.
+
+        Returns:
+            str: 'left', 'right', 'bilateral', or UNKNOWN.
+
+        TODO: Edge case handling for lateralities. What if series descriptions conflict
+              with the explicit 'Laterality' tag? Should one take precedence?
+              Currently, it favors 'Laterality' tag first.
+        """
         # Adding in multiple robust mechanisms to attempt to determine if the scan is left or right
         # Find all adjacent files in the directory
         ###### Old method using ImageOrientationPatient, not reliable ######
@@ -216,7 +244,17 @@ class DICOMextract:
             return self.UNKNOWN
         
     def NumSlices(self) -> Union[int, str]:
-        """Attempts to extract the number of slices in the scan"""
+        """
+        Attempts to extract the number of slices in the scan.
+
+        Returns:
+            Union[int, str]: Number of slices or UNKNOWN.
+
+        TODO: Performance bottleneck. `glob.glob` on the directory for every single
+              file processing can drastically slow down extraction, particularly on NFS.
+              Consider passing the slice count directly if it is already known or
+              caching directory sizes.
+        """
         try:
             files = glob.glob('/'.join(self.metadata.filepath.split('/')[:-1])+'/*.dcm')
             n_slices = len(files)
@@ -260,7 +298,19 @@ class DICOMextract:
             return self.UNKNOWN
         
 class DICOMfilter():
+    """
+    Class to filter a DataFrame of DICOM metadata corresponding to a single SessionID.
+    """
     def __init__(self, dicom_table: pd.DataFrame, logger: logging.Logger = None, debug: int = 0, tmp_save: str='/FL_system/data/tmp/'):
+        """
+        Initialize the filter with a data subset for a single session.
+
+        Args:
+            dicom_table (pd.DataFrame): The DICOM data to filter.
+            logger (logging.Logger): Logger instance.
+            debug (int): Debug level.
+            tmp_save (str): Path to temporary save directory for relocations.
+        """
         self.debug = debug
         self.logger = logger or logging.getLogger(__name__)
         self.dicom_table = dicom_table
@@ -367,7 +417,21 @@ class DICOMfilter():
     #     #self.update_valid('Remove_Slices')
     #     return self.dicom_table
 
-    def apply_slices(self, use: str = 'pre'):
+    def apply_slices(self, use: str = 'pre') -> pd.DataFrame:
+        """
+        Filters scans to only retain those matching the expected slice count for 'pre' or 'post'.
+
+        Args:
+            use (str): Specifies whether to filter based on 'pre' slices or 'post' slices.
+
+        Returns:
+            pd.DataFrame: The filtered dataframe.
+
+        TODO: Edge case: what if both pre and post slice lists exist but are completely
+              disjoint from the actual available scans? The logic removes everything and
+              returns an empty DataFrame. Consider raising a specific warning to trigger
+              manual review rather than silently dropping the session.
+        """
         if (not hasattr(self, 'pre_slices')) & (not hasattr(self, 'post_slices')):
             self.logger.error(f'Expected slices not defined for pre or post, cannot apply slice filtering.  Try running pre and post detection first | {self.Session_ID}')
             return self.dicom_table
@@ -776,16 +840,22 @@ class DICOMfilter():
         return False
         ########
 
-    def isolate_sequence(self):
-        '''
-        This function aims to isolate the mri sequence from the given session.
-        it uses detect_[pre/post] to determine filtering
-            These funcitons attempt to parse the entirety of self.dicom_table.
-            Succesfully detected pre/post should be extracted out of self.dicom_table into placeholder tables
-            detect_[pre/post] have action as input
-                'check' to get simple pass/fail
-                'action' to perform filtering to achieve pass/fail (also suppresses logging, with the exception of filtering actions)
-        '''
+    def isolate_sequence(self) -> bool:
+        """
+        Aims to isolate the MRI sequence from the given session.
+
+        Uses detect_pre and detect_post to determine filtering.
+        Successfully detected pre/post are extracted out of self.dicom_table
+        into placeholder tables.
+
+        Returns:
+            bool: True if sequence isolation was successful, False otherwise.
+
+        TODO: Structural recommendation: This function is very long and has complex
+              branching logic. Breaking it down into smaller, testable sub-functions
+              (e.g., `resolve_laterality`, `resolve_slice_counts`) would improve
+              maintainability and testability.
+        """
         # SHOULD THIS FUNCTION FLOW DEPEND ON SESSION PROTOCOL [16-328, 19-093, 20-425]
         self.print_table(columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series'])
 
@@ -967,11 +1037,25 @@ class DICOMfilter():
 
 
 class DICOMsplit():
+    """
+    Class used to split a single directory with multiple scans into multiple directories
+    of a single scan each.
+    """
     def __init__(self, dicom_table: pd.DataFrame,  logger: logging.Logger = None, debug: int = 0, tmp_save: str='/FL_system/data/tmp/'):
-        '''
-        This class is used to split a single directory with multiple scans into multiple directories of a single scan each.
-        The received DataFrame should contain a single Session_ID and directory
-        '''
+        """
+        Initialize the splitter. The received DataFrame should contain a single
+        SessionID and directory.
+
+        Args:
+            dicom_table (pd.DataFrame): Data containing a single SessionID.
+            logger (logging.Logger): Logger instance.
+            debug (int): Debug flag.
+            tmp_save (str): Path to temporary save directory.
+
+        TODO: Memory/Performance: Loading and parsing glob on potentially massive
+              directories multiple times can be slow. A file index or caching mechanism
+              should be implemented if processing scales up.
+        """
         ## Updated process
         self.scan_path = None
         self.scan_results = None
@@ -1150,8 +1234,18 @@ class DICOMsplit():
 
 
 class DICOMorder():
-
+    """
+    Class to order the DICOM scans sequentially based on acquisition or trigger times.
+    """
     def __init__(self, dicom_table: pd.DataFrame, logger: logging.Logger = None, debug: int = 0):
+        """
+        Initialize the orderer for a given SessionID.
+
+        Args:
+            dicom_table (pd.DataFrame): Data containing a single SessionID.
+            logger (logging.Logger): Logger instance.
+            debug (int): Debug flag.
+        """
         self.debug = debug
         self.dicom_table = dicom_table
         self.logger = logger or logging.getLogger(__name__)
@@ -1166,8 +1260,21 @@ class DICOMorder():
             print('Not currently implemented, please remake with a single Session_ID')
             return None
     
-    def order(self, timing_param, secondary_param):
-        """Orders the scans based on the provided timing parameter"""
+    def order(self, timing_param: str, secondary_param: str) -> pd.DataFrame:
+        """
+        Orders the scans based on the provided timing parameter.
+
+        Args:
+            timing_param (str): The primary timing parameter to sort by.
+            secondary_param (str): Fallback parameter if the primary is missing.
+
+        Returns:
+            pd.DataFrame: The ordered dataframe.
+
+        TODO: Edge case: if both timing_param and secondary_param values are corrupted,
+              ordering fails entirely and returns an empty table. Consider using
+              SeriesNumber as an absolute fallback before giving up.
+        """
         # Separate rows with 'UNKNOWN' values
         self.timing_param = timing_param
         unknown_rows = self.dicom_table[self.dicom_table[timing_param].astype(str).str.lower() == 'unknown']
