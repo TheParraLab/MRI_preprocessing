@@ -1,89 +1,151 @@
-# MRI Preprocessing
+# MRI Preprocessing Pipeline
 
-> This is a generalized implementation of MRI preprocesing for various ML/AI tasks within the Parra Lab
-
-> It is recommended to run this on a Linux system.  Windows should work, but has not been verified.
----
+A generalized implementation of MRI preprocessing for various ML/AI tasks within the Parra Lab. This project is designed to automate the ingestion, analysis, and processing of raw DICOM MRI data into model-ready inputs.
 
 ## Table of Contents
 
-- [Features](#features)
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Project Structure](#project-structure)
 - [Installation](#installation)
 - [Usage](#usage)
+  - [Starting the System](#starting-the-system)
+  - [Web Control Interface](#web-control-interface)
+  - [Command Line Interface (CLI)](#command-line-interface-cli)
+- [Preprocessing Workflow](#preprocessing-workflow)
+- [Testing](#testing)
+- [Contributing](#contributing)
+- [Acknowledgements](#acknowledgements)
 
----
+## Overview
 
-## Features
+The MRI Preprocessing Pipeline is a modular system built to handle large datasets of MRI scans. It runs within a Docker container to ensure a consistent environment and supports both an interactive web-based control system and a scriptable command-line interface.
 
-- Displays an interactive webserver for easy control of the preprocessing process (Pending update)
-- Takes in raw DICOM directory, analyzes its contents, and produces model inputs with little to no manual intervention
-- DICOM headers will be scaned and parsed during processing, a full list of necessary DICOM attributes will be provided in this README at a future date.
----
+The core functionality resides in `code/preprocessing/`, where a series of Python scripts handle everything from DICOM extraction to NIfTI conversion and spatial alignment.
+
+## Key Features
+
+- **Automated Scanning**: Recursively scans directories for MRI DICOM files.
+- **Metadata Extraction**: Extracts and standardizes DICOM header information into CSV tables.
+- **Intelligent Parsing**: Identifies scan types (T1, T2, etc.) and orders sequences based on acquisition times.
+- **Modular Design**: Each step of the pipeline is a standalone script, allowing for flexible execution and debugging.
+- **Containerized Environment**: Fully Dockerized setup for easy deployment on Linux and WSL systems.
+- **Web Interface**: (In Development) A Flask-based dashboard to monitor and control the processing status.
+
+## Project Structure
+
+```
+MRI_preprocessing/
+├── code/
+│   └── preprocessing/       # Core python scripts for data processing
+│       ├── 01_scanDicom.py  # Scans and extracts DICOM metadata
+│       ├── 02_parseDicom.py # Filters and orders scans
+│       ├── ...              # Subsequent processing steps
+│       ├── DICOM.py         # DICOM handling utilities
+│       └── toolbox.py       # General helper functions
+├── control_system/          # Docker and Web App configuration
+│   ├── app/                 # Flask web application
+│   └── docker*              # Docker Compose files
+├── data/                    # Data storage (mounted volumes)
+├── test/                    # Unit and integration tests
+├── start_control.sh         # Main entry point script
+└── install.py               # Dependency installation script
+```
 
 ## Installation
 
-1. Clone the repository:
+### Prerequisites
+- Linux or Windows Subsystem for Linux (WSL2)
+- Python 3.x
+- Docker & Docker Compose (installed automatically via `install.py` if not present)
+
+### Steps
+
+1. **Clone the repository:**
    ```bash
    git clone https://github.com/TheParraLab/MRI_preprocessing
    cd MRI_preprocessing
    ```
 
-2. Install dependencies:
+2. **Install dependencies and setup Docker:**
    ```bash
    python3 install.py
    ```
-   Note: This installation script works to install docker and configure it to have access to the GPU for ML applications.  For preprocessing alone, GPU access is not required, but docker can be installed manually.
-
-3. Start the application:
-   ```bash
-   bash start_control.sh
-   ```
-
----
+   *Note: This script attempts to install Docker and configure GPU access. If you prefer, you can install Docker manually.*
 
 ## Usage
 
-When started with 'start_control.sh', you will be prompted with:
-1. Whether you want to start the webserver component (y/n, default: y)
-2. The path to the raw data on your local system
+### Starting the System
 
-This supplied directory will be placed at /FL_system/data/raw/ within the docker container.
+The primary way to interact with the pipeline is through the `start_control.sh` script.
 
-### With Webserver (default)
-If you choose to start with the webserver, the system will be accessible on port 5000 for easy control of the preprocessing process. (Note: The current webserver is under development and not finalized, it should not be exposed outside the network)
+```bash
+bash start_control.sh
+```
 
-### Without Webserver (CLI only)
-If you choose to run without the webserver, the container will start with just the preprocessing capabilities. You can then execute preprocessing commands by:
+You will be prompted to:
+1.  Enable the webserver component (y/n).
+2.  Provide the path to your raw DICOM data on the host machine.
 
-**Option 1: Using the convenience script**
+The system maps your local data directory to `/FL_system/data/raw/` inside the Docker container.
+
+### Web Control Interface
+If enabled, the web interface is accessible at `http://localhost:5000`. It provides a dashboard to view the status of the preprocessing steps.
+*(Note: The web interface is currently under active development).*
+
+### Command Line Interface (CLI)
+For batch processing or direct control, you can access the container's shell:
+
+**Option 1: Convenience Script**
 ```bash
 bash access_preprocessing.sh
 ```
 
-**Option 2: Direct Docker access**
+**Option 2: Direct Docker Exec**
 ```bash
 docker exec -it control bash
 cd /FL_system/code/preprocessing/
-# Run individual preprocessing scripts or the full pipeline
 ```
 
-### Preprocessing
+## Preprocessing Workflow
 
-The code to perform the preprocessing is provided in /code/preprocessing.  The 00_preprocess.sh script will run all preprocessing steps in series, placing fully processed data into /data/inputs.
-When required, individual preprocessing scripts can be run by accessing the CLI of the container, and running `python3 0X_script.py` from within the /FL_system/code/preprocessing/ directory.  Python scripts will be modified to take in parameters as command line arguments in the near future.
+The pipeline consists of numbered scripts in `code/preprocessing/` that should generally be run in order:
 
-### Models
+1.  **01_scanDicom.py**: Scans raw data and builds a `Data_table.csv` of all found DICOM files.
+    *   *Documentation*: See `code/preprocessing/01_scanDicom.py` for detailed usage and arguments.
+2.  **02_parseDicom.py**: Filters relevant scans (e.g., T1) and orders them by time.
+3.  **03_saveNifti.py**: Converts selected DICOM series to NIfTI format.
+4.  **04_saveRAS.py**: Reorients NIfTI files to RAS orientation.
+5.  **05_alignScans.py**: Aligns scans to a reference volume.
+6.  **06_genInputs.py**: Generates final model inputs.
 
-In the future, I plan for the control webserver to be able to perform model inference and training.  To this end, the webserver will report GPU availability (Preprocessing alone does not require the GPU to be present.
+To run a specific step manually inside the container:
+```bash
+python 01_scanDicom.py --scan_dir /FL_system/data/raw --save_dir /FL_system/data
+```
 
----
+## Testing
+
+Unit and integration tests are located in the `test/` directory.
+
+To run tests (ensure you have `pytest` installed):
+```bash
+pytest test/
+```
+
+## Contributing
+
+1.  Fork the repository.
+2.  Create a feature branch (`git checkout -b feature/NewFeature`).
+3.  Commit your changes.
+4.  Push to the branch.
+5.  Open a Pull Request.
+
+Please ensure all new code is well-documented and passes existing tests.
 
 ## Acknowledgements
-TODO: Populate Acknowledgements
-- [Tool/Library 1](https://example.com)
-- [Tool/Library 2](https://example.com)
+- [Parra Lab](https://www.ccny.cuny.edu/bme/people/lucas-parra)
+- Contributors: [Add names here]
 
 ---
-
-*Feel free to reach out if you have any questions or suggestions!*
-nleotta000@citymail.cuny.edu
+*For questions or support, please contact nleotta000@citymail.cuny.edu*
