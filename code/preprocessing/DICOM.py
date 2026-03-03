@@ -643,15 +643,15 @@ class DICOMfilter():
             '''
             assert arr.sum() == 2, 'Too many candidates to check for duplicates'
             series_nums = self.dicom_table.loc[arr, 'Series'].values
-            if np.abs(series_nums[0] - series_nums[1]) == 1:
-                self.logger.debug(f'Found adjacent series numbers among candidates, likely duplicate scans | {self.Session_ID}')
+            if np.abs(series_nums[0] - series_nums[1]) <= 2:
+                self.logger.debug(f'Found semi-adjacent series numbers among candidates, likely duplicate scans | {self.Session_ID}')
                 # Keep the newer scan (higher series number)
                 if action.lower() == 'apply':
                     to_keep = np.argmax(series_nums)
                     to_remove = np.argmin(series_nums)
                     self.dicom_table.loc[arr, 'Pre_scan'] = False
                     self.dicom_table.loc[arr, 'Pre_scan'].iloc[to_keep] = True
-                    self.removed[f'Adjacent Series'] = self.dicom_table.loc[arr].iloc[to_remove]
+                    self.removed[f'Adjacent Series'] = self.dicom_table.loc[arr].iloc[[to_remove]]
                     self.logger.debug(f'=== Removed older duplicate scan based on series number | {self.Session_ID}')
                 return True
             else:
@@ -833,9 +833,9 @@ class DICOMfilter():
                 if action.lower() == 'check': self.logger.debug(f'Multiple post candidates lack consistent slice numbering [series desc detection]... | {self.Session_ID}')
 
         
-        if action.lower() == 'check': self.logger.error(f'Trigger timea and series desc failed to find any post scans | {self.Session_ID}')
+        if action.lower() == 'check': self.logger.error(f'Trigger time and series desc failed to find any post scans | {self.Session_ID}')
         if action.lower() == 'apply':
-            self.removed['Post_Failure'] = self.dicom_table.copy()
+            self.removed['Post_Failure'] = self.dicom_table
             self.dicom_table = pd.DataFrame()
         return False
         ########
@@ -920,6 +920,12 @@ class DICOMfilter():
                     self.removed['Post_Failure'] = self.dicom_table
                     self.dicom_table = pd.DataFrame()
                     return False
+            else:
+                self.logger.error(f'Pre detection fails... | {self.Session_ID}')
+                self.removed['Pre_Failure'] = self.dicom_table
+                self.dicom_table = pd.DataFrame()
+                return False
+
 
         elif (not post_success):
             # Post failure with multiple lateralites detected, cuurrently unable to continue
@@ -927,16 +933,16 @@ class DICOMfilter():
             self.removed['Post_Failure'] = self.dicom_table
             self.dicom_table = pd.DataFrame()
             return False
-        else:
-            # Post sequence can be determined immediately, detect and filter
-            self.detect_post('apply')
-            self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1]
-            self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0]
-            self.apply_slices(use='post')
-            self.logger.debug(f'Successfully detected post sequence | {self.Session_ID}')
-            self.print_table(self.dicom_post, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
-            #self.print_table(self.dicom_table, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
         
+        # Post sequence can be determined immediately, detect and filter
+        self.detect_post('apply')
+        self.apply_slices(use='post')
+        self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1]
+        self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0]
+        self.logger.debug(f'Successfully detected post sequence | {self.Session_ID}')
+        self.print_table(self.dicom_post, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
+        #self.print_table(self.dicom_table, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
+    
 
 
         # ISOLATE NON_POST FOR PRE DETECTION
@@ -1255,7 +1261,6 @@ class DICOMorder():
             self.logger.error(f'No SessionID column present {self.dicom_table.columns}')
             return  # Exit the constructor if SessionID is missing
         if self.Session_ID.size > 1:
-            #TODO: Implement multiple Session_IDs (non-parallel implementation)
             print('Multiple Session_IDs found in the table')
             print('Not currently implemented, please remake with a single Session_ID')
             return None

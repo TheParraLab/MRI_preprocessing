@@ -17,7 +17,7 @@ import pandas as pd
 # Function imports
 from multiprocessing import Manager, cpu_count, Lock#, Queue
 #from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-#from typing import Callable, List, Any
+from typing import Callable, List, Any
 from functools import partial
 from collections import defaultdict
 # Custom imports
@@ -235,7 +235,13 @@ def filterDicom(Data_subset: pd.DataFrame) -> tuple:
     dicom_filter = DICOMfilter(Data_subset, logger=LOGGER, tmp_save=SAVE_DIR.replace('tmp/', 'tmp_data/'))
     dicom_filter.Types(COMPUTED_FLAGS)
     dicom_filter.Description(DESCRIPTION_FLAGS)
-        
+    
+    if len(dicom_filter.dicom_table) < 2:
+        dicom_filter.logger.error(f'Not enough scans for {dicom_filter.Session_ID}, removing...')
+        dicom_filter.removed['N_samples'] = dicom_filter.dicom_table
+        dicom_filter.dicom_table = pd.DataFrame()
+        return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
+
     #filter.removeImplants()
     #dicom_filter.removeSide()
     #dicom_filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
@@ -482,6 +488,7 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         removed = list(removed)
         Data_table = pd.concat(results)
         Data_table = Data_table.reset_index(drop=True)
+        Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
         Iden_uniq_after = Data_table['SessionID'].unique()
         Iden_uniq_after_clean = []
         for i in Iden_uniq_after:
@@ -500,9 +507,9 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         LOGGER.info(f'Number of removed sessions: {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
 
         for key, value in Remove_Tables.items():
+            LOGGER.info(f'===== {key} =====')
             Rem_ID = value['SessionID'].unique()
             Gone_ID = set(Rem_ID) - set(Iden_uniq_after_clean)
-            LOGGER.info(f'===== {key} =====')
             LOGGER.info(f'  Number of unique sessions missing from final output: {len(Gone_ID)}')
             LOGGER.info(f'  Number of scans removed: {len(value)}')
         LOGGER.info(f'Saving filtered data to {SAVE_DIR}Data_table_filtered.csv')
