@@ -398,8 +398,12 @@ def relocate(commands: list, relocations: list) -> None:
             return
     try:
         for command in commands:
-            LOGGER.debug(f'Copying {command[0]} to {command[1]}')
-            shutil.copy(command[0], command[1])
+            LOGGER.debug(f'Linking {command[0]} to {command[1]}')
+            src_path = os.path.abspath(command[0])
+            dest_path = command[1]
+            if os.path.exists(dest_path) or os.path.islink(dest_path):
+                os.remove(dest_path)
+            os.symlink(src_path, dest_path)
         with disk_space_lock:
             relocations.remove(commands)
     except Exception as e:
