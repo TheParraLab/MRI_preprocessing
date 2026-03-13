@@ -451,9 +451,10 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
 
     # Check if the output already exists
     if out_name in os.listdir(SAVE_DIR):
-        LOGGER.error(f'{out_name} already exists. Skipping step 02')
-        LOGGER.error(f'To re-run this step, delete the existing {out_name} file')
-        exit()
+        LOGGER.error(f'{out_name} already exists')
+        if input('Would you like to reprocess? [Y/n]?\n').lower() != 'y':
+            LOGGER.error('Stopping Processing')
+            exit()
 
     progress = load_progress('parseDicom_progress.pkl')
     if progress:
