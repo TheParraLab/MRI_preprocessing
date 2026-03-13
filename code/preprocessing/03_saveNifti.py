@@ -50,8 +50,6 @@ def check_source_files(source_path: str) -> bool:
     """Check if the source path file exists contains files."""
     return (len(glob.glob(f'{source_path}/*')) > 0) or (len(glob.glob(f'{source_path}/*/*')) > 0)
 
-    return len(glob.glob(f'{source_dir}/*')) > 0
-
 def save_progress(data, filename):
     """Save progress to a file."""
     LOGGER.info(f'Saving progress to {filename}')
