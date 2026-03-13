@@ -320,6 +320,10 @@ class DICOMfilter():
         self.tmp_save = tmp_save
         self.temporary_relocations = []
         self.multiple_lat = False
+        if 'Pre_scan' not in self.dicom_table.columns:
+            self.dicom_table['Pre_scan'] = 0
+        if 'Post_scan' not in self.dicom_table.columns:
+            self.dicom_table['Post_scan'] = 0
         assert self.Session_ID.size == 1, 'Multiple Session_IDs found in the table'
         self.logger.debug('='*50)
         self.logger.debug(f'Analyzing {self.Session_ID}')
@@ -723,7 +727,7 @@ class DICOMfilter():
         self.logger.error(f'Existing filtering failed to capture pre scan for given session | {self.Session_ID}')
         if action.lower() == 'apply':
             self.removed['Pre_Failure'] = self.dicom_table.copy()
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
         return False
     
     def detect_post(self, action: str = 'check'):
@@ -836,7 +840,7 @@ class DICOMfilter():
         if action.lower() == 'check': self.logger.error(f'Trigger time and series desc failed to find any post scans | {self.Session_ID}')
         if action.lower() == 'apply':
             self.removed['Post_Failure'] = self.dicom_table
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
         return False
         ########
 
@@ -887,7 +891,7 @@ class DICOMfilter():
                 else:
                     self.logger.error(f'Unable to solve post detection by solving pre first... | {self.Session_ID}')
                     self.removed['Post_Failure'] = self.dicom_table
-                    self.dicom_table = pd.DataFrame()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                     return False
             elif pre_success:
                 self.logger.debug(f'Pre scan detection passed before post, no change in laterality detection... | {self.Session_ID}')
@@ -898,7 +902,7 @@ class DICOMfilter():
                 else:
                     self.logger.error(f'Unable to solve post detection by solving pre first... | {self.Session_ID}')
                     self.removed['Post_Failure'] = self.dicom_table
-                    self.dicom_table = pd.DataFrame()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                     return False
             elif self.multiple_lat:
                 # If detect_pre flipped multiple_lat
@@ -918,12 +922,12 @@ class DICOMfilter():
                     # If post detection still fails, remove
                     self.logger.error(f'Failure to solve by performing pre first | {self.Session_ID}')
                     self.removed['Post_Failure'] = self.dicom_table
-                    self.dicom_table = pd.DataFrame()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                     return False
             else:
                 self.logger.error(f'Pre detection fails... | {self.Session_ID}')
                 self.removed['Pre_Failure'] = self.dicom_table
-                self.dicom_table = pd.DataFrame()
+                self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                 return False
 
 
@@ -931,7 +935,7 @@ class DICOMfilter():
             # Post failure with multiple lateralites detected, cuurrently unable to continue
             self.logger.error(f'Failure in detecting post sequence, clearing entry... | {self.Session_ID}')
             self.removed['Post_Failure'] = self.dicom_table
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             return False
         
         # Post sequence can be determined immediately, detect and filter
@@ -951,12 +955,12 @@ class DICOMfilter():
         if not pre_success:
             self.logger.error(f'Failure in detecting pre sequence | {self.Session_ID}')
             self.removed['Pre_Failure'] = self.dicom_table
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             return False
         elif pre_success:
             self.detect_pre('apply')
             self.dicom_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             self.logger.debug(f'Successfully detected pre sequence | {self.Session_ID}')
             self.print_table(self.dicom_pre, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Pre_scan'])
 
@@ -973,7 +977,7 @@ class DICOMfilter():
         if len(expected_slices) > 2:
             self.logger.debug(f'Multiple post scans with different number of slices detected {expected_slices} | {self.Session_ID}')
             self.removed['Multiple_post_slices'] = self.dicom_table.copy()
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             return False
         elif (len(expected_slices) == 2):
             if not self.multiple_lat:
@@ -989,7 +993,7 @@ class DICOMfilter():
             elif len(sides) > 2:
                 self.logger.debug(f'Too many lateralities detected {sides} | {self.Session_ID}')
                 self.removed['Multiple_laterality'] = self.dicom_table.copy()
-                self.dicom_table = pd.DataFrame()
+                self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                 return False
 
         elif len(expected_slices) == 1:
@@ -1101,7 +1105,7 @@ class DICOMsplit():
             self.num_post_scans = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].values[0] // self.pre_slices
         else:
             self.logger.warning(f'Unable to make sense of pre and post scans, removing session, further logic required | [{self.Session_ID}]')
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             self.SCAN = False
 
     def scan_all(self):
@@ -1293,7 +1297,7 @@ class DICOMorder():
             unknown_rows_2 = self.dicom_table[self.dicom_table[secondary_param].astype(str).str.lower() == 'unknown']
             if len(valid_rows_index_2) == 0:
                 self.logger.error(f'Unable to order scans with {self.timing_param} or {secondary_param}, returning empty table | {self.Session_ID}')
-                self.dicom_table = pd.DataFrame()
+                self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                 return self.dicom_table
             elif len(valid_rows_index_2) == len(self.dicom_table):
                 self.logger.debug(f'All rows have valid {secondary_param} values, ordering by {secondary_param} | {self.Session_ID}')
@@ -1321,7 +1325,7 @@ class DICOMorder():
             return self.dicom_table
         else:
             self.logger.error(f'Unexpected results for {self.timing_param} values, unable to order scans | {self.Session_ID}')
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             return self.dicom_table
     
     def alternate_pre(self):
@@ -1361,7 +1365,7 @@ class DICOMorder():
             self.logger.debug(f'Pre scan detection failed | {self.Session_ID}')
             self.logger.debug(f'Removing session from consideration | {self.Session_ID}')
             self.logger.warning(f'Pre scan should be found, possible error in earlier processing steps | {self.Session_ID}')
-            self.dicom_table = pd.DataFrame()
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             return self.dicom_table
 
         # series_numbers = self.dicom_table['Series'][self.dicom_table['Major'] > 0].astype(int)
@@ -1369,7 +1373,7 @@ class DICOMorder():
         #     if self.debug > 0:
         #         print(f'No series_numbers found for {self.dicom_table["SessionID"].unique()}')
         #     #clear dicom table
-        #     self.dicom_table = pd.DataFrame()
+        #     self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
         #     return self.dicom_table
         # indx = self.dicom_table[self.dicom_table['Major'] > 0].index
 
@@ -1395,4 +1399,4 @@ class DICOMorder():
         #     print('Alternative pre scan detection failed')
         #     print('No pre scan found')
         #     print('Returning empty dicom table')
-        #     self.dicom_table = pd.DataFrame()
+        #     self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
