@@ -301,19 +301,19 @@ def filterDicom(Data_subset: pd.DataFrame) -> tuple:
     
     return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
-def split_table(ID: str) -> pd.DataFrame:
-    """
-    Filter the global Data_table for a specific SessionID.
-
-    Args:
-        ID (str): The unique SessionID to filter for.
-
-    Returns:
-        pd.DataFrame: A copy of the rows matching the ID.
-    """
-    global Data_table
-    LOGGER.debug(f'Splitting table for ID: {ID}')
-    return Data_table[Data_table['SessionID'] == ID].copy()
+#def split_table(ID: str) -> pd.DataFrame:
+#    """
+#    Filter the global Data_table for a specific SessionID.
+#
+#    Args:
+#        ID (str): The unique SessionID to filter for.
+#
+#    Returns:
+#        pd.DataFrame: A copy of the rows matching the ID.
+#    """
+#    global Data_table
+#    LOGGER.debug(f'Splitting table for ID: {ID}')
+#    return Data_table[Data_table['SessionID'] == ID].copy()
 
 def agg_removed(removed_table: dict) -> None:
     """
@@ -557,7 +557,8 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
 
 
         Data_table.to_csv(f'{SAVE_DIR}Data_table_split.csv', index=False)
-        Data_subsets = run_function(LOGGER, split_table, Data_table['SessionID'].unique(), Parallel=PARALLEL, P_type='process')
+        Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
+        #Data_subsets = run_function(LOGGER, split_table, Data_table['SessionID'].unique(), Parallel=PARALLEL, P_type='process')
 
         # Order the data based on the criteria defined in DICOMorder and orderDicom
         results = run_function(LOGGER, orderDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
