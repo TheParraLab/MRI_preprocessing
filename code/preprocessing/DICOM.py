@@ -443,12 +443,12 @@ class DICOMfilter():
             self.logger.debug(f'Filtering scans using determined pre slices')
             self.removed['invalid_slices'] = self.dicom_table[~self.dicom_table['NumSlices'].apply(lambda x: any(x % s == 0 for s in self.pre_slices))]
             self.dicom_table = self.dicom_table[self.dicom_table['NumSlices'].apply(lambda x: any(x % s == 0 for s in self.pre_slices))]
-            self.logger.debug(f'Removed {len(self.removed["invalid_slices"])} scans with invalid number of slices [expected {self.pre_slices} removed {self.removed["invalid_slices"]["NumSlices"].unique()}] | {self.Session_ID}')
+            self.logger.debug(f'Removed {len(self.removed["invalid_slices"])} scans with invalid number of slices [expected {self.pre_slices}] | {self.Session_ID}')
         elif use.lower() == 'post' and hasattr(self, 'post_slices'):
             self.logger.debug(f'Filtering scans using determined post slices')
             self.removed['invalid_slices'] = self.dicom_table[~self.dicom_table['NumSlices'].apply(lambda x: any(s % x == 0 for s in self.post_slices))]
             self.dicom_table = self.dicom_table[self.dicom_table['NumSlices'].apply(lambda x: any(s % x == 0 for s in self.post_slices))]
-            self.logger.debug(f'Removed {len(self.removed["invalid_slices"])} scans with invalid number of slices [expected {self.post_slices} removed {self.removed["invalid_slices"]["NumSlices"].unique()}] | {self.Session_ID}')
+            self.logger.debug(f'Removed {len(self.removed["invalid_slices"])} scans with invalid number of slices [expected {self.post_slices}] | {self.Session_ID}')
         elif use.lower() == 'pre':
             self.logger.warning(f'Pre slices not defined, cannot apply slice filtering | {self.Session_ID}')
         elif use.lower() == 'post':
