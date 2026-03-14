@@ -239,7 +239,7 @@ def filterDicom(Data_subset: pd.DataFrame) -> tuple:
     if len(dicom_filter.dicom_table) < 2:
         dicom_filter.logger.error(f'Not enough scans for {dicom_filter.Session_ID}, removing...')
         dicom_filter.removed['N_samples'] = dicom_filter.dicom_table
-        dicom_filter.dicom_table = pd.DataFrame()
+        dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
         return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
     #filter.removeImplants()
@@ -269,7 +269,7 @@ def filterDicom(Data_subset: pd.DataFrame) -> tuple:
                     # If steady state and disco both fail
                     dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
                     dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
-                    dicom_filter.dicom_table = pd.DataFrame()
+                    dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
                 else:
                     dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
             else:
@@ -281,13 +281,13 @@ def filterDicom(Data_subset: pd.DataFrame) -> tuple:
             if not dicom_filter.isolate_sequence(): # Attempt to isolate the primary sequence of scans using DISCO
                 dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
                 dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
-                dicom_filter.dicom_table = pd.DataFrame()
+                dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
             else:
                 dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
         else:
             dicom_filter.logger.error(f'Not enough scans to identify sequence [DISCO or SS] | {dicom_filter.Session_ID}')
             dicom_filter.removed['Sequence_Failure'] = pd.concat([dicom_filter.dicom_table, dicom_filter.disco_table])
-            dicom_filter.dicom_table = pd.DataFrame()
+            dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
     else:
         dicom_filter.logger.debug(f'No DISCO scans detected | {dicom_filter.Session_ID}')
         if dicom_filter.isolate_sequence():
@@ -295,7 +295,7 @@ def filterDicom(Data_subset: pd.DataFrame) -> tuple:
         else:
             dicom_filter.logger.debug(f'Failed to isolate sequence using steady state information | {dicom_filter.Session_ID}')
             dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
-            dicom_filter.dicom_table = pd.DataFrame()
+            dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
     if len(dicom_filter.dicom_table) == 0:
         LOGGER.error(f'No scans remaining after filtering for {Data_subset["SessionID"].values[0]}')
     
