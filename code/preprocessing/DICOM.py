@@ -436,6 +436,9 @@ class DICOMfilter():
               returns an empty DataFrame. Consider raising a specific warning to trigger
               manual review rather than silently dropping the session.
         """
+        if self.dicom_table.empty:
+            return self.dicom_table
+
         if (not hasattr(self, 'pre_slices')) & (not hasattr(self, 'post_slices')):
             self.logger.error(f'Expected slices not defined for pre or post, cannot apply slice filtering.  Try running pre and post detection first | {self.Session_ID}')
             return self.dicom_table
