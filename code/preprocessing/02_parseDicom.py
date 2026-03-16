@@ -17,7 +17,7 @@ import pandas as pd
 # Function imports
 from multiprocessing import Manager, cpu_count, Lock#, Queue
 #from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-#from typing import Callable, List, Any
+from typing import Callable, List, Any
 from functools import partial
 from collections import defaultdict
 # Custom imports
@@ -30,6 +30,12 @@ manager = Manager()
 disk_space_lock = Lock()
 
 def parse_args():
+    """
+    Parse command-line arguments for the DICOM parsing script.
+
+    Returns:
+        argparse.Namespace: The parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser(description='Parse DICOM data')
     parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
     parser.add_argument('--save_dir', type=str, default='/FL_system/data/', help='Directory to save the updated tables')
@@ -58,6 +64,12 @@ DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
 stop_flag = None
 
 def configure_runtime(parsed_args):
+    """
+    Initialize global variables and logger for script execution.
+
+    Args:
+        parsed_args (argparse.Namespace): The parsed command-line arguments.
+    """
     global args, SAVE_DIR, PARALLEL, N_CPUS, MOVE, LOGGER, stop_flag
     args = parsed_args
     SAVE_DIR = args.save_dir
@@ -99,23 +111,45 @@ if PROFILE:
 #########################################
 # Wrapper for progress updates
 def check_disk_space(directory: str) -> bool:
-    """Check if there is enough disk space available."""
+    """
+    Check if there is enough disk space available.
+
+    Args:
+        directory (str): The directory path to check for available space.
+
+    Returns:
+        bool: True if available space exceeds the threshold, False otherwise.
+    """
     statvfs = os.statvfs(directory)
     available_space = statvfs.f_frsize * statvfs.f_bavail
     if available_space < DISK_SPACE_THRESHOLD*2:
         LOGGER.debug(f'Available space: {available_space}')
     return available_space > DISK_SPACE_THRESHOLD
 
-def save_progress(data, filename):
-    """Save progress to a file."""
+def save_progress(data: list, filename: str) -> None:
+    """
+    Save the current relocation progress to a file.
+
+    Args:
+        data (list): The data structure (e.g. list of temporary relocations) to save.
+        filename (str): The name of the file to save the data to.
+    """
     LOGGER.info(f'Saving progress to {filename}')
     if os.path.exists(f'{SAVE_DIR}{filename}'):
         os.remove(f'{SAVE_DIR}{filename}')
     with open(f'{SAVE_DIR}{filename}', 'wb') as f:
         pickle.dump(data, f)
 
-def load_progress(filename):
-    """Load progress from a file."""
+def load_progress(filename: str) -> Any:
+    """
+    Load saved relocation progress from a file.
+
+    Args:
+        filename (str): The name of the file to load progress from.
+
+    Returns:
+        Any: The loaded progress data, or None if the file does not exist.
+    """
     if os.path.exists(f'{SAVE_DIR}{filename}'):
         LOGGER.info(f'Loading progress from {filename}')
         with open(f'{SAVE_DIR}{filename}', 'rb') as f:
@@ -124,15 +158,33 @@ def load_progress(filename):
 #############################
 ## Main functions
 #############################
-# Function to save removed scans to a .csv file
-def save_to_csv(tup):
+def save_to_csv(tup: tuple) -> None:
+    """
+    Save removed scans to a corresponding CSV file.
+
+    Args:
+        tup (tuple): A tuple containing a string key (removal category) and a
+                     pandas DataFrame (the items removed).
+
+    TODO: Enhance error handling to avoid potential issues when saving files
+          concurrently if paths collide.
+    """
     key, item = tup
     item.to_csv(f'{SAVE_DIR}removal_log/Removed_{key}.csv', index=False)
 
-# Function to order the DICOM data
-def orderDicom(Data_subset):
-    # Trigger time is in ms post injection
-    # Acq time is in HHMMSS format
+def orderDicom(Data_subset: pd.DataFrame) -> pd.DataFrame:
+    """
+    Order the provided DICOM data subset based on scan timings.
+
+    Trigger time is typically in ms post-injection.
+    Acquisition time is typically in HHMMSS format.
+
+    Args:
+        Data_subset (pd.DataFrame): Subset of data specific to a single SessionID.
+
+    Returns:
+        pd.DataFrame: Ordered dataframe representing the primary sequence of scans.
+    """
     Data_subset = Data_subset.reset_index(drop=True)
     SessionID = Data_subset['SessionID'].values[0]
     order = DICOMorder(Data_subset, logger=LOGGER)
@@ -144,8 +196,16 @@ def orderDicom(Data_subset):
         order.findPre()
         return order.dicom_table
 
-# Function to split scans with multiple post images in a single directory
-def splitDicom(Data_subset):
+def splitDicom(Data_subset: pd.DataFrame) -> tuple:
+    """
+    Separate scans containing multiple post images within a single directory.
+
+    Args:
+        Data_subset (pd.DataFrame): Subset of data specific to a single SessionID.
+
+    Returns:
+        tuple: (Updated dataframe, List of files to be relocated)
+    """
     Data_subset = Data_subset.reset_index(drop=True)
     splitter = DICOMsplit(Data_subset, logger=LOGGER)
     if splitter.SCAN:
@@ -155,14 +215,33 @@ def splitDicom(Data_subset):
     else:
         return Data_subset, []
 
-# Function to filter the DICOM data
-def filterDicom(Data_subset):
-    # Filter each subset of data based on the criteria
+def filterDicom(Data_subset: pd.DataFrame) -> tuple:
+    """
+    Filter the provided DICOM data subset based on defined criteria to isolate
+    the primary scan sequence.
+
+    Args:
+        Data_subset (pd.DataFrame): Subset of data specific to a single SessionID.
+
+    Returns:
+        tuple: (Filtered dataframe, Removed items dictionary, Temporary relocations list)
+
+    TODO: Deep review of the DISCO and steady-state isolation path. If a sequence
+          fails both approaches, it throws the scans into `Sequence_Failure` but might
+          discard perfectly valid scans in edge cases where sequences mix modalities
+          unusually. Should probably provide a more detailed secondary fallback.
+    """
     Data_subset = Data_subset.reset_index(drop=True)
     dicom_filter = DICOMfilter(Data_subset, logger=LOGGER, tmp_save=SAVE_DIR.replace('tmp/', 'tmp_data/'))
     dicom_filter.Types(COMPUTED_FLAGS)
     dicom_filter.Description(DESCRIPTION_FLAGS)
-        
+    
+    if len(dicom_filter.dicom_table) < 2:
+        dicom_filter.logger.error(f'Not enough scans for {dicom_filter.Session_ID}, removing...')
+        dicom_filter.removed['N_samples'] = dicom_filter.dicom_table
+        dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
+        return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
+
     #filter.removeImplants()
     #dicom_filter.removeSide()
     #dicom_filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
@@ -190,7 +269,7 @@ def filterDicom(Data_subset):
                     # If steady state and disco both fail
                     dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
                     dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
-                    dicom_filter.dicom_table = pd.DataFrame()
+                    dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
                 else:
                     dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
             else:
@@ -202,13 +281,13 @@ def filterDicom(Data_subset):
             if not dicom_filter.isolate_sequence(): # Attempt to isolate the primary sequence of scans using DISCO
                 dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
                 dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
-                dicom_filter.dicom_table = pd.DataFrame()
+                dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
             else:
                 dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
         else:
             dicom_filter.logger.error(f'Not enough scans to identify sequence [DISCO or SS] | {dicom_filter.Session_ID}')
             dicom_filter.removed['Sequence_Failure'] = pd.concat([dicom_filter.dicom_table, dicom_filter.disco_table])
-            dicom_filter.dicom_table = pd.DataFrame()
+            dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
     else:
         dicom_filter.logger.debug(f'No DISCO scans detected | {dicom_filter.Session_ID}')
         if dicom_filter.isolate_sequence():
@@ -216,27 +295,49 @@ def filterDicom(Data_subset):
         else:
             dicom_filter.logger.debug(f'Failed to isolate sequence using steady state information | {dicom_filter.Session_ID}')
             dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
-            dicom_filter.dicom_table = pd.DataFrame()
+            dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
     if len(dicom_filter.dicom_table) == 0:
         LOGGER.error(f'No scans remaining after filtering for {Data_subset["SessionID"].values[0]}')
     
     return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
-# Function to split the data table based on the unique identifier
-def split_table(ID):
-    global Data_table
-    LOGGER.debug(f'Splitting table for ID: {ID}')
-    return Data_table[Data_table['SessionID'] == ID].copy()
+#def split_table(ID: str) -> pd.DataFrame:
+#    """
+#    Filter the global Data_table for a specific SessionID.
+#
+#    Args:
+#        ID (str): The unique SessionID to filter for.
+#
+#    Returns:
+#        pd.DataFrame: A copy of the rows matching the ID.
+#    """
+#    global Data_table
+#    LOGGER.debug(f'Splitting table for ID: {ID}')
+#    return Data_table[Data_table['SessionID'] == ID].copy()
 
-# Function to aggregate removed scans
-def agg_removed(removed_table: dict):
+def agg_removed(removed_table: dict) -> None:
+    """
+    Aggregate removed scans across multiple processing runs.
+
+    Args:
+        removed_table (dict): Dictionary mapping removal categories to DataFrames.
+
+    TODO: Using `pd.concat` in a loop can degrade performance on very large logs.
+          Consider refactoring `Remove_Tables` to collect lists of DataFrames and
+          concatenate them once at the end.
+    """
     global Remove_Tables
     for key, value in removed_table.items():
-        #assert key in Remove_Tables, f'Key {key} not found in Remove_Tables'
         Remove_Tables[key] = pd.concat([Remove_Tables[key], value], ignore_index=True)
 
-# Function to initialize the data
-def init_data(load_table: str='', target: int=None):
+def init_data(load_table: str='', target: str=None) -> None:
+    """
+    Initialize data globally, reading the extracted CSV and formatting IDs.
+
+    Args:
+        load_table (str): Path to the input Data_table.csv.
+        target (str, optional): An optional specific ID to filter on startup.
+    """
     global Data_table
     Data_table = pd.read_csv(f'{load_table}', low_memory=False)
     if target is not None:
@@ -258,7 +359,18 @@ def init_data(load_table: str='', target: int=None):
     #Remove_Tables['DISCO'] = pd.DataFrame()
     #Remove_Tables['No_post'] = pd.DataFrame()
 
-def relocate(commands, relocations):
+def relocate(commands: list, relocations: list) -> None:
+    """
+    Relocate files to new paths based on provided commands.
+
+    Args:
+        commands (list): List of [source, destination] pairs.
+        relocations (list): Global list of pending relocations, synchronized across processes.
+
+    TODO: Thread-safety check: `shutil.copy` may hit race conditions if multiple processes
+          attempt to create or interact with the exact same parent directories simultaneously
+          despite `os.makedirs`. Consider robust directory locking or centralized moving.
+    """
     LOGGER.debug(f'Relocate called with {len(commands)} commands')
     LOGGER.debug(f'Current relocations: {len(relocations)}')
     LOGGER.debug(f'First command: {commands[0] if commands else "None"}')
@@ -286,20 +398,42 @@ def relocate(commands, relocations):
             return
     try:
         for command in commands:
-            LOGGER.debug(f'Copying {command[0]} to {command[1]}')
-            shutil.copy(command[0], command[1])
+            LOGGER.debug(f'Linking {command[0]} to {command[1]}')
+            src_path = os.path.abspath(command[0])
+            dest_path = command[1]
+            if os.path.exists(dest_path) or os.path.islink(dest_path):
+                os.remove(dest_path)
+            os.symlink(src_path, dest_path)
         with disk_space_lock:
             relocations.remove(commands)
     except Exception as e:
         LOGGER.error(f'Error in relocating files: {e}', exc_info=True)
 
-def chunk_list(lst, chunk_size):
+def chunk_list(lst: list, chunk_size: int):
+    """Yield successive chunk_size-sized chunks from lst."""
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]
+
 #############################
 ## Main script
 #############################
-def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=None):
+def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=None) -> None:
+    """
+    Main orchestration function for parsing DICOM data.
+
+    This function sequentially filters out bad scans, sorts out mixed directories,
+    orders scans correctly by time, and writes out the resulting files.
+
+    Args:
+        out_name (str): Filename for the successfully ordered output CSV.
+        SAVE_DIR (str): Location to save outputs, checkpoints, and logs.
+        target (str, optional): A specific ID to process independently.
+
+    TODO: Error Handling: While processing large groups, if `filterDicom` encounters
+          catastrophic failure, it could crash the main script. Wrap processing steps in
+          tighter try-except blocks to allow gracefully dropping broken sessions rather
+          than halting the entire parallel pool.
+    """
     global Data_table, Remove_Tables
 
     # Create the save directory if it does not exist
@@ -321,9 +455,10 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
 
     # Check if the output already exists
     if out_name in os.listdir(SAVE_DIR):
-        LOGGER.error(f'{out_name} already exists. Skipping step 02')
-        LOGGER.error(f'To re-run this step, delete the existing {out_name} file')
-        exit()
+        LOGGER.error(f'{out_name} already exists')
+        if input('Would you like to reprocess? [Y/n]?\n').lower() != 'y':
+            LOGGER.error('Stopping Processing')
+            exit()
 
     progress = load_progress('parseDicom_progress.pkl')
     if progress:
@@ -358,6 +493,7 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         removed = list(removed)
         Data_table = pd.concat(results)
         Data_table = Data_table.reset_index(drop=True)
+        Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
         Iden_uniq_after = Data_table['SessionID'].unique()
         Iden_uniq_after_clean = []
         for i in Iden_uniq_after:
@@ -376,9 +512,9 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         LOGGER.info(f'Number of removed sessions: {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
 
         for key, value in Remove_Tables.items():
+            LOGGER.info(f'===== {key} =====')
             Rem_ID = value['SessionID'].unique()
             Gone_ID = set(Rem_ID) - set(Iden_uniq_after_clean)
-            LOGGER.info(f'===== {key} =====')
             LOGGER.info(f'  Number of unique sessions missing from final output: {len(Gone_ID)}')
             LOGGER.info(f'  Number of scans removed: {len(value)}')
         LOGGER.info(f'Saving filtered data to {SAVE_DIR}Data_table_filtered.csv')
@@ -421,7 +557,8 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
 
 
         Data_table.to_csv(f'{SAVE_DIR}Data_table_split.csv', index=False)
-        Data_subsets = run_function(LOGGER, split_table, Data_table['SessionID'].unique(), Parallel=PARALLEL, P_type='process')
+        Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
+        #Data_subsets = run_function(LOGGER, split_table, Data_table['SessionID'].unique(), Parallel=PARALLEL, P_type='process')
 
         # Order the data based on the criteria defined in DICOMorder and orderDicom
         results = run_function(LOGGER, orderDicom, Data_subsets, Parallel=PARALLEL, P_type='process')

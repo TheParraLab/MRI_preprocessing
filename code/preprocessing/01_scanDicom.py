@@ -178,7 +178,15 @@ def load_checkpoint(name: str) -> Optional[Any]:
 # The extracted information is saved to {SAVE_DIR}/Data_table.csv
 
 def _has_dcm_magic(path: str) -> bool:
-    """Cheap check for DICOM preamble + 'DICM' marker at offset 128."""
+    """
+    Perform a fast check for a DICOM preamble and 'DICM' magic marker.
+
+    Args:
+        path (str): File path to check.
+
+    Returns:
+        bool: True if 'DICM' is found at offset 128, False otherwise.
+    """
     try:
         with open(path, 'rb') as f:
             f.seek(128)
@@ -186,10 +194,19 @@ def _has_dcm_magic(path: str) -> bool:
     except Exception:
         return False
 
-def _dir_contains_mr(item):
-    """Worker to check one directory for at least one MR DICOM.
-    `item` is a tuple (dirpath, filenames_list).
-    Returns dirpath if MR found, else None.
+def _dir_contains_mr(item: tuple) -> Optional[str]:
+    """
+    Check if a directory contains at least one MR DICOM file.
+
+    Args:
+        item (tuple): A tuple containing (dirpath, filenames_list).
+
+    Returns:
+        Optional[str]: The dirpath if an MR DICOM is found, else None.
+
+    TODO: Consider performance impact of iterating through potentially large numbers
+          of non-DICOM or non-MR files. Implementing a fast-fail threshold or
+          sampling limit may speed up scanning across massive directories.
     """
     dirpath, filenames = item
     # cooperative cancellation: if another worker already found enough dirs
@@ -246,22 +263,26 @@ def _dir_contains_mr(item):
 #############################
 def extractDicom(f: str) -> Optional[Dict[str, Any]]:
     """
-    Extracts DICOM information from a file path.
+    Extract DICOM information from a specific file path.
 
     This function utilizes the `DICOMextract` class to parse the DICOM header
     and retrieve specific fields such as Patient ID, Study Date, Modality, etc.
+
+    TODO: Edge cases to consider: what if `DICOMextract` succeeds in initialization
+          but certain critical fields are missing or corrupted? Currently, `UNKNOWN`
+          is returned by methods in DICOMextract, but consider handling entirely unreadable
+          files more gracefully.
 
     Args:
         f (str): Path to the DICOM file.
 
     Returns:
-        Optional[Dict[str, Any]]: A dictionary containing extracted DICOM information with keys:
+        Optional[Dict[str, Any]]: A dictionary containing extracted DICOM information, including keys:
             - PATH, Orientation, ID, Accession, Name, DATE, DOB, Series_desc,
             - Modality, AcqTime, SrsTime, ConTime, StuTime, TriTime, InjTime,
             - ScanDur, Lat, NumSlices, Thickness, BreastSize, DWI, Type, Series.
-            Returns None if extraction fails.
+            Returns None if extraction fails completely.
     """
-
     try:
         LOGGER.debug(f'Extracting information for file: {f}')
         extract = DICOMextract(f) # Initialize the DICOMextract class
@@ -300,10 +321,14 @@ def extractDicom(f: str) -> Optional[Dict[str, Any]]:
 
 def find_all_dicom_dirs(directory: str, N_test: Optional[int] = None) -> List[str]:
     """
-    Find all directories containing MRI DICOM files (.dcm) in the given directory.
+    Find all directories containing MRI DICOM files (.dcm) within the given root directory.
 
-    It traverses the directory tree and checks for files ending with '.dcm'.
-    It specifically checks if the DICOM 'Modality' tag is 'MR' to filter for MRI scans.
+    Traverses the directory tree and checks for files ending with '.dcm'.
+    Reads the 'Modality' tag from headers to explicitly filter for 'MR' (MRI scans).
+
+    TODO: The use of `os.walk` here may be a performance bottleneck for heavily nested
+          or networked file systems. Consider `os.scandir()` or parallelized tree walking
+          for increased throughput.
 
     Args:
         directory (str): The root directory to search.
@@ -358,6 +383,10 @@ def findDicom(directory: str) -> List[str]:
     sample a percentage of files to speed up the process if the directory contains
     many files. For each unique 'SeriesNumber' found, it returns the path to the
     first file encountered.
+
+    TODO: Edge case - If 'SeriesNumber' is missing or ambiguous, a fallback to other
+          unique identifiers (like 'SeriesInstanceUID') should be implemented to avoid
+          erroneously merging distinct series.
 
     Args:
         directory (str): The directory to scan for DICOM files.
@@ -436,16 +465,20 @@ def main(out_name: str = 'Data_table.csv', SAVE_DIR: str = '', SCAN_DIR: str = '
     """
     Main execution logic for scanning and extracting DICOM data.
 
-    This function orchestrates the entire process:
-    1.  Validates input directories.
-    2.  Finds directories containing DICOM files (resuming from checkpoint if needed).
-    3.  Scans those directories to find representative files (resuming from checkpoint if needed).
-    4.  Extracts DICOM header information (resuming from checkpoint if needed).
-    5.  Saves the extracted data to a CSV file.
+    Orchestrates the pipeline process:
+    1. Validates input directories.
+    2. Finds directories containing DICOM files (resumes from checkpoint if needed).
+    3. Scans directories to find representative files per series.
+    4. Extracts DICOM header information in parallel.
+    5. Saves the extracted metadata to a CSV file.
+
+    TODO: Data table aggregation performance: using `pd.concat` repeatedly in a loop
+          (as seen in the HPC compilation section) is inefficient and can cause high
+          memory overhead. Instead, compile a list of DataFrames and use a single `pd.concat`.
 
     Args:
-        out_name (str): Name of the output CSV file.
-        SAVE_DIR (str): Directory where the output file will be saved.
+        out_name (str): Name of the output CSV file (default: 'Data_table.csv').
+        SAVE_DIR (str): Directory where the output file and checkpoints will be saved.
         SCAN_DIR (str): Directory to scan for DICOM files.
 
     Returns:
