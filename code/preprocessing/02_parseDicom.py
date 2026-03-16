@@ -525,12 +525,14 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         if not os.path.exists(f'{SAVE_DIR}removal_log'):
             os.mkdir(f'{SAVE_DIR}removal_log')
         run_function(LOGGER, save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL, P_type='process')
-        fully_removed = pd.DataFrame()
+        fully_removed_list = []
+        iden_uniq_after_set = set(Iden_uniq_after)
         for ID in Iden_uniq:
-            if ID not in Iden_uniq_after:
+            if ID not in iden_uniq_after_set:
                 LOGGER.debug(f'Session {ID} was completely removed')
-                fully_removed = pd.concat([fully_removed, PRE_TABLE[PRE_TABLE['SessionID'] == ID]], ignore_index=True)
-        if not fully_removed.empty:
+                fully_removed_list.append(PRE_TABLE[PRE_TABLE['SessionID'] == ID])
+        if fully_removed_list:
+            fully_removed = pd.concat(fully_removed_list, ignore_index=True)
             fully_removed.to_csv(f'{SAVE_DIR}removal_log/Removed_fully.csv', index=False)
             LOGGER.info(f'Saved fully removed sessions to {SAVE_DIR}removal_log/Removed_fully.csv')
         if args.filter_only:
