@@ -75,6 +75,7 @@ def configure_runtime(parsed_args):
     SAVE_DIR = args.save_dir
     PARALLEL = args.multi is not None
     N_CPUS = args.multi if PARALLEL else cpu_count() - 1
+    EXPORT_FULLY_REMOVED = False
     #MOVE = args.move
     LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
     stop_flag = manager.Event()
@@ -482,59 +483,70 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         #Data_subsets = run_function(LOGGER, split_table, Iden_uniq, Parallel=PARALLEL, P_type='process')
         Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
         random.shuffle(Data_subsets)
-        # Filter the data based on the criteria defined in DICOMfilter and filterDicom
-        results, removed, temporary_relocation = run_function(LOGGER, filterDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
-        #temporary_relocation = list(temporary_relocation)
-        #temporary_relocation = manager.list([item for sublist in temporary_relocation for item in sublist])
 
-        # Filtered results and removed scans are concatenated into a single table
-        results = list(results)
-        results = [df for df in results if not df.empty]
-        removed = list(removed)
-        Data_table = pd.concat(results)
-        Data_table = Data_table.reset_index(drop=True)
-        #Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
-        Iden_uniq_after = Data_table['SessionID'].unique()
-        Iden_uniq_after_clean = []
-        for i in Iden_uniq_after:
-            if i[-2:] in ('_a', '_b', '_l', '_r'):
-                Iden_uniq_after_clean.append(i[:-2])
+        if not os.path.exists(f'{SAVE_DIR}Data_table_filtered.csv'):
+            LOGGER.info('No filtered table found, starting filtering process')
+            # Filter the data based on the criteria defined in DICOMfilter and filterDicom
+            results, removed, temporary_relocation = run_function(LOGGER, filterDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
+            #temporary_relocation = list(temporary_relocation)
+            #temporary_relocation = manager.list([item for sublist in temporary_relocation for item in sublist])
+
+            # Filtered results and removed scans are concatenated into a single table
+            results = list(results)
+            results = [df for df in results if not df.empty]
+            removed = list(removed)
+            Data_table = pd.concat(results)
+            Data_table = Data_table.reset_index(drop=True)
+            #Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
+            Iden_uniq_after = Data_table['SessionID'].unique()
+            Iden_uniq_after_clean = []
+            for i in Iden_uniq_after:
+                if i[-2:] in ('_a', '_b', '_l', '_r'):
+                    Iden_uniq_after_clean.append(i[:-2])
+                else:
+                    Iden_uniq_after_clean.append(i)
+            Iden_uniq_after_clean = list(set(Iden_uniq_after_clean)) # Get unique IDs without laterality suffix
+            run_function(LOGGER, agg_removed, removed, Parallel=False)
+
+            # Display the results of the filtering process
+            LOGGER.info('Filtering Results:')
+            LOGGER.info(f'Initial number of unique sessions: {len(Iden_uniq)}')
+            LOGGER.info(f'Final number of unique sessions: {len(Iden_uniq_after_clean)}')
+            LOGGER.info(f'Final number of sesions, including laterality suffix: {len(Iden_uniq_after)}')
+            LOGGER.info(f'Number of removed sessions: {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
+
+            for key, value in Remove_Tables.items():
+                LOGGER.info(f'===== {key} =====')
+                Rem_ID = value['SessionID'].unique()
+                Gone_ID = set(Rem_ID) - set(Iden_uniq_after_clean)
+                LOGGER.info(f'  Number of unique sessions missing from final output: {len(Gone_ID)}')
+                LOGGER.info(f'  Number of scans removed: {len(value)}')
+            LOGGER.info(f'Saving filtered data to {SAVE_DIR}Data_table_filtered.csv')
+            Data_table.to_csv(f'{SAVE_DIR}Data_table_filtered.csv', index=False)
+
+
+            # Save a .csv for each item in the full_removed dictionary
+            if not os.path.exists(f'{SAVE_DIR}removal_log'):
+                os.mkdir(f'{SAVE_DIR}removal_log')
+            run_function(LOGGER, save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL, P_type='process')
+            if EXPORT_FULLY_REMOVED:
+                LOGGER.info('Compiling fully removed sessions...')
+                fully_removed_list = []
+                iden_uniq_after_set = set(Iden_uniq_after)
+                for ID in Iden_uniq:
+                    if ID not in iden_uniq_after_set:
+                        #LOGGER.debug(f'Session {ID} was completely removed')
+                        fully_removed_list.append(PRE_TABLE[PRE_TABLE['SessionID'] == ID])
+                if fully_removed_list:
+                    fully_removed = pd.concat(fully_removed_list, ignore_index=True)
+                    fully_removed.to_csv(f'{SAVE_DIR}removal_log/Removed_fully.csv', index=False)
+                    LOGGER.info(f'Saved fully removed sessions to {SAVE_DIR}removal_log/Removed_fully.csv')
             else:
-                Iden_uniq_after_clean.append(i)
-        Iden_uniq_after_clean = list(set(Iden_uniq_after_clean)) # Get unique IDs without laterality suffix
-        run_function(LOGGER, agg_removed, removed, Parallel=False)
-
-        # Display the results of the filtering process
-        LOGGER.info('Filtering Results:')
-        LOGGER.info(f'Initial number of unique sessions: {len(Iden_uniq)}')
-        LOGGER.info(f'Final number of unique sessions: {len(Iden_uniq_after_clean)}')
-        LOGGER.info(f'Final number of sesions, including laterality suffix: {len(Iden_uniq_after)}')
-        LOGGER.info(f'Number of removed sessions: {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
-
-        for key, value in Remove_Tables.items():
-            LOGGER.info(f'===== {key} =====')
-            Rem_ID = value['SessionID'].unique()
-            Gone_ID = set(Rem_ID) - set(Iden_uniq_after_clean)
-            LOGGER.info(f'  Number of unique sessions missing from final output: {len(Gone_ID)}')
-            LOGGER.info(f'  Number of scans removed: {len(value)}')
-        LOGGER.info(f'Saving filtered data to {SAVE_DIR}Data_table_filtered.csv')
-        Data_table.to_csv(f'{SAVE_DIR}Data_table_filtered.csv', index=False)
-
-
-        # Save a .csv for each item in the full_removed dictionary
-        if not os.path.exists(f'{SAVE_DIR}removal_log'):
-            os.mkdir(f'{SAVE_DIR}removal_log')
-        run_function(LOGGER, save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL, P_type='process')
-        fully_removed_list = []
-        iden_uniq_after_set = set(Iden_uniq_after)
-        for ID in Iden_uniq:
-            if ID not in iden_uniq_after_set:
-                LOGGER.debug(f'Session {ID} was completely removed')
-                fully_removed_list.append(PRE_TABLE[PRE_TABLE['SessionID'] == ID])
-        if fully_removed_list:
-            fully_removed = pd.concat(fully_removed_list, ignore_index=True)
-            fully_removed.to_csv(f'{SAVE_DIR}removal_log/Removed_fully.csv', index=False)
-            LOGGER.info(f'Saved fully removed sessions to {SAVE_DIR}removal_log/Removed_fully.csv')
+                LOGGER.info('Export of fully removed sessions skipped. Set EXPORT_FULLY_REMOVED to True to enable.')
+        else:
+            LOGGER.info('Filtered table found, loading filtered data')
+            Data_table = pd.read_csv(f'{SAVE_DIR}Data_table_filtered.csv', low_memory=False)
+            Iden_uniq_after = Data_table['SessionID'].unique()
         if args.filter_only:
             LOGGER.info('Filter only mode enabled. Exiting after filtering step.')
             return
