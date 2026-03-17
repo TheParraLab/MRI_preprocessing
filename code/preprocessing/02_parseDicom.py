@@ -493,7 +493,7 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         removed = list(removed)
         Data_table = pd.concat(results)
         Data_table = Data_table.reset_index(drop=True)
-        Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
+        #Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
         Iden_uniq_after = Data_table['SessionID'].unique()
         Iden_uniq_after_clean = []
         for i in Iden_uniq_after:
