@@ -1029,6 +1029,31 @@ class DICOMfilter():
                 return False
         self.dicom_table = pd.concat([self.dicom_post, self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]])
 
+        if self.multiple_lat & (self.dicom_table['Lat'].nunique() == 1):
+            self.logger.debug(f'Multiple laterality expected but only one detected, seperating into unknown_a and unknown_b | {self.Session_ID}')
+            n_slices = self.dicom_table['NumSlices'].unique()
+            if len(n_slices) == 2:
+                self.dicom_table.loc[self.dicom_table['NumSlices'] == n_slices[0], 'Lat'] = 'Unknown_A'
+                self.dicom_table.loc[self.dicom_table['NumSlices'] == n_slices[1], 'Lat'] = 'Unknown_B'
+            else:
+                # Check if slice numbers are multiples, if so seperate based on that
+                n_slices_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1, 'NumSlices'].unique()
+                n_slices_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()
+                if len(n_slices_pre) != 2:
+                    self.logger.error(f'Unable to seperate laterality based on slice numbers, expected 2 unique slice counts among pre scans but found {n_slices_pre} | {self.Session_ID}')
+                    self.removed['Laterality_Seperation_Failure'] = self.dicom_table.copy()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+                    return False
+                # Find lowest common slices between pre and post, seperate based on that
+                lowest_slices = [s for s in n_slices_pre if any(p % s == 0 for p in n_slices_post)]
+                if len(lowest_slices) != 2:
+                    self.logger.error(f'Unable to seperate laterality based on slice numbers, expected 2 unique lowest common slice counts between pre and post but found {lowest_slices} | {self.Session_ID}')
+                    self.removed['Laterality_Seperation_Failure'] = self.dicom_table.copy()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+                    return False
+                self.dicom_table.loc[self.dicom_table['NumSlices'] % lowest_slices[0] == 0, 'Lat'] = 'Unknown_A'
+                self.dicom_table.loc[self.dicom_table['NumSlices'] % lowest_slices[1] == 0, 'Lat'] = 'Unknown_B'
+                
         # self.dicom_table = self.dicom_table.loc[(self.dicom_table['Post_scan'] == 1)|(self.dicom_table['Pre_scan'] == 1)]
         laterality = self.dicom_table.loc[self.dicom_table['Pre_scan']  == 1, 'Lat'].unique()
         if len(laterality) > 1:
