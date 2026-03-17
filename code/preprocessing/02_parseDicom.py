@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
     parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv', help='Load table to use for the job')
     parser.add_argument('--filter_only', action='store_true', help='Run only the filtering step without ordering')
-    parser.add_argument('--move', action='store_true', help='Move files to temporary locations')
+    #parser.add_argument('--move', action='store_true', help='Move files to temporary locations')
     return parser.parse_args()
 
 
@@ -56,7 +56,7 @@ PARALLEL = False
 TEST = False
 N_TEST = 25
 N_CPUS = cpu_count() - 1
-MOVE = False
+#MOVE = False
 
 # Initialize logger
 LOGGER = None
@@ -75,7 +75,7 @@ def configure_runtime(parsed_args):
     SAVE_DIR = args.save_dir
     PARALLEL = args.multi is not None
     N_CPUS = args.multi if PARALLEL else cpu_count() - 1
-    MOVE = args.move
+    #MOVE = args.move
     LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
     stop_flag = manager.Event()
 
@@ -581,8 +581,8 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
     #save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
     #exit()
 
-    if MOVE:
-        run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL, P_type='process')
+    LOGGER.debug(f'Creating symlinks to assist with seperating combined post scans. Number of temporary relocations: {len(temporary_relocation)}')
+    run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL, P_type='process')
 
     if not stop_flag.is_set():
         LOGGER.info('redirection complete without stop flag')
