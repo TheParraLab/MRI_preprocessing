@@ -210,7 +210,10 @@ def splitDicom(Data_subset: pd.DataFrame) -> tuple:
     Data_subset = Data_subset.reset_index(drop=True)
     splitter = DICOMsplit(Data_subset, logger=LOGGER)
     if splitter.SCAN:
-        splitter.scan_all()
+        if splitter.scan_complete:
+            splitter.load_scan()
+        else:
+            splitter.scan_all()
         splitter.sort_scans()
         return splitter.dicom_table, splitter.temporary_relocations
     else:
@@ -550,6 +553,10 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         if args.filter_only:
             LOGGER.info('Filter only mode enabled. Exiting after filtering step.')
             return
+        Data_table.loc[Data_table['Pre_scan'].isin([True, 'True', 'true', 1, '1']), 'Pre_scan'] = True
+        Data_table.loc[Data_table['Pre_scan'].isin([False, 'False', 'false', 0, '0']), 'Pre_scan'] = False
+        Data_table.loc[Data_table['Post_scan'].isin([True, 'True', 'true', 1, '1']), 'Post_scan'] = True
+        Data_table.loc[Data_table['Post_scan'].isin([False, 'False', 'false', 0, '0']), 'Post_scan'] = False
 
         # Resplit the filtered data table into subsets based on the unique identifiers
         #Data_subsets = run_function(LOGGER, split_table, Iden_uniq_after, Parallel=PARALLEL, P_type='process')
