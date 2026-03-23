@@ -383,11 +383,13 @@ def relocate(commands: list, relocations: list) -> None:
         return
     destinations = [cmd[1] for cmd in commands]
     destinations = list(set(destinations))
-    for dest in destinations:
-        if not os.path.exists(dest):
-            os.makedirs(dest)
+    # Create only parent directories, not the full path including filename
+    parent_dirs = list(set([os.path.dirname(dest) for dest in destinations]))
+    for dest_dir in parent_dirs:
+        if not os.path.exists(dest_dir):
+            os.makedirs(dest_dir)
         else:
-            LOGGER.warning(f'{dest} already exists')
+            LOGGER.debug(f'{dest_dir} already exists')
     with disk_space_lock:
         try:
             LOGGER.debug(commands[0][1])
@@ -562,46 +564,59 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
         #Data_subsets = run_function(LOGGER, split_table, Iden_uniq_after, Parallel=PARALLEL, P_type='process')
         Data_subsets = [group.copy() for id, group in Data_table.groupby('SessionID') if id in Iden_uniq_after]
 
-        # Seperating scans which contain multiple post images in a single directory
-        results, redirections = run_function(LOGGER, splitDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
-        results = [df for df in results if not df.empty]
-        Data_table = pd.concat(results)
-        Data_table = Data_table.reset_index(drop=True)
-        temporary_relocation = manager.list([item for sublist in redirections for item in sublist])
-        Iden_uniq_after = Data_table['SessionID'].unique()
-        LOGGER.info(f'Updated number of scans after splitting multi-post scans: {len(Data_table)}')
-        LOGGER.info(f'Updated number of unique sessions after splitting multi-post scans: {len(Iden_uniq_after)}')
-        LOGGER.info(f'Number of temporary relocations after splitting multi-post scans: {len(temporary_relocation)}')
-        LOGGER.debug(f'Temporary relocations example [first 3 entries]: {temporary_relocation[0:3]}')
-        # subgrouping temporary_relocation into 100n item chunks for processing
-        temporary_relocation = list(chunk_list(list(temporary_relocation), 100))
+        if not os.path.exists(f'{SAVE_DIR}Data_table_split.csv'):
+            LOGGER.info('No split table found, starting splitting process')
+            # Seperating scans which contain multiple post images in a single directory
+            results, redirections = run_function(LOGGER, splitDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
+            results = [df for df in results if not df.empty]
+            Data_table = pd.concat(results)
+            Data_table = Data_table.reset_index(drop=True)
+            temporary_relocation = manager.list([item for sublist in redirections for item in sublist])
+            Iden_uniq_after = Data_table['SessionID'].unique()
+            LOGGER.info(f'Updated number of scans after splitting multi-post scans: {len(Data_table)}')
+            LOGGER.info(f'Updated number of unique sessions after splitting multi-post scans: {len(Iden_uniq_after)}')
+            LOGGER.info(f'Number of temporary relocations after splitting multi-post scans: {len(temporary_relocation)}')
+            LOGGER.debug(f'Temporary relocations example [first 3 entries]: {temporary_relocation[0:3]}')
+            # subgrouping temporary_relocation into 100n item chunks for processing
+            temporary_relocation = list(chunk_list(list(temporary_relocation), 100))
 
+            with open(f'{SAVE_DIR}temporary_relocation.pkl', 'wb') as f:
+                pickle.dump(list(temporary_relocation), f)
+            print('Temporary relocation list saved to temporary_relocation.pkl')
 
-        Data_table.to_csv(f'{SAVE_DIR}Data_table_split.csv', index=False)
+            Data_table.to_csv(f'{SAVE_DIR}Data_table_split.csv', index=False)
+        else:
+            LOGGER.info('Split table found, loading split data')
+            Data_table = pd.read_csv(f'{SAVE_DIR}Data_table_split.csv', low_memory=False)
+            with open(f'{SAVE_DIR}temporary_relocation.pkl', 'rb') as f:
+                temporary_relocation = pickle.load(f)
+            LOGGER.info(f'Loaded temporary relocation list from temporary_relocation.pkl with {len(temporary_relocation)} items')
+
         Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
         #Data_subsets = run_function(LOGGER, split_table, Data_table['SessionID'].unique(), Parallel=PARALLEL, P_type='process')
 
-        # Order the data based on the criteria defined in DICOMorder and orderDicom
-        results = run_function(LOGGER, orderDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
-        Data_table = pd.concat(results)
-        Data_table = Data_table.reset_index(drop=True)
-        LOGGER.info('')
-        LOGGER.info('Ordering complete')
-        LOGGER.info(f'Final number of unique sessions: {len(Data_table["SessionID"].unique())}')
-        LOGGER.info(f'Final number of scans: {len(Data_table)}')
-        LOGGER.info(f'Saving ordered data to {SAVE_DIR}{out_name}')
-        Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False)
-
+        if not os.path.exists(f'{SAVE_DIR}{out_name}'):
+            LOGGER.info('No ordered table found, starting ordering process')
+            # Order the data based on the criteria defined in DICOMorder and orderDicom
+            results = run_function(LOGGER, orderDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
+            Data_table = pd.concat(results)
+            Data_table = Data_table.reset_index(drop=True)
+            LOGGER.info('')
+            LOGGER.info('Ordering complete')
+            LOGGER.info(f'Final number of unique sessions: {len(Data_table["SessionID"].unique())}')
+            LOGGER.info(f'Final number of scans: {len(Data_table)}')
+            LOGGER.info(f'Saving ordered data to {SAVE_DIR}{out_name}')
+            Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False)
+        else:
+            LOGGER.info('Ordered table found, loading ordered data')
+            Data_table = pd.read_csv(f'{SAVE_DIR}{out_name}', low_memory=False)
     # Saving temporary relocation list to a file for review and running later
-    with open(f'{SAVE_DIR}temporary_relocation.pkl', 'wb') as f:
-        pickle.dump(list(temporary_relocation), f)
-    print('Temporary relocation list saved to temporary_relocation.pkl')
 
     #save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
     #exit()
 
     LOGGER.debug(f'Creating symlinks to assist with seperating combined post scans. Number of temporary relocations: {len(temporary_relocation)}')
-    run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL, P_type='process')
+    run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=False, P_type='process')
 
     if not stop_flag.is_set():
         LOGGER.info('redirection complete without stop flag')
