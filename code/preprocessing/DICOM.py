@@ -95,14 +95,33 @@ class DICOMextract:
     def Modality(self) -> str:
         """Attempts to extract the modality of the scan"""
         try:
-            if self.metadata.RepetitionTime >= 780:
+            # DIAGNOSTIC LOG: Validate RepetitionTime attribute existence and value
+            rep_time_raw = getattr(self.metadata, 'RepetitionTime', None)
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC Modality] RepetitionTime raw value = {rep_time_raw} (type={type(rep_time_raw).__name__}) | File: {getattr(self.metadata, "filepath", "N/A")}')
+            
+            # Handle case where RepetitionTime exists but is a pydicom DataElement (not raw value)
+            if rep_time_raw is not None and not isinstance(rep_time_raw, (int, float)):
+                rep_time = float(rep_time_raw) if rep_time_raw is not None else None
+            else:
+                rep_time = rep_time_raw
+            
+            if rep_time is None:
+                logging.warning(f'[DIAGNOSTIC Modality] RepetitionTime is None, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
+                return self.UNKNOWN
+            
+            if rep_time >= 780:
                 modality = 'T2'
             else:
                 modality = 'T1'
+            
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC Modality] Final modality = {modality} (rep_time={rep_time}) | File: {getattr(self.metadata, "filepath", "N/A")}')
             return modality
         except Exception as e:
             self.log_error('Unable to read RepetitionTime', e)
             return self.UNKNOWN
+
         
     def Acq(self) -> str:
         """Attempts to extract the acquisition time of the scan"""
@@ -201,7 +220,18 @@ class DICOMextract:
         try:
             rcsCoordX1 = self.metadata.ImageOrientationPatient[0]
             directory = os.path.dirname(self.metadata.filepath)
-            files = sorted(glob.glob(directory, '*.dcm'))
+            # DIAGNOSTIC LOG: Validate glob.glob arguments
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC glob] directory={directory}')
+            # FIX: glob.glob takes a single pattern string, not separate directory and extension
+            # Original buggy code: glob.glob(directory, '*.dcm')
+            # Correct usage: glob.glob(os.path.join(directory, '*.dcm'))
+            glob_pattern = os.path.join(directory, '*.dcm')
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC glob] pattern={glob_pattern}')
+            files = sorted(glob.glob(glob_pattern))
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC glob] found {len(files)} files')
             rcsCoordX2 = pyd.dcmread(files[-1], stop_before_pixels=True).ImageOrientationPatient[0]
             if np.mean([rcsCoordX1, rcsCoordX2]) > 0:
                 return 'left'
