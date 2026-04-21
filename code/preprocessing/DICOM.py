@@ -1059,6 +1059,31 @@ class DICOMfilter():
                 return False
         self.dicom_table = pd.concat([self.dicom_post, self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]])
 
+        if self.multiple_lat & (self.dicom_table['Lat'].nunique() == 1):
+            self.logger.debug(f'Multiple laterality expected but only one detected, seperating into unknown_a and unknown_b | {self.Session_ID}')
+            n_slices = self.dicom_table['NumSlices'].unique()
+            if len(n_slices) == 2:
+                self.dicom_table.loc[self.dicom_table['NumSlices'] == n_slices[0], 'Lat'] = 'Unknown_A'
+                self.dicom_table.loc[self.dicom_table['NumSlices'] == n_slices[1], 'Lat'] = 'Unknown_B'
+            else:
+                # Check if slice numbers are multiples, if so seperate based on that
+                n_slices_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1, 'NumSlices'].unique()
+                n_slices_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()
+                if len(n_slices_pre) != 2:
+                    self.logger.error(f'Unable to seperate laterality based on slice numbers, expected 2 unique slice counts among pre scans but found {n_slices_pre} | {self.Session_ID}')
+                    self.removed['Laterality_Seperation_Failure'] = self.dicom_table.copy()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+                    return False
+                # Find lowest common slices between pre and post, seperate based on that
+                lowest_slices = [s for s in n_slices_pre if any(p % s == 0 for p in n_slices_post)]
+                if len(lowest_slices) != 2:
+                    self.logger.error(f'Unable to seperate laterality based on slice numbers, expected 2 unique lowest common slice counts between pre and post but found {lowest_slices} | {self.Session_ID}')
+                    self.removed['Laterality_Seperation_Failure'] = self.dicom_table.copy()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+                    return False
+                self.dicom_table.loc[self.dicom_table['NumSlices'] % lowest_slices[0] == 0, 'Lat'] = 'Unknown_A'
+                self.dicom_table.loc[self.dicom_table['NumSlices'] % lowest_slices[1] == 0, 'Lat'] = 'Unknown_B'
+
         # self.dicom_table = self.dicom_table.loc[(self.dicom_table['Post_scan'] == 1)|(self.dicom_table['Pre_scan'] == 1)]
         laterality = self.dicom_table.loc[self.dicom_table['Pre_scan']  == 1, 'Lat'].unique()
         if len(laterality) > 1:
@@ -1107,6 +1132,7 @@ class DICOMsplit():
         self.scan_path = None
         self.scan_results = None
         self.tmp_save = tmp_save
+        self.scan_complete = False
 
         self.logger = logger or logging.getLogger(__name__)
         if dicom_table.empty:
@@ -1114,22 +1140,30 @@ class DICOMsplit():
         if dicom_table['SessionID'].nunique() != 1:
             raise ValueError('Multiple Session_IDs found in the table')
         self.dicom_table = dicom_table.reset_index(drop=True)
+  
         self.Session_ID = self.dicom_table['SessionID'].unique()[0]
         # Get the common element of all paths
         self.directory = os.path.commonpath(self.dicom_table['PATH'].tolist())
         self.logger.debug(f'Found common path: {self.directory} | [{self.Session_ID}]')
-        # Legacy path-correction removed.
-        # Previously this block attempted to rewrite paths for datasets imported from other systems
-        # (MSKCC_16-328, RIA_19-093, RIA_20-425). Path normalization should be handled upstream
-        # (when constructing the DataFrame) or via a dedicated migration script. If live
-        # corrections are required again, reintroduce a small, well-tested helper here.
 
         # Determine expectations for the scan
-        self.scan_path = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'PATH'].values[0]
+        post_paths = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'PATH']
+        pre_slices = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1, 'NumSlices']
+
+        if post_paths.empty or pre_slices.empty:
+            self.logger.warning(
+                f'Cannot initialize split: missing pre/post rows '
+                f'[post={len(post_paths)}, pre={len(pre_slices)}] | [{self.Session_ID}]'
+            )
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+            self.SCAN = False
+            return
+
+        self.scan_path = post_paths.values[0]
         # Remove file from path to get directory
         self.scan_path = os.path.dirname(self.scan_path)
 
-        self.pre_slices = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1, 'NumSlices'].unique()[0]
+        self.pre_slices = pre_slices.unique()[0]
 
         # Determine if scanning is required
         if all(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'] == self.pre_slices):
@@ -1137,6 +1171,9 @@ class DICOMsplit():
             self.SCAN = False
         elif (len(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()) == 1) and(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()[0] % self.pre_slices == 0):
             self.logger.debug(f'Post scans have different number of slices, scanning required | [{self.Session_ID}]')
+            if os.path.exists(f'{self.tmp_save}/directory_scan/{self.Session_ID}.csv'):
+                self.logger.debug(f'Existing scan results found for session, loading from csv | [{self.Session_ID}]')
+                self.scan_complete = True
             self.SCAN = True
             self.logger.debug(f'Set scan path to: {self.scan_path} | [{self.Session_ID}]')
             self.num_post_scans = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].values[0] // self.pre_slices
@@ -1144,6 +1181,9 @@ class DICOMsplit():
             self.logger.warning(f'Unable to make sense of pre and post scans, removing session, further logic required | [{self.Session_ID}]')
             self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             self.SCAN = False
+
+    def load_scan(self):
+        self.scan_results = pd.read_csv(f'{self.tmp_save}/directory_scan/{self.Session_ID}.csv', low_memory=False)
 
     def scan_all(self):
         """Scans all files in the directory"""
@@ -1176,6 +1216,7 @@ class DICOMsplit():
             del extractor
         self.scan_results = pd.DataFrame(info)
         self.logger.debug(f'Found {len(self.scan_results)} DICOM files in the directory | [{self.Session_ID}]')
+        self.scan_complete = True
         if self.scan_results is None or self.scan_results.empty:
             self.logger.warning(f'Error scanning {self.scan_path} | [{self.Session_ID}]')
             return 
