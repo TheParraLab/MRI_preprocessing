@@ -9,7 +9,7 @@ This directory contains the Docker image and compose files for the MRI preproces
   - dcm2niix for DICOM-to-NIfTI conversion
   - niftyreg for image registration
 - `docker-compose.yml` — Linux compose file (uses `${NIFTI_DIRECTORY_PATH}` env var)
-- `docker-compose-wsl.yml` — WSL compose file (uses `/data` for raw data mount)
+- `docker-compose-wsl.yml` — WSL compose file
 - `startup.sh` — Container entrypoint (runs `tail` to keep container alive; preprocessing is done via `docker exec`)
 - `README.md` — This file
 
@@ -67,5 +67,5 @@ bash /FL_system/code/preprocessing/00_preprocess.sh
 | Variable | Purpose | Default |
 |---|---|---|
 | `PROJECT_DIRECTORY_PATH` | Path to the project root on the host (mounted as `/FL_system`) | Required |
-| `DATA_DIRECTORY_PATH` | Path to raw DICOM data on the host (mounted as `/FL_system/data/raw` or `/data`) | Required |
+| `DATA_DIRECTORY_PATH` | Path to raw DICOM data on the host (mounted as `/FL_system/data/raw`) | Required |
 | `NIFTI_DIRECTORY_PATH` | Path to NIfTI output on the host (mounted as `/FL_system/data/nifti`) | Only in `docker-compose.yml` |
