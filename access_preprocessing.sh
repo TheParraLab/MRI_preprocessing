@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "MRI Preprocessing - Direct CLI Access"
-echo "====================================="
+echo "======================================"
 echo ""
 echo "This script provides direct access to the preprocessing container"
 echo "without starting the webserver component."
@@ -11,7 +11,6 @@ echo ""
 if ! docker ps --format "table {{.Names}}" | grep -q "^control$"; then
     echo "Error: The control container is not running."
     echo "Please start the system first with: bash start_control.sh"
-    echo "And choose 'n' when asked about the webserver component."
     exit 1
 fi
 

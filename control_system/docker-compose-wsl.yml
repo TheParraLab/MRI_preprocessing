@@ -4,19 +4,15 @@ services:
     build:
       context: .
       dockerfile: dockerfile
+    runtime: nvidia
     volumes:
-      # - /var/run/docker.sock:/var/run/docker.sock
       - ${PROJECT_DIRECTORY_PATH}:/FL_system
-      - ${DATA_DIRECTORY_PATH}:/data
-      - ../app:/app
-    ports:
-      - "5000:5000"
+      - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
     environment:
-      - DATA_DIRECTORY_PATH
       - PROJECT_DIRECTORY_PATH
+      - DATA_DIRECTORY_PATH
       - NVIDIA_VISIBLE_DEVICES=all
-      - FLASK_ENV=development
-      - FLASK_RUN_HOST=0.0.0.0
+    restart: unless-stopped
     deploy:
       resources:
         reservations:

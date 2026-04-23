@@ -1,28 +1,22 @@
-# Use an official Python runtime as a parent image
+# MRI preprocessing container image
+# Usage:
+#   docker build -t mri_preprocessing -f control_system/dockerfile control_system/
+#   docker run --gpus all -e PROJECT_DIRECTORY_PATH=/path/to/project -e DATA_DIRECTORY_PATH=/path/to/raw \
+#     -it -v ${PROJECT_DIRECTORY_PATH}:/FL_system -v ${DATA_DIRECTORY_PATH}:/FL_system/data/raw \
+#     mri_preprocessing bash
+
 FROM nvidia/cuda:12.2.2-base-ubuntu22.04
 
-# Install Python and pip
 RUN apt-get update && \
-    apt-get install -y python3-pip python3-dev gettext && \
-    # Check if /usr/bin/python is already a symlink or doesn't exist
+    apt-get install -y python3-pip python3-dev && \
     if [ ! -L /usr/bin/python ] && [ ! -e /usr/bin/python ]; then \
         ln -s /usr/bin/python3 /usr/bin/python; \
     fi && \
-    # No need to create a symlink for pip as pip3 is already installed
     python3 -m pip install --upgrade pip
 
-RUN apt-get update && \
-    apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release && \
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
-    apt-get update && \
-    apt-get install -y docker-ce-cli
-
-# Installing dcm2niix
 RUN apt-get update && apt-get install -y dcm2niix
 
-# Installing niftyreg
-RUN apt-get install -y git cmake g++ && \
+RUN apt-get update && apt-get install -y git cmake g++ && \
     git clone https://github.com/KCL-BMEIS/niftyreg.git niftyreg-git && \
     mkdir niftyreg-git/build && \
     cd niftyreg-git/build && \
@@ -30,21 +24,11 @@ RUN apt-get install -y git cmake g++ && \
     make && \
     make install
 
-WORKDIR /app
-#COPY ../app /app
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir flask flask_socketio pydicom numpy pandas nibabel scipy hdf5storage yappi
+# niftyreg builds take ~10 minutes; cache the layer so CI doesn't rebuild every time
 
-# Make port 5000 available to the world outside this container
-EXPOSE 5000
+WORKDIR /FL_system/code/preprocessing
 
-# Define environment variable
-ENV FLASK_APP=app.py
-ENV FLASK_ENG=development
+RUN pip install --no-cache-dir pydicom numpy pandas nibabel scipy yappi
 
-# Create a startup script to conditionally run the webserver
-COPY startup.sh /startup.sh
-RUN chmod +x /startup.sh
-
-# Run startup script when the container launches
-CMD ["/startup.sh"]
+# The container stays running and is accessed via `docker exec -it control bash`
+CMD ["tail", "-f", "/dev/null"]

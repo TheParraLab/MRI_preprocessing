@@ -2,28 +2,21 @@ services:
   control:
     container_name: control
     build:
-      # Build using the Dockerfile in the same directory
       context: .
       dockerfile: dockerfile
-    runtime: nvidia # Allow the container to utilize the host's GPU
+    runtime: nvidia
     volumes:
-      # Mounts the host's Docker socket to the container
-      # This allows the container to manage other containers
-      # - /var/run/docker.sock:/var/run/docker.sock
-      ######################################################
       - ${PROJECT_DIRECTORY_PATH}:/FL_system
-      #- ${PROJECT_DIRECTORY_PATH}/data:/data
       - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
-      - /media/nicholas/Data/MSK/nifti:/FL_system/data/nifti
-      - ./app:/app
-    ports:
-      - "5000:5000"
+      - ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti
     environment:
-      # Passes environment variables to the container
-      # These environmental variables are set in the start_control.sh file
-      - DATA_DIRECTORY_PATH
       - PROJECT_DIRECTORY_PATH
-      ######################################################
+      - DATA_DIRECTORY_PATH
+      - NIFTI_DIRECTORY_PATH
       - NVIDIA_VISIBLE_DEVICES=all
-      - FLASK_ENV=development
-      - FLASK_RUN_HOST=0.0.0.0
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

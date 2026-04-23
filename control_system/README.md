@@ -1,53 +1,71 @@
-# Control System
-This directory is the control system for the Federated Learning (FL) environment.  The control system is responsible for managing the FL training process.  It will start the server and client containers, and monitor the training process.  The app directory contains the web-app for the control system.
+# MRI Preprocessing Container
 
-## Table of Contents
-- [Control System](#control-system)
-  - [Table of Contents](#table-of-contents)
-  - [Directory Structure](#directory-structure)
+This directory contains the Docker image and compose files for the MRI preprocessing pipeline.
 
 ## Directory Structure
-    ├── README.md                       <- The top-level README for developers using this project.
-    ├── dockerfile                      <- Dockerfile for building the control system container
-    ├── docker-compose.yml          <- Docker-compose file for building the control system container
-    └── app                             <- Directory for the control system web-app
-        ├──app.py                       <- Main application file
-        ├──templates                    <- Directory for html templates
-        │  ├──index.html                <- Main page template
-        │  └──client.html               <- Client page template
-        └──static                       <- Directory for static files
-            ├──style.css                <- CSS file for styling the web-app
-            ├──script.js                <- JavaScript file for scripting
-            ├──containers.js            <- JavaScript file for tab management
-            └──*.png                    <- Image files for the web-app
 
-## Setup Instructions
-The control system is intended to be started via the start_control.sh script.  This script will build the control system container and start the container.  The control system will be accessible via a web browser at http://localhost:5000. 
+- `dockerfile` — Builds the preprocessing container image with:
+  - Python 3 + pydicom / numpy / pandas / nibabel / scipy / yappi
+  - dcm2niix for DICOM-to-NIfTI conversion
+  - niftyreg for image registration
+- `docker-compose.yml` — Linux compose file (uses `${NIFTI_DIRECTORY_PATH}` env var)
+- `docker-compose-wsl.yml` — WSL compose file (uses `/data` for raw data mount)
+- `startup.sh` — Container entrypoint (runs `tail` to keep container alive; preprocessing is done via `docker exec`)
+- `README.md` — This file
+
+## Usage
+
+### Build the image
 
 ```bash
-../start_control.sh
+cd control_system
+docker build -t mri_preprocessing .
 ```
-During initialization, the control system will ask for the raw data directory.  This directory will be mounted as a volume into the control container.  The raw data directory should contain the raw data files for the FL training process.  The control system will use this data to create the training data for the client nodes.
 
-## Files
-### App.py
-The control system will run the app.py file on startup.  This app defines the routes for the webpage, while also providing set actions for webpage interactions with the host system.  All actions are predefined in this file, and are triggered by webpage interactions.  There are three main functions provided from the webpage:
-- Start Server: This function will start the containers for the server-side.  This includes the SuperLink and SuperExec containers
-- Start Client: This function will start the containers for the client-side.  This includes the SuperNode and ClientApp containers
-- Preprocess Data: This function will parse the provided raw data directory, and create the required input data for the model at each client. None of this data is transmitted over the internet.
+### Run via docker-compose
 
-### Index.html
-The index.html file is the main page for the control system.  This file outlines the overall structure of the webpage, and provides an area for containers to be loaded into the webpage. By default, the index.html file will load the client.html file into the container section. Tabs on the header of the webpage will allow the user to switch between the client and server pages.  The server page is currently locked behing a password, and is not accessible to general clients.
+#### Linux
 
-### Client.html
-The client.html file contains the necessary containers for clients interacting with the system.  It provides access to request data preprocessing, as well as start the client containers.  The client.html file is the default page loaded into the control system. The terminal on this page will display the output from the client containers. This page will also display the current status of the system, including: GPU status, data preprocessing status, and client container status.
+```bash
+export PROJECT_DIRECTORY_PATH=/path/to/project
+export DATA_DIRECTORY_PATH=/path/to/raw/data
+export NIFTI_DIRECTORY_PATH=/path/to/nifti/output
 
-### Script.js
-The script.js file contains the necessary JavaScript for the webpage.  This file will handle all webpage interactions, and will trigger the appropriate actions in the app.py file.  This file will also handle the loading of the client and server pages into the webpage.
+docker compose up --build
+```
 
-### Style.css
-The style.css file contains the necessary CSS for the webpage.  This file will handle all styling for the webpage, and will provide a consistent look and feel for the webpage.
+#### WSL
 
-## Dependencies
-All dependencies for this system are installed in the provided docker container, and it is recommended to run the control system in the provided container.
+```bash
+export PROJECT_DIRECTORY_PATH=/path/to/project
+export DATA_DIRECTORY_PATH=/path/to/raw/data
 
+docker compose -f docker-compose-wsl.yml up --build
+```
+
+### Access the container
+
+```bash
+docker exec -it control bash
+cd /FL_system/code/preprocessing/
+```
+
+### Run preprocessing
+
+```bash
+python 01_scanDicom.py --scan_dir /FL_system/data/raw --save_dir /FL_system/data
+```
+
+Or run the full pipeline:
+
+```bash
+bash /FL_system/code/preprocessing/00_preprocess.sh
+```
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `PROJECT_DIRECTORY_PATH` | Path to the project root on the host (mounted as `/FL_system`) | Required |
+| `DATA_DIRECTORY_PATH` | Path to raw DICOM data on the host (mounted as `/FL_system/data/raw` or `/data`) | Required |
+| `NIFTI_DIRECTORY_PATH` | Path to NIfTI output on the host (mounted as `/FL_system/data/nifti`) | Only in `docker-compose.yml` |
