@@ -24,10 +24,9 @@ from collections import defaultdict
 from toolbox import get_logger, run_function
 from DICOM import DICOMfilter, DICOMorder, DICOMsplit
 
-# Global variables for progress bar
+# Global variables
 Progress = None
 manager = Manager()
-disk_space_lock = Lock()
 
 def parse_args():
     """
@@ -60,7 +59,6 @@ N_CPUS = cpu_count() - 1
 
 # Initialize logger
 LOGGER = None
-DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
 stop_flag = None
 
 def configure_runtime(parsed_args):
@@ -111,22 +109,6 @@ if PROFILE:
 ## Parallelization and Progress functions
 #########################################
 # Wrapper for progress updates
-def check_disk_space(directory: str) -> bool:
-    """
-    Check if there is enough disk space available.
-
-    Args:
-        directory (str): The directory path to check for available space.
-
-    Returns:
-        bool: True if available space exceeds the threshold, False otherwise.
-    """
-    statvfs = os.statvfs(directory)
-    available_space = statvfs.f_frsize * statvfs.f_bavail
-    if available_space < DISK_SPACE_THRESHOLD*2:
-        LOGGER.debug(f'Available space: {available_space}')
-    return available_space > DISK_SPACE_THRESHOLD
-
 def save_progress(data: list, filename: str) -> None:
     """
     Save the current relocation progress to a file.
@@ -365,15 +347,11 @@ def init_data(load_table: str='', target: str=None) -> None:
 
 def relocate(commands: list, relocations: list) -> None:
     """
-    Relocate files to new paths based on provided commands.
+    Create symbolic links to raw DICOM files.
 
     Args:
         commands (list): List of [source, destination] pairs.
         relocations (list): Global list of pending relocations, synchronized across processes.
-
-    TODO: Thread-safety check: `shutil.copy` may hit race conditions if multiple processes
-          attempt to create or interact with the exact same parent directories simultaneously
-          despite `os.makedirs`. Consider robust directory locking or centralized moving.
     """
     LOGGER.debug(f'Relocate called with {len(commands)} commands')
     LOGGER.debug(f'Current relocations: {len(relocations)}')
@@ -386,32 +364,16 @@ def relocate(commands: list, relocations: list) -> None:
     # Create only parent directories, not the full path including filename
     parent_dirs = list(set([os.path.dirname(dest) for dest in destinations]))
     for dest_dir in parent_dirs:
-        if not os.path.exists(dest_dir):
-            os.makedirs(dest_dir)
-        else:
-            LOGGER.debug(f'{dest_dir} already exists')
-    with disk_space_lock:
-        try:
-            LOGGER.debug(commands[0][1])
-            LOGGER.debug('/'.join(commands[0][1].split('/')[0:-2]))
-        except:
-            LOGGER.warning(commands)
-        if not check_disk_space('/'.join(commands[0][1].split('/')[0:-2])):
-            if not stop_flag.is_set():
-                LOGGER.warning('Disk space is running low.  Pausing...')
-                stop_flag.set()
-                LOGGER.warning('Stop flag set')
-            return
+        os.makedirs(dest_dir, exist_ok=True)
+    for command in commands:
+        LOGGER.debug(f'Linking {command[0]} to {command[1]}')
+        src_path = os.path.abspath(command[0])
+        dest_path = command[1]
+        if os.path.exists(dest_path) or os.path.islink(dest_path):
+            os.remove(dest_path)
+        os.symlink(src_path, dest_path)
     try:
-        for command in commands:
-            LOGGER.debug(f'Linking {command[0]} to {command[1]}')
-            src_path = os.path.abspath(command[0])
-            dest_path = command[1]
-            if os.path.exists(dest_path) or os.path.islink(dest_path):
-                os.remove(dest_path)
-            os.symlink(src_path, dest_path)
-        with disk_space_lock:
-            relocations.remove(commands)
+        relocations.remove(commands)
     except Exception as e:
         LOGGER.error(f'Error in relocating files: {e}', exc_info=True)
 
@@ -571,26 +533,19 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
             results = [df for df in results if not df.empty]
             Data_table = pd.concat(results)
             Data_table = Data_table.reset_index(drop=True)
-            temporary_relocation = manager.list([item for sublist in redirections for item in sublist])
+            temporary_relocation = list(redirections)
             Iden_uniq_after = Data_table['SessionID'].unique()
             LOGGER.info(f'Updated number of scans after splitting multi-post scans: {len(Data_table)}')
             LOGGER.info(f'Updated number of unique sessions after splitting multi-post scans: {len(Iden_uniq_after)}')
             LOGGER.info(f'Number of temporary relocations after splitting multi-post scans: {len(temporary_relocation)}')
             LOGGER.debug(f'Temporary relocations example [first 3 entries]: {temporary_relocation[0:3]}')
-            # subgrouping temporary_relocation into 100n item chunks for processing
-            temporary_relocation = list(chunk_list(list(temporary_relocation), 100))
-
-            with open(f'{SAVE_DIR}temporary_relocation.pkl', 'wb') as f:
-                pickle.dump(list(temporary_relocation), f)
-            print('Temporary relocation list saved to temporary_relocation.pkl')
 
             Data_table.to_csv(f'{SAVE_DIR}Data_table_split.csv', index=False)
         else:
             LOGGER.info('Split table found, loading split data')
             Data_table = pd.read_csv(f'{SAVE_DIR}Data_table_split.csv', low_memory=False)
-            with open(f'{SAVE_DIR}temporary_relocation.pkl', 'rb') as f:
-                temporary_relocation = pickle.load(f)
-            LOGGER.info(f'Loaded temporary relocation list from temporary_relocation.pkl with {len(temporary_relocation)} items')
+            temporary_relocation = []
+            LOGGER.info('Temporary relocation list is empty (symlinks will be created on the fly)')
 
         Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
         #Data_subsets = run_function(LOGGER, split_table, Data_table['SessionID'].unique(), Parallel=PARALLEL, P_type='process')
@@ -618,17 +573,10 @@ def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=N
     LOGGER.debug(f'Creating symlinks to assist with seperating combined post scans. Number of temporary relocations: {len(temporary_relocation)}')
     run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=False, P_type='process')
 
-    if not stop_flag.is_set():
-        LOGGER.info('redirection complete without stop flag')
-        LOGGER.info('Removing progress file')
-        if os.path.exists('parseDicom_progress.pkl'):
-            os.remove('parseDicom_progress.pkl')
-    else:
-        LOGGER.info('Nifti conversion complete with stop flag')
-        if os.path.exists('parseDicom_progress.pkl'):
-            os.remove('parseDicom_progress.pkl')
-        save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
-        LOGGER.info('checkpoint file saved')
+    LOGGER.info('redirection complete')
+    LOGGER.info('Removing progress file')
+    if os.path.exists('parseDicom_progress.pkl'):
+        os.remove('parseDicom_progress.pkl')
 
 if __name__ == '__main__':
     configure_runtime(parse_args())
