@@ -1,6 +1,6 @@
 """
 DICOM Scanning and Extraction Script
-====================================
+===================================
 
 This script scans a directory for DICOM files, extracts metadata from their headers,
 and saves the information to a CSV file. It supports parallel processing,
@@ -53,7 +53,6 @@ import pandas as pd
 
 # Function imports
 from multiprocessing import cpu_count, Event
-import threading
 # Custom imports
 from toolbox import get_logger, run_function
 from DICOM import DICOMextract
@@ -80,7 +79,6 @@ SCAN_DIR = args.scan_dir
 TEST = args.test is not None # If True, the script will run in test mode
 N_TEST = args.test if TEST else 100 # Number of dicom directories to scan if TEST is True
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
-N_CPUS = args.multi if PARALLEL else cpu_count()-1 # Number of cpus to use if PARALLEL is True
 PROFILE = args.profile # If True, the script will run with the profiler enabled
 SAMPLE_PCT = args.sample_pct
 SAMPLE_SEED = args.sample_seed
@@ -255,9 +253,6 @@ def _dir_contains_mr(item: tuple) -> Optional[str]:
     return None
 
 
-# ...existing code...
-
-
 #############################
 ## Main functions
 #############################
@@ -338,26 +333,22 @@ def find_all_dicom_dirs(directory: str, N_test: Optional[int] = None) -> List[st
     Returns:
         List[str]: A list of directory paths containing valid MRI DICOM files.
     """
-    dir_items = []
     dicom_dirs = []
     N_found = 0
     for root, _, files in os.walk(directory, followlinks=False):
-        # Check if any file in the current directory ends with '.dcm'
         has_mri = False
-        for file in files:
-            if file.endswith('.dcm'):
-                file_path = os.path.join(root, file)
-                try:
-                    # Read only the header (stop_before_pixels=True) for performance
-                    dcm = pyd.dcmread(file_path, stop_before_pixels=True, force=True)
-                    if hasattr(dcm, 'Modality') and dcm.Modality == 'MR':
-                        has_mri = True
-                        break
-                except Exception:
-                    LOGGER.debug(f'Skipping non-MRI file: {file_path}')
-                    continue
-            else:
-                LOGGER.debug(f'Skipping non-DICOM file: {os.path.join(root, file)}')
+        candidates = [fn for fn in files if fn.lower().endswith('.dcm')]
+        for fn in candidates:
+            file_path = os.path.join(root, fn)
+            if not _has_dcm_magic(file_path):
+                continue
+            try:
+                dcm = pyd.dcmread(file_path, stop_before_pixels=True, force=False)
+                if hasattr(dcm, 'Modality') and dcm.Modality == 'MR':
+                    has_mri = True
+                    break
+            except Exception:
+                continue
             
         if has_mri: 
             dicom_dirs.append(root)
@@ -422,32 +413,57 @@ def findDicom(directory: str) -> List[str]:
 
         found_series = {}
 
-        # Try sampled candidates first
-        for fname in sample_list:
+        # Pre-filter: split candidates by magic bytes for fast rejection
+        likely = [fn for fn in sample_list if _has_dcm_magic(os.path.join(root, fn))]
+        fallback_cands = [fn for fn in sample_list if fn not in likely]
+
+        # Try likely candidates first
+        for fname in likely:
             path = os.path.join(root, fname)
             try:
-                data = pyd.dcmread(path, stop_before_pixels=True, force=True)
-            except Exception as e:
-                LOGGER.debug(f'Skipping unreadable/non-DICOM file: {path} | {e}')
+                data = pyd.dcmread(path, stop_before_pixels=True, force=False)
+            except Exception:
                 continue
             series = getattr(data, 'SeriesNumber', None)
             if series is not None and series not in found_series:
                 found_series[series] = path
 
-        # If sampling was used and results are ambiguous (none or multiple series), fall back to full scan
-        # This ensures we don't miss series just because we sampled the wrong files.
-        if fallback_allowed and (len(found_series) == 0 or len(found_series) > 1):
-            LOGGER.debug(f'Ambiguous sampling in {root} (found series={list(found_series.keys())}), falling back to full scan')
-            full_found = {}
-            for fname in dcm_candidates:
+        # If no series found among likely files, try fallback candidates
+        if not found_series and fallback_cands:
+            for fname in fallback_cands:
                 path = os.path.join(root, fname)
                 try:
-                    data = pyd.dcmread(path, stop_before_pixels=True, force=True)
+                    data = pyd.dcmread(path, stop_before_pixels=True, force=False)
+                except Exception:
+                    continue
+                series = getattr(data, 'SeriesNumber', None)
+                if series is not None and series not in found_series:
+                    found_series[series] = path
+
+        # If sampling was used and results are incomplete, fall back to full scan
+        if fallback_allowed and len(found_series) == 0:
+            full_found = {}
+            full_likely = [fn for fn in dcm_candidates if _has_dcm_magic(os.path.join(root, fn))]
+            full_fallback = [fn for fn in dcm_candidates if fn not in full_likely]
+            for fname in full_likely:
+                path = os.path.join(root, fname)
+                try:
+                    data = pyd.dcmread(path, stop_before_pixels=True, force=False)
                 except Exception:
                     continue
                 series = getattr(data, 'SeriesNumber', None)
                 if series is not None and series not in full_found:
                     full_found[series] = path
+            if not full_found:
+                for fname in full_fallback:
+                    path = os.path.join(root, fname)
+                    try:
+                        data = pyd.dcmread(path, stop_before_pixels=True, force=False)
+                    except Exception:
+                        continue
+                    series = getattr(data, 'SeriesNumber', None)
+                    if series is not None and series not in full_found:
+                        full_found[series] = path
             found_series = full_found
 
         # Record the first file for each detected series
