@@ -14,8 +14,8 @@ import subprocess
 import threading
 
 from toolbox import ProgressBar, get_logger, run_function
-#BASE_PATH = '/FL_system'
-BASE_PATH = '/home/nleotta000/Projects/'
+BASE_PATH = '/FL_system'
+#BASE_PATH = '/home/nleotta000/Projects/'
 # Global variables for progress bar and lock
 Progress = None
 manager = Manager()
@@ -191,8 +191,8 @@ if __name__ == '__main__':
         if TEST:
             Dirs = Dirs[:N_TEST]
         LOGGER.info(f'Processing {len(Dirs)} directories')
-        #run_with_progress(align, Dirs, Parallel=PARALLAL)
-        run_function(align, Dirs, Parallel=PARALLAL, P_type = 'Process')
+        run_with_progress(align, Dirs, Parallel=PARALLAL)
+        #run_function(align, Dirs, Parallel=PARALLAL, P_type = 'Process')
     else:
         # if running on an HPC
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
