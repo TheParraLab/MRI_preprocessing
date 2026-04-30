@@ -66,10 +66,11 @@ parser.add_argument('-p', '--profile', action='store_true', help='Run with profi
 parser.add_argument('--save_dir', nargs='?', default='/FL_system/data/', type=str, help='Location to save the constructed Data_table.csv (default: /FL_system/data/)')
 parser.add_argument('--scan_dir', nargs='?', default='/FL_system/data/raw/', type=str, help='Location to recursively scan for dicom files (default: /FL_system/data/raw/)')
 parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt (for HPC array jobs)')
-parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file (for HPC array jobs)')
+parser.add_argument('--dir_list', type=str, default='dirs_to_process.pkl', help='Path to the directory list file (for HPC array jobs)')
 parser.add_argument('--sample-pct', type=float, default=0.0, help='Percent of .dcm files to sample per directory (0 = full scan)')
 parser.add_argument('--sample-seed', type=int, default=None, help='Optional random seed for sampling reproducibility')
 parser.add_argument('--checkpoint-dir', type=str, default=None, help='Directory to store checkpoint files (default: <SAVE_DIR>/checkpoints/)')
+parser.add_argument('--profile-dir', type=str, default=None, help='Directory to store profiling output (default: <SAVE_DIR>/)')
 parser.add_argument('--resume', action='store_true', help='Resume from available checkpoints if present')
 args = parser.parse_args()
 
@@ -87,6 +88,7 @@ if SAMPLE_SEED is not None:
 
 # Checkpointing settings
 CHECKPOINT_DIR = args.checkpoint_dir
+PROFILE_DIR = args.profile_dir
 RESUME = args.resume
 
 # Profiler imports
@@ -119,6 +121,26 @@ def _ensure_checkpoint_dir() -> str:
         # If we can't create the checkpoint dir, fallback to SAVE_DIR
         CHECKPOINT_DIR = SAVE_DIR
     return CHECKPOINT_DIR
+
+def _ensure_profile_dir() -> str:
+    """
+    Ensure the profile directory exists.
+
+    This function checks if the global PROFILE_DIR is set. If not, it defaults to
+    SAVE_DIR. It then attempts to create the directory. If creation fails, it
+    falls back to the current working directory.
+
+    Returns:
+        str: The path to the profile directory.
+    """
+    global PROFILE_DIR
+    if PROFILE_DIR is None:
+        PROFILE_DIR = os.path.join(SAVE_DIR, 'profiles/')
+    try:
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+    except Exception:
+        PROFILE_DIR = os.getcwd()
+    return PROFILE_DIR
 
 def save_checkpoint(name: str, obj: Any) -> None:
     """
@@ -157,7 +179,7 @@ def load_checkpoint(name: str) -> Optional[Any]:
         Optional[Any]: The loaded object if the checkpoint file exists and can be read,
                        otherwise None.
     """
-    d = CHECKPOINT_DIR or os.path.join(SAVE_DIR, 'checkpoints/')
+    d = _ensure_checkpoint_dir()
     path = os.path.join(d, f'{name}.pkl')
     if not os.path.exists(path):
         return None
@@ -606,15 +628,6 @@ if __name__ == '__main__':
         yappi.start()
         LOGGER.info('Starting main function')
 
-    # Create the save directory when necessary
-    if not os.path.exists(SAVE_DIR):
-        # Use try-except to handle directory creation, in case parallel processes try to create the same directory
-        try:
-            os.makedirs(SAVE_DIR)
-            LOGGER.info(f'Created directory {SAVE_DIR}')
-        except Exception as e:
-            LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
-    
     # Check if running in single directory mode (HPC array job)
     if args.dir_idx is None:
         # Normal execution
@@ -675,7 +688,7 @@ if __name__ == '__main__':
     if PROFILE:
         LOGGER.info('Main function completed')
         yappi.stop()
-        profile_output_path = 'step01_profile.yappi'
+        profile_output_path = os.path.join(_ensure_profile_dir(), 'step01_profile.yappi')
         LOGGER.info(f'Writing profile results to {profile_output_path}')
         yappi.get_func_stats().save(profile_output_path, type='pstat')
         LOGGER.info(f'Profile results saved to {profile_output_path}')
