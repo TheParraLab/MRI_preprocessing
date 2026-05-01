@@ -17,10 +17,10 @@ RUN apt-get update && \
 RUN apt-get update && apt-get install -y dcm2niix
 
 RUN apt-get update && apt-get install -y git cmake g++ && \
-    git clone https://github.com/KCL-BMEIS/niftyreg.git niftyreg-git && \
+    git clone --branch v2.0.0 https://github.com/KCL-BMEIS/niftyreg.git niftyreg-git && \
     mkdir niftyreg-git/build && \
     cd niftyreg-git/build && \
-    cmake .. && \
+    cmake .. -DBUILD_CUDA=ON && \
     make && \
     make install
 
