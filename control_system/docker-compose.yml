@@ -8,7 +8,7 @@ services:
     volumes:
       - ${PROJECT_DIRECTORY_PATH}:/FL_system
       - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
-      - ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti
+      #- ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti
     environment:
       - PROJECT_DIRECTORY_PATH
       - DATA_DIRECTORY_PATH
