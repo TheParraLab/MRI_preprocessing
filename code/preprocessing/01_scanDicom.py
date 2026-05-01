@@ -43,7 +43,6 @@ import argparse
 import subprocess
 import pickle
 import random
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 # Third-party imports
@@ -51,7 +50,7 @@ import pydicom as pyd
 import pandas as pd
 
 # Function imports
-from multiprocessing import cpu_count, Event
+from multiprocessing import cpu_count
 # Custom imports
 from toolbox import get_logger, run_function
 from DICOM import DICOMextract
@@ -93,8 +92,6 @@ RESUME = args.resume
 # Profiler imports
 if PROFILE:
     import yappi
-    import pstats
-    import io
 
 # Generate logger
 # Note: get_logger might attempt to create directories. Ensure SAVE_DIR is writable or mocked in tests.
@@ -126,8 +123,8 @@ def _ensure_profile_dir() -> str:
     Ensure the profile directory exists.
 
     This function checks if the global PROFILE_DIR is set. If not, it defaults to
-    SAVE_DIR. It then attempts to create the directory. If creation fails, it
-    falls back to the current working directory.
+    os.path.join(SAVE_DIR, 'profiles/'). It then attempts to create the directory.
+    If creation fails, it falls back to the current working directory.
 
     Returns:
         str: The path to the profile directory.
@@ -212,67 +209,6 @@ def _has_dcm_magic(path: str) -> bool:
             return f.read(4) == b'DICM'
     except Exception:
         return False
-
-def _dir_contains_mr(item: tuple) -> Optional[str]:
-    """
-    Check if a directory contains at least one MR DICOM file.
-
-    Args:
-        item (tuple): A tuple containing (dirpath, filenames_list).
-
-    Returns:
-        Optional[str]: The dirpath if an MR DICOM is found, else None.
-
-    TODO: Consider performance impact of iterating through potentially large numbers
-          of non-DICOM or non-MR files. Implementing a fast-fail threshold or
-          sampling limit may speed up scanning across massive directories.
-    """
-    dirpath, filenames = item
-    # cooperative cancellation: if another worker already found enough dirs
-    # Filter candidate names with .dcm extension first
-    candidates = [fn for fn in filenames if fn.lower().endswith('.dcm')]
-    if not candidates:
-        return None
-
-    # Optional deterministic sampling hook if desired:
-    # rng = random.Random(SAMPLE_SEED) if SAMPLE_SEED is not None else random
-    # if SAMPLE_PCT and SAMPLE_PCT > 0:
-    #     k = max(1, int(len(candidates) * (SAMPLE_PCT / 100.0)))
-    #     if k < len(candidates):
-    #         candidates = rng.sample(candidates, k)
-
-    # First pass: check magic bytes to avoid pydicom overhead
-    likely = []
-    fallback = []
-    for fn in candidates:
-        p = os.path.join(dirpath, fn)
-        if _has_dcm_magic(p):
-            likely.append(p)
-        else:
-            fallback.append(p)
-
-    # Check likely files with pydicom until we find MR
-    for p in likely:
-        try:
-            dcm = pyd.dcmread(p, stop_before_pixels=True, force=False)
-            if getattr(dcm, 'Modality', None) == 'MR':
-                # If shared counter provided, increment and set stop flag when threshold reached
-                    return dirpath
-        except Exception:
-            # ignore and continue
-            continue
-
-    # Fallback: some valid files may not have the DICM magic; check fallback list
-    for p in fallback:
-        try:
-            dcm = pyd.dcmread(p, stop_before_pixels=True, force=False)
-            if getattr(dcm, 'Modality', None) == 'MR':
-                return dirpath
-        except Exception:
-            continue
-
-    return None
-
 
 #############################
 ## Main functions
@@ -509,10 +445,6 @@ def main(out_name: str = 'Data_table.csv', SAVE_DIR: str = '', SCAN_DIR: str = '
     4. Extracts DICOM header information in parallel.
     5. Saves the extracted metadata to a CSV file.
 
-    TODO: Data table aggregation performance: using `pd.concat` repeatedly in a loop
-          (as seen in the HPC compilation section) is inefficient and can cause high
-          memory overhead. Instead, compile a list of DataFrames and use a single `pd.concat`.
-
     Args:
         out_name (str): Name of the output CSV file (default: 'Data_table.csv').
         SAVE_DIR (str): Directory where the output file and checkpoints will be saved.
@@ -687,4 +619,3 @@ if __name__ == '__main__':
         LOGGER.info(f'Writing profile results to {profile_output_path}')
         yappi.get_func_stats().save(profile_output_path, type='pstat')
         LOGGER.info(f'Profile results saved to {profile_output_path}')
-    pass
