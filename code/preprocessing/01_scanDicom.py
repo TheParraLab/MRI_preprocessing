@@ -44,8 +44,7 @@ import subprocess
 import pickle
 import random
 from pathlib import Path
-import json
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 
 # Third-party imports
 import pydicom as pyd
@@ -542,10 +541,10 @@ def main(out_name: str = 'Data_table.csv', SAVE_DIR: str = '', SCAN_DIR: str = '
         LOGGER.info(f'Profiling is enabled')
 
     # Check if the output already exists to avoid redundant processing
-    if out_name in os.listdir(SAVE_DIR):
+    if os.path.exists(os.path.join(SAVE_DIR, out_name)):
         LOGGER.error(f'{out_name} already exists. Skipping step 01')
         LOGGER.error(f'To re-run this step, delete the existing {out_name} file')
-        exit()
+        return
 
     # Finding main directory and subdirectories
     LOGGER.info('Finding all directories containing DICOM files')
@@ -639,7 +638,8 @@ if __name__ == '__main__':
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
 
         # Save to temporary directory to avoid conflicts
-        SAVE_DIR = os.path.join(SAVE_DIR, 'tmp/')
+        tmp_save_dir = os.path.join(SAVE_DIR, 'tmp/')
+        os.makedirs(tmp_save_dir, exist_ok=True)
 
         # Load the list of directories
         with open(args.dir_list, 'rb') as f:
@@ -651,7 +651,7 @@ if __name__ == '__main__':
         LOGGER.info(f'Processing single directory: {args.dir_idx}')
 
         # Run main for this specific directory
-        main(out_name=f'Data_table_{args.dir_idx}.csv', SCAN_DIR=SCAN_DIR, SAVE_DIR=SAVE_DIR)
+        main(out_name=f'Data_table_{args.dir_idx}.csv', SCAN_DIR=SCAN_DIR, SAVE_DIR=tmp_save_dir)
 
         # If this is the last job in the array, compile all results
         # Note: This simple check assumes the last index finishes last, which isn't guaranteed in all schedulers.
@@ -663,26 +663,21 @@ if __name__ == '__main__':
             while len(Tables) < len(Dirs):
                 LOGGER.info('Waiting for all tables to be compiled')
                 time.sleep(5)
-                Tables = os.listdir(SAVE_DIR)
-                Tables = [table for table in Tables if table.endswith('.csv')]
+                Tables = [t for t in os.listdir(tmp_save_dir) if t.endswith('.csv')]
 
             LOGGER.info('All tables present, compiling...')
-            Data_table = pd.DataFrame()
-            for table in Tables:
-                LOGGER.info(f'Compiling {table}')
-                Data_table = pd.concat([Data_table, pd.read_csv(f'{SAVE_DIR}{table}')], ignore_index=True)
+            tables_to_concat = [pd.read_csv(os.path.join(tmp_save_dir, t)) for t in Tables]
+            Data_table = pd.concat(tables_to_concat, ignore_index=True)
 
-            # Move out of tmp directory
-            SAVE_DIR = SAVE_DIR.replace('tmp/', '')
-            Data_table.to_csv(f'{SAVE_DIR}Data_table.csv', index=False)
+            Data_table.to_csv(os.path.join(SAVE_DIR, 'Data_table.csv'), index=False)
             LOGGER.info(f'Compiled results saved to {SAVE_DIR}Data_table.csv')
 
             # Clean up tmp directory
             try:
-                subprocess.run(['rm', '-r', f'{SAVE_DIR}tmp/'], check=True)
-                LOGGER.info(f'Deleted temporary directory {SAVE_DIR}tmp/')
+                subprocess.run(['rm', '-r', tmp_save_dir], check=True)
+                LOGGER.info(f'Deleted temporary directory {tmp_save_dir}')
             except Exception as e:
-                LOGGER.error(f'Error deleting temporary directory {SAVE_DIR}tmp/: {e}')
+                LOGGER.error(f'Error deleting temporary directory {tmp_save_dir}: {e}')
 
     # Finalize the profiler if enabled
     if PROFILE:
@@ -692,4 +687,4 @@ if __name__ == '__main__':
         LOGGER.info(f'Writing profile results to {profile_output_path}')
         yappi.get_func_stats().save(profile_output_path, type='pstat')
         LOGGER.info(f'Profile results saved to {profile_output_path}')
-    exit()
+    pass
