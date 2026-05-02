@@ -171,14 +171,14 @@ def _build_table_from_files(session_id, files_config):
     return table
 
 
-# ------ Helper: reset sampling state before/after each test ------
-@pytest.fixture(autouse=True)
-def _reset_sampling():
-    scan.SAMPLE_PCT = 0.0
-    scan.SAMPLE_SEED = None
-    yield
-    scan.SAMPLE_PCT = 0.0
-    scan.SAMPLE_SEED = None
+# ------ Helpers for Groups A/B: new ScanConfig API ------
+
+def _scan_cfg(save_dir: str = str(test_save_dir)) -> scan.ScanConfig:
+    return scan.ScanConfig(save_dir=save_dir, scan_dir=save_dir)
+
+
+def _scan_logger(save_dir: str = str(test_save_dir)) -> scan.logging.Logger:
+    return scan.create_logger(scan.ScanConfig(save_dir=save_dir))
 
 
 # ==============================================================================
@@ -188,150 +188,117 @@ def _reset_sampling():
 
 # A1 — Single MRI file
 def test_A1_find_all_dicom_dirs_single(tmp_path):
-    """A single MR file in one sub-directory is discovered.
-
-    Structure::
-
-        tmp/single_mr/
-        └── img1.dcm   (MR)
-    """
     d = tmp_path / "single_mr"
     d.mkdir()
     make_minimal_dcm(str(d / "img1.dcm"), modality='MR')
-    dirs = scan.find_all_dicom_dirs(str(tmp_path))
+    cfg, logger = _scan_cfg(), _scan_logger()
+    dirs = scan._find_all_dicom_dirs_impl(cfg, logger, str(tmp_path))
     assert len(dirs) == 1
     assert str(d) in dirs
 
 
 # A2 — Mixed directory (MR + CT + non-DICOM)
 def test_A2_mixed_dir_only_mr_found(tmp_path):
-    """A mixed directory containing MR, CT, and non-DICOM files returns
-    exactly one MRI directory.
-
-    Structure::
-
-        tmp/mixed/
-        ├── mr.dcm   (MR)
-        ├── ct.dcm   (CT -- excluded)
-        ├── readme.txt (ignored)
-        └── noise.raw   (ignored)
-    """
     d = tmp_path / "mixed"
     d.mkdir()
     make_minimal_dcm(str(d / "mr.dcm"), modality='MR', series_number=1)
     make_minimal_dcm(str(d / "ct.dcm"), modality='CT', series_number=2)
     (d / "readme.txt").write_text("not dicom")
     (d / "noise.raw").write_bytes(b'\x00' * 100)
-    dirs = scan.find_all_dicom_dirs(str(tmp_path))
+    cfg, logger = _scan_cfg(), _scan_logger()
+    dirs = scan._find_all_dicom_dirs_impl(cfg, logger, str(tmp_path))
     assert len(dirs) == 1
     assert str(d) in dirs
 
 
 # A3 — Nested directories
 def test_A3_nested_dirs(tmp_path):
-    """Deeply nested directories are both discovered.
-
-    Structure::
-
-        tmp/
-        ├── a/b/c/
-        │   └── deep.dcm   (MR)
-        └── top/
-            └── top.dcm   (MR)
-    """
     deep = tmp_path / "a" / "b" / "c"
     deep.mkdir(parents=True)
     make_minimal_dcm(str(deep / "deep.dcm"), modality='MR')
     shallow = tmp_path / "top"
     shallow.mkdir()
     make_minimal_dcm(str(shallow / "top.dcm"), modality='MR')
-    dirs = scan.find_all_dicom_dirs(str(tmp_path))
+    cfg, logger = _scan_cfg(), _scan_logger()
+    dirs = scan._find_all_dicom_dirs_impl(cfg, logger, str(tmp_path))
     assert len(dirs) == 2
     assert any("a/b/c" in dd for dd in dirs)
 
 
 # A4 — Missing SeriesNumber doesn't crash
 def test_A4_missing_series_number_no_crash(tmp_path):
-    """``findDicom()`` should handle a valid MR file that lacks a SeriesNumber
-    without crashing. A SeriesNumber of 0 effectively means "missing"."""
     d = tmp_path / "no_series"
     d.mkdir()
     make_realistic_mr_dcm(str(d / "ns.dcm"), modality='MR', series_number=1)
-    result = scan.findDicom(str(d))
+    logger = _scan_logger()
+    result = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None, logger=logger)
     assert isinstance(result, list)
 
 
 # A5 — Duplicate series returns 1 representative
 def test_A5_duplicate_series_returns_one(tmp_path):
-    """When 5 files share the same series_number, only 1 representative
-    file should be returned."""
     root = tmp_path / "dup_series"
     root.mkdir()
     for i in range(5):
         make_minimal_dcm(str(root / f"dup_{i}.dcm"), modality='MR', series_number=42)
-    found = scan.findDicom(str(root))
+    logger = _scan_logger()
+    found = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None, logger=logger)
     assert len(found) == 1
 
 
 # A6 — Corrupt files don't crash
 def test_A6_corrupt_files(tmp_path):
-    """A directory with a good MR file and 3 corrupt .dcm files should return
-    only the good file."""
     d = tmp_path / "corrupt"
     d.mkdir()
     make_realistic_mr_dcm(str(d / "good.dcm"), modality='MR', series_number=1)
     (d / "bad1.dcm").write_text("not a dicom file at all")
     (d / "bad2.dcm").write_bytes(b'\xff' * 512)
     (d / "bad3.dcm").write_bytes(b'\0' * 100)
-    found = scan.findDicom(str(d))
+    logger = _scan_logger()
+    found = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None, logger=logger)
     assert len(found) == 1
     assert "good.dcm" in found[0]
 
 
 # A7 — No .dcm extension files ignored
 def test_A7_no_dcm_extension_ignored(tmp_path):
-    """Files with non-.dcm extensions (e.g. .jpg) in a directory should be ignored."""
     d = tmp_path / "no_ext"
     d.mkdir()
     make_realistic_mr_dcm(str(d / "img1.jpg"), modality='MR', series_number=1)
-    dirs = scan.find_all_dicom_dirs(str(tmp_path))
-    assert len(dirs) == 0  # .jpg should be ignored
+    cfg, logger = _scan_cfg(), _scan_logger()
+    dirs = scan._find_all_dicom_dirs_impl(cfg, logger, str(tmp_path))
+    assert len(dirs) == 0
 
 
 # A8 — Sampling with seed deterministic
 def test_A8_sampling_deterministic(tmp_path):
-    """Resampling 20 files across 5 series with SAMPLE_PCT=15 and seed=99
-    must produce identical results on two successive calls."""
     root = tmp_path / "samptest"
     root.mkdir()
     for i in range(20):
         make_minimal_dcm(str(root / f"f_{i:02d}.dcm"), modality='MR', series_number=(i % 5) + 1)
-    scan.SAMPLE_PCT = 15.0
-    random.seed(99)
-    first = scan.findDicom(str(root))
-    random.seed(99)
-    second = scan.findDicom(str(root))
+    logger = _scan_logger()
+    first = scan._find_dicom_worker(str(root), sample_pct=15.0, sample_seed=99, logger=logger)
+    second = scan._find_dicom_worker(str(root), sample_pct=15.0, sample_seed=99, logger=logger)
     assert first == second
 
 
 # A9 — Empty directory
 def test_A9_empty_directory(tmp_path):
-    """An empty directory should return an empty list (no MRI directories found)."""
     d = tmp_path / "empty"
     d.mkdir()
-    dirs = scan.find_all_dicom_dirs(str(d))
+    cfg, logger = _scan_cfg(), _scan_logger()
+    dirs = scan._find_all_dicom_dirs_impl(cfg, logger, str(d))
     assert dirs == []
 
 
 # A10 — Non-MR modalities
 def test_A10_non_mr_modalities_not_returned(tmp_path):
-    """A directory containing only non-MR modalities (CT, MRNS, US, CR, XA, NM,
-    PT, RX, RTSTRUCT) should return 0 MRI directories."""
     d = tmp_path / "nonmr"
     d.mkdir()
     for mod in ['CT', 'MRNS', 'US', 'CR', 'XA', 'NM', 'PT', 'RX', 'RTSTRUCT']:
         make_minimal_dcm(str(d / f"{mod}.dcm"), modality=mod)
-    dirs = scan.find_all_dicom_dirs(str(tmp_path))
+    cfg, logger = _scan_cfg(), _scan_logger()
+    dirs = scan._find_all_dicom_dirs_impl(cfg, logger, str(tmp_path))
     assert len(dirs) == 0
 
 
@@ -349,11 +316,10 @@ EXPECTED_KEYS = {
 
 # B1 — extractDicom returns dict with all expected keys
 def test_B1_extractDicom_has_all_keys(tmp_path):
-    """``extractDicom()`` must return a dict containing all 22 expected output keys.
-    Each key corresponds to one field extracted by DICOMextract."""
     f = tmp_path / "extract_test.dcm"
     make_realistic_mr_dcm(str(f), repetition_time=500.0)
-    result = scan.extractDicom(str(f))
+    logger = _scan_logger()
+    result = scan._extractDicom_impl(str(f), logger)
     assert result is not None
     assert isinstance(result, dict)
     assert EXPECTED_KEYS.issubset(result.keys()), f"Missing keys: {EXPECTED_KEYS - result.keys()}"
@@ -361,39 +327,33 @@ def test_B1_extractDicom_has_all_keys(tmp_path):
 
 # B2 — Modality T1 vs T2 based on RepetitionTime
 def test_B2_T1_vs_T2_modality(tmp_path):
-    """RepetitionTime threshold: values < 780 ms map to 'T1', values >= 780 ms map to 'T2'.
-    This includes boundary tests at 779.999 (should be T1) and 780.001 (should be T2)."""
+    logger = _scan_logger()
     t1_path = tmp_path / "t1.dcm"
     make_realistic_mr_dcm(str(t1_path), repetition_time=779.0)
-    t1_result = scan.extractDicom(str(t1_path))
+    t1_result = scan._extractDicom_impl(str(t1_path), logger)
     assert t1_result['Modality'] == 'T1', f"Expected T1, got {t1_result['Modality']}"
 
     t2_path = tmp_path / "t2.dcm"
     make_realistic_mr_dcm(str(t2_path), repetition_time=780.0)
-    t2_result = scan.extractDicom(str(t2_path))
+    t2_result = scan._extractDicom_impl(str(t2_path), logger)
     assert t2_result['Modality'] == 'T2', f"Expected T2, got {t2_result['Modality']}"
 
-    # Boundary: just below 780
     t1_edge = tmp_path / "t1_edge.dcm"
     make_realistic_mr_dcm(str(t1_edge), repetition_time=779.999)
-    t1_edge_result = scan.extractDicom(str(t1_edge))
-    assert t1_edge_result['Modality'] == 'T1'
+    assert scan._extractDicom_impl(str(t1_edge), logger)['Modality'] == 'T1'
 
-    # Boundary: just above 780
     t2_edge = tmp_path / "t2_edge.dcm"
     make_realistic_mr_dcm(str(t2_edge), repetition_time=780.001)
-    t2_edge_result = scan.extractDicom(str(t2_edge))
-    assert t2_edge_result['Modality'] == 'T2'
+    assert scan._extractDicom_impl(str(t2_edge), logger)['Modality'] == 'T2'
 
 
 # B3 — Unknown fields for missing tags
 def test_B3_unknown_fields_missing_tags(tmp_path):
-    """Fields that are absent in a minimal DICOM (Accession, DOB, Lat) should
-    return 'Unknown' rather than None or raising an error."""
     d = tmp_path / "sparse"
     d.mkdir()
     make_minimal_dcm(str(d / "sparse.dcm"), modality='MR', series_number=1)
-    result = scan.extractDicom(str(d / "sparse.dcm"))
+    logger = _scan_logger()
+    result = scan._extractDicom_impl(str(d / "sparse.dcm"), logger)
     assert result is not None
     for key in ['Accession', 'DOB', 'Lat']:
         assert result[key] == 'Unknown', f"{key} should be 'Unknown' but is '{result[key]}'"

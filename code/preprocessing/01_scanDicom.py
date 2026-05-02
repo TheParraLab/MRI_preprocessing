@@ -550,3 +550,6 @@ if __name__ == '__main__':
         logger.info(f'Writing profile results to {profile_output_path}')
         yappi.get_func_stats().save(profile_output_path, type='pstat')
         logger.info(f'Profile results saved to {profile_output_path}')
+
+
+# ------ End of file ------
