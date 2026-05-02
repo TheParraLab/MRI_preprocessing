@@ -38,13 +38,14 @@ Dependencies:
 """
 
 # Standard imports
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import os
 import time
 import argparse
 import subprocess
 import pickle
 import random
+from functools import partial
 from typing import List, Dict, Any, Optional
 import logging
 
@@ -457,8 +458,6 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
             info_list = None
 
     if info_list is None:
-        # Partially apply logger into extractDicom for the parallel dispatcher
-        from functools import partial
         extract_partial = partial(_extractDicom_impl, logger=logger)
         info_list = run_function(
             logger, extract_partial, dicom_files,
@@ -534,7 +533,7 @@ if __name__ == '__main__':
 
             final_save_dir = os.path.dirname(tmp_save_dir)
             combined.to_csv(os.path.join(final_save_dir, 'Data_table.csv'), index=False)
-            logger.info(f'Compiled results saved to {final_save_dir}Data_table.csv')
+            logger.info(f'Compiled results saved to {os.path.join(final_save_dir, "Data_table.csv")}')
 
             try:
                 subprocess.run(['rm', '-r', tmp_save_dir], check=True)
