@@ -43,25 +43,12 @@ from DICOM import DICOMfilter
 SYNTHETIC_CSV = str(proj_root / "test" / "synthetic_Data_table.csv")
 
 
-# ============================ ==============
-# INDEPENDENT EXPECTED VALUES
-#
-# These are NOT computed by running DICOMfilter. They are independently
-# computed by re-implementing the _known-correct_ removeT2 logic below
-# on the synthetic data.  Any change to synthetic_Data_table.csv or the
-# filter logic MUST be verified by hand and the expected values updated.
-# ============================ ==============
-
-
-    def _subset_with_session_id(self, synth_df, pid, date):
-        """Get a session subset with SessionID added (required by DICOMfilter)."""
-        subset = synth_df[(synth_df['ID'] == pid) & (synth_df['DATE'].astype(str) == date)].copy()
-        subset['SessionID'] = f"{pid}_{date}"
-        return subset
-
-    def _independent_mask(self, df: pd.DataFrame) -> pd.Series:
-        """Independent removeT2 logic: keep only T1 rows. Not called anywhere in pipeline."""
-        return df['Modality'] == 'T1'
+def _independent_remove_t2(df: pd.DataFrame) -> pd.Series:
+    """Independent T1-only mask. Mirrors DICOMfilter.removeT2() logic.
+    
+    Keep rows where Modality == 'T1'.
+    """
+    return df['Modality'] == 'T1'
 
 
 @pytest.fixture(scope="module")
@@ -164,6 +151,16 @@ class TestScript02_Filtering_Independent:
     or DICOM.py.  This makes the test a true assertion against known-correct results,
     not a tautology.
     """
+
+    def _subset_with_session_id(self, synth_df, pid, date):
+        """Get a session subset with SessionID added (required by DICOMfilter)."""
+        subset = synth_df[(synth_df['ID'] == pid) & (synth_df['DATE'].astype(str) == date)].copy()
+        subset['SessionID'] = f"{pid}_{date}"
+        return subset
+
+    def _independent_mask(self, df: pd.DataFrame) -> pd.Series:
+        """Independent removeT2 logic: keep only T1 rows."""
+        return df['Modality'] == 'T1'
 
     @pytest.mark.parametrize("pid,date,expected_count",
                              [
