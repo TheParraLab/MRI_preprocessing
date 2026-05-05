@@ -83,7 +83,7 @@ def build_config() -> ScanConfig:
     parser = argparse.ArgumentParser(description='Extract DICOM data to build Data_table.csv')
     parser.add_argument('--test', nargs='?', const=100, type=int,
                         help='Run in test mode with an optional number of dicom directories to scan (default: 100)')
-    parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int,
+    parser.add_argument('--multi', '-m', nargs='?', const=max(1, cpu_count()-1), type=int,
                         help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
     parser.add_argument('-p', '--profile', action='store_true',
                         help='Run with profiler enabled')
