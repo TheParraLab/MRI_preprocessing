@@ -83,7 +83,7 @@ def build_config() -> ScanConfig:
     parser = argparse.ArgumentParser(description='Extract DICOM data to build Data_table.csv')
     parser.add_argument('--test', nargs='?', const=100, type=int,
                         help='Run in test mode with an optional number of dicom directories to scan (default: 100)')
-    parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int,
+    parser.add_argument('--multi', '-m', nargs='?', const=max(1, cpu_count()-1), type=int,
                         help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
     parser.add_argument('-p', '--profile', action='store_true',
                         help='Run with profiler enabled')
@@ -479,6 +479,16 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
     except Exception as e:
         logger.error(f'Failed to write output CSV {out_path}: {e}')
     logger.info(f'DICOM information extraction completed and saved to {out_name}')
+    # Removing checkpoint files after successful completion
+    clear_checkpoint_files = ['dirs', 'dicom_files', 'info']
+    for chk in clear_checkpoint_files:
+        chk_path = os.path.join(_ensure_checkpoint_dir(cfg), f'{chk}.pkl')
+        if os.path.exists(chk_path):
+            try:
+                os.remove(chk_path)
+                logger.info(f'Removed checkpoint file: {chk_path}')
+            except Exception as e:
+                logger.error(f'Error removing checkpoint file {chk_path}: {e}')
 
 
 # ---------------------------------------------------------------------------
