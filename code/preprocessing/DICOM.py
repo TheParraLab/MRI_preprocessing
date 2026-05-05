@@ -1002,7 +1002,13 @@ class DICOMfilter():
             self.print_table(self.dicom_pre, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Pre_scan'])
 
         self.dicom_pre['Pre_scan'] = True
+        self.dicom_pre['Post_scan'] = False
+        self.dicom_post['Pre_scan'] = False
         self.dicom_post['Post_scan'] = True
+        self.dicom_pre['Pre_scan'] = self.dicom_pre['Pre_scan'].astype(bool)
+        self.dicom_pre['Post_scan'] = self.dicom_pre['Post_scan'].astype(bool)
+        self.dicom_post['Pre_scan'] = self.dicom_post['Pre_scan'].astype(bool)
+        self.dicom_post['Post_scan'] = self.dicom_post['Post_scan'].astype(bool)
         self.dicom_table = pd.concat([self.dicom_pre, self.dicom_post])
 
         # FINDING NUMBER OF SLICES - not needed anymore? solved by .apply_slices()?
@@ -1252,7 +1258,7 @@ class DICOMsplit():
                     initial = self.scan_results.loc[(self.scan_results['TriTime'] == i) & (self.scan_results['Slice'] == j), 'PATH'].values[0]
                     # pad j to a 3 digit number
                     j = str(j).zfill(3)
-                    destination = f"{self.tmp_save}dicom/{self.Session_ID}/{i}/{j}.dcm"
+                    destination = f"{self.tmp_save}/dicom/{self.Session_ID}/{i}/{j}.dcm"
                     self.temporary_relocations.append([initial, destination])
             self.dicom_table['SessionID'] = self.Session_ID
         return 
