@@ -479,6 +479,16 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
     except Exception as e:
         logger.error(f'Failed to write output CSV {out_path}: {e}')
     logger.info(f'DICOM information extraction completed and saved to {out_name}')
+    # Removing checkpoint files after successful completion
+    clear_checkpoint_files = ['dirs', 'dicom_files', 'info']
+    for chk in clear_checkpoint_files:
+        chk_path = os.path.join(_ensure_checkpoint_dir(cfg), f'{chk}.pkl')
+        if os.path.exists(chk_path):
+            try:
+                os.remove(chk_path)
+                logger.info(f'Removed checkpoint file: {chk_path}')
+            except Exception as e:
+                logger.error(f'Error removing checkpoint file {chk_path}: {e}')
 
 
 # ---------------------------------------------------------------------------
