@@ -179,7 +179,8 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
                    description_flags: list, logger: logging.Logger) -> tuple:
     """Worker for filter step — called per session subset."""
     data_subset = data_subset.reset_index(drop=True)
-    tmp_save = save_dir.replace('tmp/', 'tmp_data/')
+    base, last = os.path.split(save_dir.rstrip('/'))
+    tmp_save = os.path.join(base, 'tmp_data') if last == 'tmp' else save_dir
     dicom_filter = DICOMfilter(data_subset, logger=logger, tmp_save=tmp_save)
     dicom_filter.Types(computed_flags)
     dicom_filter.Description(description_flags)
@@ -375,10 +376,15 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             logger.info(f'{cfg.out_name} already exists -- overwriting (--force)')
         else:
             logger.warning(f'{cfg.out_name} already exists')
+            if sys.stdin.isatty() == False:
+                logger.warning('Running in non-interactive mode, skipping prompt and exiting to avoid overwrite')
+                logger.warning('To force overwrite, use the --force flag.')
+                return
             try:
                 answer = input('Would you like to reprocess? [Y/n]: ')
             except (EOFError, KeyboardInterrupt):
                 logger.warning('No input received, aborting.')
+                logger.warning('To force overwrite without prompt, use the --force flag.')
                 return
             if answer.lower() != 'y':
                 logger.info('Stopping processing.')
@@ -610,7 +616,7 @@ if __name__ == '__main__':
                         logger.error(f'Error compiling {table}: {e}')
                         break
 
-                final_dir = save_dir_worker.replace('tmp/', '')
+                final_dir = os.path.dirname(save_dir_worker.rstrip('/'))
                 combined.to_csv(os.path.join(final_dir, 'Data_table_timing.csv'), index=False)
                 logger.info(f'Compiled results saved to {final_dir}')
                 try:
