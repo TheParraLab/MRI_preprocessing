@@ -326,9 +326,12 @@ def _init_data_table(load_table: str, target: Optional[str],
 
 def _aggregate_removed(removed_tables: dict, removed_list: list) -> None:
     """Concatenate per-worker removal dicts into the accumulator."""
+    buffer = defaultdict(list)
     for removed_dict in removed_list:
         for key, value in removed_dict.items():
-            removed_tables[key] = pd.concat([removed_tables[key], value], ignore_index=True)
+            buffer[key].append(value)
+    for key, df_list in buffer.items():
+        removed_tables[key] = pd.concat([removed_tables[key], pd.concat(df_list, ignore_index=True)], ignore_index=True)
 
 
 def _normalize_bool_cols(data_table: pd.DataFrame) -> pd.DataFrame:
@@ -603,18 +606,18 @@ if __name__ == '__main__':
                     time.sleep(5)
 
                 logger.info('All tables present, compiling...')
-                combined = pd.DataFrame()
+                frames = []
                 for table in tables:
                     logger.info(f'Compiling {table}')
                     try:
-                        tmp = pd.read_csv(os.path.join(save_dir_worker, table))
-                        combined = pd.concat([combined, tmp], ignore_index=True)
+                        frames.append(pd.read_csv(os.path.join(save_dir_worker, table)))
                     except pd.errors.EmptyDataError:
                         logger.error(f'{table} is empty, skipping')
                         continue
                     except Exception as e:
                         logger.error(f'Error compiling {table}: {e}')
                         break
+                combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
                 final_dir = os.path.dirname(save_dir_worker.rstrip('/'))
                 combined.to_csv(os.path.join(final_dir, 'Data_table_timing.csv'), index=False)
