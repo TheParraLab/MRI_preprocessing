@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 
 start_time = datetime.now(timezone.utc) # Record the start time of the comparison in UTC timezone
 
+print('Available scans for comparison:')
+print('Primary selection will be the source scan, and secondary should be the destination scan to compare against.')
 scans = os.listdir(os.path.join(os.getcwd(), 'scan_results'))
 for i in range(len(scans)):
     print(f'{i}: {scans[i]}')
@@ -14,52 +16,45 @@ scan1_path = os.path.join(os.getcwd(), 'scan_results', scans[scan1_index])
 scan2_path = os.path.join(os.getcwd(), 'scan_results', scans[scan2_index])
 with open(scan1_path, 'r') as f:
     scan1_data = json.load(f)
+    print(f'Loaded primary scan: {scans[scan1_index]} with {len(scan1_data["results"])} directories')
 with open(scan2_path, 'r') as f:
     scan2_data = json.load(f)
+    print(f'Loaded secondary scan: {scans[scan2_index]} with {len(scan2_data["results"])} directories')
 
-# Compare the two scans and identify differences in file presence and checksums
-# When secondary has a directory that primary does not, report it as "Missing in Primary"
-# When primary has a directory that secondary does not, report it as "Missing in Secondary"
-# When both have the same directory but different files or checksums, report the differences as "Incomplete Matches"
-# When both have the same directory and same files with same checksums, report it as "Complete Matches"
+# Compare files at the individual level across both scans
+# Files in primary that also exist in secondary with matching checksums -> marked for deletion from primary
+# Files in primary that are missing in secondary or have different checksums -> marked for transfer/replacement
 report = {
-    'missing_in_primary': [],
-    'missing_in_secondary': [],
-    'incomplete_matches': [],
-    'complete_matches': [],
-    'imaging_matches': [],
-    'metadata_matches': [],
+    'ready_for_deletion': [],
+    'need_transfer': [],
 }
-for i in scan1_data['results']:
-    if i not in scan2_data['results']:
-        report['missing_in_secondary'].append(i)
-    else:
-        # Focus on *.nii and *.json files seperately
-        
-        json_primary_files = {f['file_name']: f['md5'] for f in scan1_data['results'][i]['files'] if f['file_name'].endswith('.json')}
-        json_secondary_files = {f['file_name']: f['md5'] for f in scan2_data['results'][i]['files'] if f['file_name'].endswith('.json')}
+secondary_file_index = {}
+for dir_name, dir_data in scan2_data['results'].items():
+    for f in dir_data['files']:
+        key = os.path.join(dir_name, f['file_name'])
+        secondary_file_index[key] = f['md5']
 
-        nii_primary_files = {f['file_name']: f['md5'] for f in scan1_data['results'][i]['files'] if f['file_name'].endswith('.nii')}
-        nii_secondary_files = {f['file_name']: f['md5'] for f in scan2_data['results'][i]['files'] if f['file_name'].endswith('.nii')}
-
-        if json_primary_files == json_secondary_files and nii_primary_files == nii_secondary_files:
-            report['complete_matches'].append(i)
-        elif json_primary_files == json_secondary_files and nii_primary_files != nii_secondary_files:
-            report['imaging_matches'].append(i)
-        elif json_primary_files != json_secondary_files and nii_primary_files == nii_secondary_files:
-            report['metadata_matches'].append(i)
+for dir_name, dir_data in scan1_data['results'].items():
+    for f in dir_data['files']:
+        key = os.path.join(dir_name, f['file_name'])
+        secondary_md5 = secondary_file_index.get(key)
+        if secondary_md5 is not None and secondary_md5 == f['md5']:
+            report['ready_for_deletion'].append({
+                'path': key,
+                'md5': f['md5'],
+            })
         else:
-            report['incomplete_matches'].append(i)
-
-for i in scan2_data['results']:
-    if i not in scan1_data['results']:
-        report['missing_in_primary'].append(i)
+            report['need_transfer'].append({
+                'path': key,
+                'primary_md5': f['md5'],
+                'secondary_md5': secondary_md5 if secondary_md5 else None,
+            })
 
 stop_time = datetime.now(timezone.utc) # Record the stop time of the comparison in UTC timezone
 header = {
     # Take both scan headers
-    'primary': {scan1_data['header']},
-    'secondary': {scan2_data['header']},
+    'primary': scan1_data['header'],
+    'secondary': scan2_data['header'],
     'analysis': {
         'start_time': start_time,
         'stop_time': stop_time
@@ -71,3 +66,11 @@ output = {
 }
 output_file = f'comparison_report_{scan1_index}_vs_{scan2_index}.json'
 output_path = os.path.join(os.getcwd(), 'comparison_findings', output_file)
+with open(output_path, 'w') as f:
+    json.dump(output, f, indent=4, default=str)
+print(f'Comparison report saved to: {output_path}')
+print('-='*20)
+print('SUMMARY')
+print('-='*20)
+print(f'Need Transfer: {len(output['report']['need_transfer'])}')
+print(f'Deletion Ready: {len(output['report']['ready_for_deletion'])}')
