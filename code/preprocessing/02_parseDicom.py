@@ -79,6 +79,8 @@ class ParseConfig:
     computed_flags: list = field(default_factory=lambda: ['slope', 'sub', 'subtract'])
     description_flags: list = field(default_factory=lambda: ['loc', 'pjn', 'calib'])
     out_name: str = 'Data_table_timing.csv'
+    resume: bool = False
+    filter_batch_size: int = 10
     target: Optional[str] = None
     test: bool = False
 
@@ -102,6 +104,10 @@ def build_config() -> ParseConfig:
                         help='Overwrite existing output files without prompting')
     parser.add_argument('--profile', action='store_true',
                         help='Run with profiler enabled')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume filtering from checkpoint if available')
+    parser.add_argument('--batch-size', type=int, default=10,
+                        help='Number of sessions per batch before saving checkpoint (default: 10)')
     args = parser.parse_args()
 
     cfg = ParseConfig(
@@ -114,6 +120,8 @@ def build_config() -> ParseConfig:
         parallel=args.multi is not None,
         n_cpus=args.multi if args.multi is not None else cpu_count() - 1,
         profile=args.profile,
+        resume=args.resume,
+        filter_batch_size=args.batch_size,
     )
     return cfg
 
@@ -144,31 +152,93 @@ def _atomic_write_csv(df: pd.DataFrame, path: str) -> None:
 # Checkpoint helpers
 # ------ ---------------------------------- --- - -------------- --- --- ---
 
-def save_progress(cfg: ParseConfig, logger: logging.Logger, data: list, filename: str) -> None:
-    """Save progress atomically using tmp + os.replace."""
-    logger.info(f'Saving progress to {filename}')
-    tmp_path = os.path.join(cfg.save_dir, f'.{filename}.tmp')
-    final_path = os.path.join(cfg.save_dir, filename)
-    try:
-        with open(tmp_path, 'wb') as f:
-            pickle.dump(data, f)
-        os.replace(tmp_path, final_path)
-    except Exception as e:
-        logger.error(f'Failed to write progress {final_path}: {e}')
+CHECKPOINT_DIR = '.filter_checkpoint'
+
+def _checkpoint_path(cfg: ParseConfig) -> str:
+    """Return path to the checkpoint directory."""
+    return os.path.join(cfg.save_dir, CHECKPOINT_DIR)
 
 
-def load_progress(cfg: ParseConfig, logger: logging.Logger, filename: str) -> Optional[Any]:
-    """Load progress checkpoint if it exists."""
-    path = os.path.join(cfg.save_dir, filename)
-    if not os.path.exists(path):
-        return None
-    logger.info(f'Loading progress from {filename}')
+def _save_filter_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+    completed_ids: list,
+    results: list,
+    removed: list,
+) -> None:
+    """Save filter progress atomically: completed session IDs, results, removed entries."""
+    cp_dir = _checkpoint_path(cfg)
+    os.makedirs(cp_dir, exist_ok=True)
+
+    meta_path = os.path.join(cp_dir, 'meta.json.tmp')
+    meta = {
+        'completed_ids': completed_ids,
+        'total_results': len(results),
+        'total_removed': len(removed),
+    }
+
+    results_path = os.path.join(cp_dir, 'results.pkl.tmp')
+    removed_path = os.path.join(cp_dir, 'removed.pkl.tmp')
+
     try:
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+        os.replace(meta_path, os.path.join(cp_dir, 'meta.json'))
+
+        with open(results_path, 'wb') as f:
+            pickle.dump(results, f)
+        os.replace(results_path, os.path.join(cp_dir, 'results.pkl'))
+
+        with open(removed_path, 'wb') as f:
+            pickle.dump(removed, f)
+        os.replace(removed_path, os.path.join(cp_dir, 'removed.pkl'))
+
+        logger.info(f'Checkpoint saved: {len(completed_ids)} sessions done')
     except Exception as e:
-        logger.error(f'Failed to load progress {path}: {e}')
-    return None
+        logger.error(f'Failed to write checkpoint: {e}')
+
+
+def _load_filter_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    """Load filter checkpoint if available. Returns (completed_ids, results, removed) or (None, None, None)."""
+    cp_dir = _checkpoint_path(cfg)
+    meta_path = os.path.join(cp_dir, 'meta.json')
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
+
+    if not all(os.path.exists(p) for p in [meta_path, results_path, removed_path]):
+        logger.info('No valid filter checkpoint found')
+        return None, None, None
+
+    try:
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        with open(results_path, 'rb') as f:
+            results = pickle.load(f)
+        with open(removed_path, 'rb') as f:
+            removed = pickle.load(f)
+
+        logger.info(
+            f'Loaded filter checkpoint: {meta["total_results"]} results, '
+            f'{meta["total_removed"]} removed entries'
+        )
+        return meta['completed_ids'], results, removed
+    except Exception as e:
+        logger.error(f'Failed to load checkpoint: {e}')
+        return None, None, None
+
+
+def _remove_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
+    """Clean up the checkpoint directory after successful completion."""
+    cp_dir = _checkpoint_path(cfg)
+    if os.path.exists(cp_dir):
+        try:
+            shutil.rmtree(cp_dir)
+            logger.info('Removed checkpoint directory')
+        except Exception as e:
+            logger.error(f'Failed to remove checkpoint directory: {e}')
 
 
 # ---------------------------------------------------------------------------
@@ -393,33 +463,55 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 logger.info('Stopping processing.')
                 return
 
-    # -- Load progress checkpoint or init from scratch ------------------------
-    progress = load_progress(cfg, logger, 'parseDicom_progress.pkl')
-    temporary_relocation = list(progress) if progress else []
+    # -- Init data table --------------------------------------------------
+    Data_table, removed_tables = _init_data_table(cfg.load_table, cfg.target, logger)
+    Iden_uniq = np.unique(Data_table['SessionID'])
+    PRE_TABLE = Data_table.copy()
 
-    if progress:
-        logger.info(f'Progress file found. {len(progress)} items remaining')
-        Data_table = None
-        removed_tables = defaultdict(pd.DataFrame)
-    else:
-        Data_table, removed_tables = _init_data_table(cfg.load_table, cfg.target, logger)
-        Iden_uniq = np.unique(Data_table['SessionID'])
-        PRE_TABLE = Data_table.copy()
+    if cfg.test:
+        Iden_uniq = Iden_uniq[:cfg.n_test]
+        logger.info(f'Running in test mode with {cfg.n_test} sessions')
 
-        if cfg.test:
-            Iden_uniq = Iden_uniq[:cfg.n_test]
-            logger.info(f'Running in test mode with {cfg.n_test} sessions')
+    if cfg.parallel:
+        logger.debug('Running in parallel mode')
 
-        if cfg.parallel:
-            logger.debug('Running in parallel mode')
+    # -- Filtering step --------------------------------------------------
+    filter_path = os.path.join(cfg.save_dir, 'Data_table_filtered.csv')
+    temporary_relocation = []
 
-        Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
-        random.shuffle(Data_subsets)
+    if not os.path.exists(filter_path):
+        logger.info('No filtered table found, starting filtering process')
 
-        # -- Filtering step --------------------------------------------------
-        filter_path = os.path.join(cfg.save_dir, 'Data_table_filtered.csv')
-        if not os.path.exists(filter_path):
-            logger.info('No filtered table found, starting filtering process')
+        # Try to resume from checkpoint
+        completed_ids = []
+        all_results = []
+        all_removed = []
+
+        if cfg.resume:
+            completed_ids, all_results, all_removed = _load_filter_checkpoint(cfg, logger)
+            if completed_ids is not None:
+                logger.info(f'Resuming from checkpoint: {len(completed_ids)} sessions already filtered')
+            else:
+                cfg.resume = False
+
+        # Build work queue (exclude already-completed sessions if resuming)
+        if completed_ids:
+            completed_set = set(completed_ids)
+            Data_subsets = [
+                group.copy()
+                for sid, group in Data_table.groupby('SessionID')
+                if sid in Iden_uniq and sid not in completed_set
+            ]
+        else:
+            Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
+            random.shuffle(Data_subsets)
+
+        if not Data_subsets:
+            logger.info('All sessions already processed or no data to filter')
+            Data_table = pd.concat(all_results).reset_index(drop=True) if all_results else pd.DataFrame()
+            _aggregate_removed(removed_tables, all_removed)
+        else:
+            logger.info(f'Processing {len(Data_subsets)} session(s)')
 
             filter_fn = functools.partial(
                 _filter_worker,
@@ -428,68 +520,97 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 description_flags=cfg.description_flags,
                 logger=logger,
             )
-            results, removed, temp_rels = run_function(
-                logger, filter_fn, Data_subsets,
-                Parallel=cfg.parallel, P_type='process',
-            )
 
-            results = [df for df in results if not df.empty]
-            removed = list(removed)
-            temp_rels = list(temp_rels)
+            batch_size = cfg.filter_batch_size
+            for batch_start in range(0, len(Data_subsets), batch_size):
+                batch = Data_subsets[batch_start:batch_start + batch_size]
+                logger.info(
+                    f'Filtering batch {batch_start // batch_size + 1}: '
+                    f'{batch_start + 1}-{min(batch_start + batch_size, len(Data_subsets))} '
+                    f'of {len(Data_subsets)} sessions'
+                )
 
-            Data_table = pd.concat(results).reset_index(drop=True)
-            Iden_uniq_after = Data_table['SessionID'].unique()
+                batch_results, batch_removed, batch_temp_rels = run_function(
+                    logger, filter_fn, batch,
+                    Parallel=cfg.parallel, P_type='process',
+                )
 
-            Iden_uniq_after_clean = []
-            for sid in Iden_uniq_after:
-                if sid[-2:] in ('_a', '_b', '_l', '_r'):
-                    Iden_uniq_after_clean.append(sid[:-2])
-                else:
-                    Iden_uniq_after_clean.append(sid)
-            Iden_uniq_after_clean = list(set(Iden_uniq_after_clean))
+                batch_results = [df for df in batch_results if not df.empty]
+                all_results.extend(batch_results)
+                all_removed.extend(batch_removed)
+                temporary_relocation.extend(batch_temp_rels)
 
-            _aggregate_removed(removed_tables, removed)
+                # Track completed session IDs
+                for df in batch_results:
+                    for sid in df['SessionID'].unique():
+                        completed_ids.append(sid)
+                for subset in batch:
+                    sid = subset['SessionID'].values[0]
+                    if sid not in completed_ids:
+                        completed_ids.append(sid)
 
-            logger.info('Filtering Results:')
-            logger.info(f'Initial number of unique sessions: {len(Iden_uniq)}')
-            logger.info(f'Final number of unique sessions  : {len(Iden_uniq_after_clean)}')
-            logger.info(f'Final number of sessions (w/ lat ): {len(Iden_uniq_after)}')
-            logger.info(f'Removed sessions                 : {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
+                # Save checkpoint after each batch
+                _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
 
-            for key, value in removed_tables.items():
-                logger.info(f'=== {key} ===')
-                rem_id = value['SessionID'].unique()
-                gone_id = set(rem_id) - set(Iden_uniq_after_clean)
-                logger.info(f'  Sessions missing from output: {len(gone_id)}')
-                logger.info(f'  Scans removed               : {len(value)}')
+            # Final assembly
+            results = [df for df in all_results if not df.empty]
+            Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
 
-            Data_table = _normalize_bool_cols(Data_table)
-            logger.info(f'Saving filtered data to {filter_path}')
-            _atomic_write_csv(Data_table, filter_path)
+            _aggregate_removed(removed_tables, all_removed)
 
-            os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
-            save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir)
-            run_function(logger, save_fn, list(removed_tables.items()),
-                        Parallel=cfg.parallel, P_type='process')
+            # Clean up checkpoint on success
+            _remove_checkpoint(cfg, logger)
 
-            if cfg.export_fully_removed:
-                logger.info('Compiling fully removed sessions...')
-                iden_uniq_after_set = set(Iden_uniq_after)
-                fully_removed_list = [
-                    PRE_TABLE[PRE_TABLE['SessionID'] == sid]
-                    for sid in Iden_uniq if sid not in iden_uniq_after_set
-                ]
-                if fully_removed_list:
-                    fully_removed = pd.concat(fully_removed_list, ignore_index=True)
-                    fully_path = os.path.join(cfg.save_dir, 'removal_log', 'Removed_fully.csv')
-                    fully_removed.to_csv(fully_path, index=False)
-                    logger.info(f'Saved fully removed sessions to {fully_path}')
-            else:
-                logger.info('Export of fully removed sessions skipped.')
+    else:
+        logger.info('Filtered table found, loading filtered data')
+        Data_table = pd.read_csv(filter_path, low_memory=False)
+
+    Iden_uniq_after = Data_table['SessionID'].unique() if not Data_table.empty else []
+
+    Iden_uniq_after_clean = []
+    for sid in Iden_uniq_after:
+        if sid[-2:] in ('_a', '_b', '_l', '_r'):
+            Iden_uniq_after_clean.append(sid[:-2])
         else:
-            logger.info('Filtered table found, loading filtered data')
-            Data_table = pd.read_csv(filter_path, low_memory=False)
-            Iden_uniq_after = Data_table['SessionID'].unique()
+            Iden_uniq_after_clean.append(sid)
+    Iden_uniq_after_clean = list(set(Iden_uniq_after_clean))
+
+    logger.info('Filtering Results:')
+    logger.info(f'Initial number of unique sessions: {len(Iden_uniq)}')
+    logger.info(f'Final number of unique sessions  : {len(Iden_uniq_after_clean)}')
+    logger.info(f'Final number of sessions (w/ lat): {len(Iden_uniq_after)}')
+    logger.info(f'Removed sessions                 : {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
+
+    for key, value in removed_tables.items():
+        logger.info(f'=== {key} ===')
+        rem_id = value['SessionID'].unique()
+        gone_id = set(rem_id) - set(Iden_uniq_after_clean)
+        logger.info(f'  Sessions missing from output: {len(gone_id)}')
+        logger.info(f'  Scans removed               : {len(value)}')
+
+        Data_table = _normalize_bool_cols(Data_table)
+        logger.info(f'Saving filtered data to {filter_path}')
+        _atomic_write_csv(Data_table, filter_path)
+
+        os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+        save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir)
+        run_function(logger, save_fn, list(removed_tables.items()),
+                    Parallel=cfg.parallel, P_type='process')
+
+        if cfg.export_fully_removed:
+            logger.info('Compiling fully removed sessions...')
+            iden_uniq_after_set = set(Iden_uniq_after)
+            fully_removed_list = [
+                PRE_TABLE[PRE_TABLE['SessionID'] == sid]
+                for sid in Iden_uniq if sid not in iden_uniq_after_set
+            ]
+            if fully_removed_list:
+                fully_removed = pd.concat(fully_removed_list, ignore_index=True)
+                fully_path = os.path.join(cfg.save_dir, 'removal_log', 'Removed_fully.csv')
+                fully_removed.to_csv(fully_path, index=False)
+                logger.info(f'Saved fully removed sessions to {fully_path}')
+        else:
+            logger.info('Export of fully removed sessions skipped.')
 
         if cfg.filter_only:
             logger.info('Filter only mode enabled. Exiting after filtering step.')
