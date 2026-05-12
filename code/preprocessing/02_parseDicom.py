@@ -324,6 +324,79 @@ def _remove_split_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
             logger.error(f'Failed to remove split checkpoint directory: {e}')
 
 
+ORDER_CHECKPOINT_DIR = '.order_checkpoint'
+
+def _order_checkpoint_path(cfg: ParseConfig) -> str:
+    return os.path.join(cfg.save_dir, ORDER_CHECKPOINT_DIR)
+
+
+def _save_order_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+    completed_ids: list,
+    results: list,
+) -> None:
+    cp_dir = _order_checkpoint_path(cfg)
+    os.makedirs(cp_dir, exist_ok=True)
+
+    meta_path = os.path.join(cp_dir, 'meta.json.tmp')
+    meta = {
+        'completed_ids': completed_ids,
+        'total_results': len(results),
+    }
+    results_path = os.path.join(cp_dir, 'results.pkl.tmp')
+
+    try:
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+        os.replace(meta_path, os.path.join(cp_dir, 'meta.json'))
+
+        with open(results_path, 'wb') as f:
+            pickle.dump(results, f)
+        os.replace(results_path, os.path.join(cp_dir, 'results.pkl'))
+
+        logger.info(f'Order checkpoint saved: {len(completed_ids)} sessions done')
+    except Exception as e:
+        logger.error(f'Failed to write order checkpoint: {e}')
+
+
+def _load_order_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    cp_dir = _order_checkpoint_path(cfg)
+    meta_path = os.path.join(cp_dir, 'meta.json')
+    results_path = os.path.join(cp_dir, 'results.pkl')
+
+    if not all(os.path.exists(p) for p in [meta_path, results_path]):
+        logger.info('No valid order checkpoint found')
+        return None, None
+
+    try:
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        with open(results_path, 'rb') as f:
+            results = pickle.load(f)
+
+        logger.info(
+            f'Loaded order checkpoint: {meta["total_results"]} results'
+        )
+        return meta['completed_ids'], results
+    except Exception as e:
+        logger.error(f'Failed to load order checkpoint: {e}')
+        return None, None
+
+
+def _remove_order_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
+    cp_dir = _order_checkpoint_path(cfg)
+    if os.path.exists(cp_dir):
+        try:
+            shutil.rmtree(cp_dir)
+            logger.info('Removed order checkpoint directory')
+        except Exception as e:
+            logger.error(f'Failed to remove order checkpoint directory: {e}')
+
+
 # ------
 # Pipeline workers  (accept plain args for run_function compatibility)
 # ------
@@ -794,21 +867,57 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
     # -- Ordering step ---------------------------------------------------
     Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
+    order_input_ids = [subset['SessionID'].iloc[0] for subset in Data_subsets]
 
     if not os.path.exists(out_path):
         logger.info('No ordered table found, starting ordering process')
         order_fn = functools.partial(_order_worker, logger=logger)
-        results = run_function(
-            logger, order_fn, Data_subsets,
-            Parallel=cfg.parallel, P_type='process',
-        )
-        Data_table = pd.concat(results).reset_index(drop=True)
 
-        logger.info('Ordering complete')
-        logger.info(f'Final sessions: {len(Data_table["SessionID"].unique())}')
-        logger.info(f'Final scans   : {len(Data_table)}')
-        logger.info(f'Saving ordered data to {out_path}')
-        _atomic_write_csv(Data_table, out_path)
+        if cfg.resume:
+            completed_ids, order_results = _load_order_checkpoint(cfg, logger)
+            if completed_ids is not None and order_results is not None:
+                remaining = [item for item in zip(order_input_ids, Data_subsets)
+                             if item[0] not in completed_ids]
+                logger.info(
+                    f'Resuming order from checkpoint: '
+                    f'{len(completed_ids)} done, {len(remaining)} remaining'
+                )
+                Data_subsets = [item[1] for item in remaining]
+                order_input_ids = [item[0] for item in remaining]
+                if not Data_subsets:
+                    Data_table = pd.concat(order_results).reset_index(drop=True)
+                    logger.info('All ordering already completed from checkpoint')
+            else:
+                order_results = []
+                completed_ids = []
+        else:
+            order_results = []
+            completed_ids = []
+
+        if Data_subsets:
+            order_input = list(zip(order_input_ids, Data_subsets))
+            batch_size = getattr(cfg, 'filter_batch_size', 10)
+            for start in range(0, len(order_input), batch_size):
+                end = min(start + batch_size, len(order_input))
+                batch = [item[1] for item in order_input[start:end]]
+                batch_ids = [item[0] for item in order_input[start:end]]
+
+                new_results = run_function(
+                    logger, order_fn, batch,
+                    Parallel=cfg.parallel, P_type='process',
+                )
+                order_results.extend(new_results)
+                completed_ids.extend(batch_ids)
+
+                _save_order_checkpoint(cfg, logger, completed_ids, order_results)
+
+            Data_table = pd.concat(order_results).reset_index(drop=True)
+
+            logger.info('Ordering complete')
+            logger.info(f'Final sessions: {len(Data_table["SessionID"].unique())}')
+            logger.info(f'Final scans   : {len(Data_table)}')
+            logger.info(f'Saving ordered data to {out_path}')
+            _atomic_write_csv(Data_table, out_path)
     else:
         logger.info('Ordered table found, loading ordered data')
         Data_table = pd.read_csv(out_path, low_memory=False)
@@ -827,6 +936,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
     logger.info('Redirection complete')
     _remove_checkpoint(cfg, logger)
     _remove_split_checkpoint(cfg, logger)
+    _remove_order_checkpoint(cfg, logger)
 
 
 if __name__ == '__main__':

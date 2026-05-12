@@ -1261,6 +1261,7 @@ class DICOMsplit():
                     destination = f"{self.tmp_save}/dicom/{self.Session_ID}/{i}/{j}.dcm"
                     self.temporary_relocations.append([initial, destination])
             self.dicom_table['SessionID'] = self.Session_ID
+            self.dicom_table.loc[self.dicom_table['Pre_scan'] != 1, 'Post_scan'] = 1
         return 
 
         ## Below is old process, kept for reference
@@ -1438,11 +1439,11 @@ class DICOMorder():
         return unknown_rows.index              
 
     def findPre(self):
-        indx = self.dicom_table[self.dicom_table['Post_scan'] == 1].index
+        post_indx = self.dicom_table[self.dicom_table['Post_scan'] == 1].index
         pre_indx = self.dicom_table[self.dicom_table['Pre_scan'] == 1].index
 
         if len(pre_indx) == 1:
-            indx = np.append(indx, pre_indx)
+            indx = np.append(post_indx, pre_indx)
             self.dicom_table = self.dicom_table.loc[indx]
             return self.dicom_table
         else:
