@@ -587,7 +587,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         logger.info(f'  Sessions missing from output: {len(gone_id)}')
         logger.info(f'  Scans removed               : {len(value)}')
 
-        Data_table = _normalize_bool_cols(Data_table)
+    Data_table = _normalize_bool_cols(Data_table)
+
+    if not os.path.exists(filter_path):
         logger.info(f'Saving filtered data to {filter_path}')
         _atomic_write_csv(Data_table, filter_path)
 
@@ -611,13 +613,11 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         else:
             logger.info('Export of fully removed sessions skipped.')
 
-        if cfg.filter_only:
-            logger.info('Filter only mode enabled. Exiting after filtering step.')
-            return
+    if cfg.filter_only:
+        logger.info('Filter only mode enabled. Exiting after filtering step.')
+        return
 
-        Data_table = _normalize_bool_cols(Data_table)
-
-        # -- Splitting step --------------------------------------------------
+    # -- Splitting step --------------------------------------------------
         Data_subsets = [
             group.copy() for sid, group in Data_table.groupby('SessionID')
             if sid in Iden_uniq_after
