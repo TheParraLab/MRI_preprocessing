@@ -36,14 +36,13 @@ from dataclasses import dataclass, field, replace
 import os
 import argparse
 import time
-import subprocess
 import re
 import random
+import json
 import pickle
 import logging
 from multiprocessing import cpu_count
 from typing import Any, Optional
-from functools import partial
 from collections import defaultdict
 import sys
 import shutil
@@ -148,8 +147,8 @@ def _atomic_write_csv(df: pd.DataFrame, path: str) -> None:
         raise
 
 
-# ------ --------------------------- ---- - --------------- --- -- --------- -
-# Checkpoint helpers
+# ------ --------------------------- ---- - --------------- --- -- --------
+# Filter checkpoint helpers
 # ------ ---------------------------------- --- - -------------- --- --- ---
 
 CHECKPOINT_DIR = '.filter_checkpoint'
