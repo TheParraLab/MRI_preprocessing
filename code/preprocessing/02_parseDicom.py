@@ -240,9 +240,93 @@ def _remove_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
             logger.error(f'Failed to remove checkpoint directory: {e}')
 
 
-# ---------------------------------------------------------------------------
+SPLIT_CHECKPOINT_DIR = '.split_checkpoint'
+
+def _split_checkpoint_path(cfg: ParseConfig) -> str:
+    return os.path.join(cfg.save_dir, SPLIT_CHECKPOINT_DIR)
+
+
+def _save_split_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+    completed_ids: list,
+    results: list,
+    redirections: list,
+) -> None:
+    cp_dir = _split_checkpoint_path(cfg)
+    os.makedirs(cp_dir, exist_ok=True)
+
+    meta_path = os.path.join(cp_dir, 'meta.json.tmp')
+    meta = {
+        'completed_ids': completed_ids,
+        'total_results': len(results),
+        'total_redirections': len(redirections),
+    }
+    results_path = os.path.join(cp_dir, 'results.pkl.tmp')
+    redirect_path = os.path.join(cp_dir, 'redirections.pkl.tmp')
+
+    try:
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+        os.replace(meta_path, os.path.join(cp_dir, 'meta.json'))
+
+        with open(results_path, 'wb') as f:
+            pickle.dump(results, f)
+        os.replace(results_path, os.path.join(cp_dir, 'results.pkl'))
+
+        with open(redirect_path, 'wb') as f:
+            pickle.dump(redirections, f)
+        os.replace(redirect_path, os.path.join(cp_dir, 'redirections.pkl'))
+
+        logger.info(f'Split checkpoint saved: {len(completed_ids)} sessions done')
+    except Exception as e:
+        logger.error(f'Failed to write split checkpoint: {e}')
+
+
+def _load_split_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    cp_dir = _split_checkpoint_path(cfg)
+    meta_path = os.path.join(cp_dir, 'meta.json')
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    redirect_path = os.path.join(cp_dir, 'redirections.pkl')
+
+    if not all(os.path.exists(p) for p in [meta_path, results_path, redirect_path]):
+        logger.info('No valid split checkpoint found')
+        return None, None, None
+
+    try:
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        with open(results_path, 'rb') as f:
+            results = pickle.load(f)
+        with open(redirect_path, 'rb') as f:
+            redirections = pickle.load(f)
+
+        logger.info(
+            f'Loaded split checkpoint: {meta["total_results"]} results, '
+            f'{meta["total_redirections"]} redirections'
+        )
+        return meta['completed_ids'], results, redirections
+    except Exception as e:
+        logger.error(f'Failed to load split checkpoint: {e}')
+        return None, None, None
+
+
+def _remove_split_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
+    cp_dir = _split_checkpoint_path(cfg)
+    if os.path.exists(cp_dir):
+        try:
+            shutil.rmtree(cp_dir)
+            logger.info('Removed split checkpoint directory')
+        except Exception as e:
+            logger.error(f'Failed to remove split checkpoint directory: {e}')
+
+
+# ------
 # Pipeline workers  (accept plain args for run_function compatibility)
-# ---------------------------------------------------------------------------
+# ------
 
 def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: list,
                    description_flags: list, logger: logging.Logger) -> tuple:
@@ -618,56 +702,116 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         return
 
     # -- Splitting step --------------------------------------------------
-        Data_subsets = [
+    split_path = os.path.join(cfg.save_dir, 'Data_table_split.csv')
+    temporary_relocation = []
+
+    if not os.path.exists(split_path):
+        logger.info('No split table found, starting splitting process')
+
+        split_subsets = [
             group.copy() for sid, group in Data_table.groupby('SessionID')
             if sid in Iden_uniq_after
         ]
 
-        split_path = os.path.join(cfg.save_dir, 'Data_table_split.csv')
-        if not os.path.exists(split_path):
-            logger.info('No split table found, starting splitting process')
+        # Try to resume from checkpoint
+        split_completed_ids = []
+        all_split_results = []
+        all_split_redirections = []
+
+        if cfg.resume:
+            split_completed_ids, all_split_results, all_split_redirections = \
+                _load_split_checkpoint(cfg, logger)
+            if split_completed_ids is not None:
+                logger.info(f'Resuming split checkpoint: {len(split_completed_ids)} sessions already split')
+            else:
+                cfg.resume = False
+
+        if split_completed_ids:
+            completed_set = set(split_completed_ids)
+            split_subsets = [
+                group.copy()
+                for sid, group in Data_table.groupby('SessionID')
+                if sid in Iden_uniq_after and sid not in completed_set
+            ]
+
+        if not split_subsets:
+            logger.info('All sessions already split or no data to split')
+            if all_split_results:
+                Data_table = pd.concat([df for df in all_split_results if not df.empty]).reset_index(drop=True)
+                temporary_relocation = list(all_split_redirections)
+                Iden_uniq_after = Data_table['SessionID'].unique()
+        else:
+            logger.info(f'Splitting {len(split_subsets)} session(s)')
+
             split_fn = functools.partial(_split_worker, logger=logger)
-            results, redirections = run_function(
-                logger, split_fn, Data_subsets,
-                Parallel=cfg.parallel, P_type='process',
-            )
-            results = [df for df in results if not df.empty]
-            Data_table = pd.concat(results).reset_index(drop=True)
-            temporary_relocation = list(redirections)
+
+            for batch_start in range(0, len(split_subsets), cfg.filter_batch_size):
+                batch = split_subsets[batch_start:batch_start + cfg.filter_batch_size]
+                logger.info(
+                    f'Splitting batch {(batch_start // cfg.filter_batch_size) + 1}: '
+                    f'{batch_start + 1}-{min(batch_start + cfg.filter_batch_size, len(split_subsets))} '
+                    f'of {len(split_subsets)} sessions'
+                )
+
+                batch_results, batch_redirects = run_function(
+                    logger, split_fn, batch,
+                    Parallel=cfg.parallel, P_type='process',
+                )
+
+                batch_results = [df for df in batch_results if not df.empty]
+                all_split_results.extend(batch_results)
+                all_split_redirections.extend(batch_redirects)
+
+                for df in batch_results:
+                    for sid in df['SessionID'].unique():
+                        split_completed_ids.append(sid)
+                for subset in batch:
+                    sid = subset['SessionID'].values[0]
+                    if sid not in split_completed_ids:
+                        split_completed_ids.append(sid)
+
+                _save_split_checkpoint(cfg, logger, split_completed_ids,
+                                      all_split_results, all_split_redirections)
+
+            results = [df for df in all_split_results if not df.empty]
+            Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
+            temporary_relocation = list(all_split_redirections)
             Iden_uniq_after = Data_table['SessionID'].unique()
 
-            logger.info(f'Updated scans after splitting            : {len(Data_table)}')
-            logger.info(f'Updated sessions after splitting          : {len(Iden_uniq_after)}')
-            logger.info(f'Temporary relocations after splitting     : {len(temporary_relocation)}')
-            logger.debug(f'Temp relocations example [first 3]: {temporary_relocation[:3]}')
+            _remove_split_checkpoint(cfg, logger)
 
-            _atomic_write_csv(Data_table, split_path)
-        else:
-            logger.info('Split table found, loading split data')
-            Data_table = pd.read_csv(split_path, low_memory=False)
-            temporary_relocation = []
-            logger.info('Temporary relocation list is empty (symlinks created on the fly)')
+        logger.info(f'Updated scans after splitting            : {len(Data_table)}')
+        logger.info(f'Updated sessions after splitting          : {len(Iden_uniq_after)}')
+        logger.info(f'Temporary relocations after splitting     : {len(temporary_relocation)}')
+        logger.debug(f'Temp relocations example [first 3]: {temporary_relocation[:3]}')
 
-        # -- Ordering step ---------------------------------------------------
-        Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
+        _atomic_write_csv(Data_table, split_path)
+    else:
+        logger.info('Split table found, loading split data')
+        Data_table = pd.read_csv(split_path, low_memory=False)
+        temporary_relocation = []
+        logger.info('Temporary relocation list is empty (symlinks created on the fly)')
 
-        if not os.path.exists(out_path):
-            logger.info('No ordered table found, starting ordering process')
-            order_fn = functools.partial(_order_worker, logger=logger)
-            results = run_function(
-                logger, order_fn, Data_subsets,
-                Parallel=cfg.parallel, P_type='process',
-            )
-            Data_table = pd.concat(results).reset_index(drop=True)
+    # -- Ordering step ---------------------------------------------------
+    Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
 
-            logger.info('Ordering complete')
-            logger.info(f'Final sessions: {len(Data_table["SessionID"].unique())}')
-            logger.info(f'Final scans   : {len(Data_table)}')
-            logger.info(f'Saving ordered data to {out_path}')
-            _atomic_write_csv(Data_table, out_path)
-        else:
-            logger.info('Ordered table found, loading ordered data')
-            Data_table = pd.read_csv(out_path, low_memory=False)
+    if not os.path.exists(out_path):
+        logger.info('No ordered table found, starting ordering process')
+        order_fn = functools.partial(_order_worker, logger=logger)
+        results = run_function(
+            logger, order_fn, Data_subsets,
+            Parallel=cfg.parallel, P_type='process',
+        )
+        Data_table = pd.concat(results).reset_index(drop=True)
+
+        logger.info('Ordering complete')
+        logger.info(f'Final sessions: {len(Data_table["SessionID"].unique())}')
+        logger.info(f'Final scans   : {len(Data_table)}')
+        logger.info(f'Saving ordered data to {out_path}')
+        _atomic_write_csv(Data_table, out_path)
+    else:
+        logger.info('Ordered table found, loading ordered data')
+        Data_table = pd.read_csv(out_path, low_memory=False)
 
     # -- Symlink relocations ------------------------------------------------
     logger.debug(
@@ -681,10 +825,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                      Parallel=False, P_type='process')
 
     logger.info('Redirection complete')
-    progress_path = os.path.join(cfg.save_dir, 'parseDicom_progress.pkl')
-    if os.path.exists(progress_path):
-        logger.info('Removing progress file')
-        os.remove(progress_path)
+    _remove_checkpoint(cfg, logger)
+    _remove_split_checkpoint(cfg, logger)
 
 
 if __name__ == '__main__':
