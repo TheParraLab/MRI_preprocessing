@@ -536,7 +536,12 @@ def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
         dest_path = command[1]
         if os.path.exists(dest_path) or os.path.islink(dest_path):
             os.remove(dest_path)
-        os.symlink(src_path, dest_path)
+        try:
+            os.symlink(src_path, dest_path)
+        except OSError:
+            worker_logger.warning(
+                f'Symlink failed, copying file instead: {src_path} -> {dest_path}')
+            shutil.copy2(src_path, dest_path)
     # ---------------------------------------------------------------------------
 # Aggregation helpers (no globals)
 # ---------------------------------------------------------------------------
