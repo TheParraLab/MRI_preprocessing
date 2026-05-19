@@ -402,12 +402,13 @@ def _remove_order_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
 # ------
 
 def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: list,
-                   description_flags: list, logger: logging.Logger) -> tuple:
+                   description_flags: list, log_dir: str) -> tuple:
     """Worker for filter step — called per session subset."""
+    worker_logger = get_logger('02_parseDicom', log_dir)
     data_subset = data_subset.reset_index(drop=True)
     base, last = os.path.split(save_dir.rstrip('/'))
     tmp_save = os.path.join(base, 'tmp_data') if last == 'tmp' else save_dir
-    dicom_filter = DICOMfilter(data_subset, logger=logger, tmp_save=tmp_save)
+    dicom_filter = DICOMfilter(data_subset, logger=worker_logger, tmp_save=tmp_save)
     dicom_filter.Types(computed_flags)
     dicom_filter.Description(description_flags)
 
@@ -469,28 +470,30 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
 
     session_id = data_subset['SessionID'].values[0]
     if len(dicom_filter.dicom_table) == 0:
-        logger.error(f'No scans remaining after filtering for {session_id}')
+        worker_logger.error(f'No scans remaining after filtering for {session_id}')
 
     return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
 
-def _order_worker(data_subset: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
+def _order_worker(data_subset: pd.DataFrame, log_dir: str) -> pd.DataFrame:
     """Worker for ordering step — called per session subset."""
+    worker_logger = get_logger('02_parseDicom', log_dir)
     data_subset = data_subset.reset_index(drop=True)
     session_id = data_subset['SessionID'].values[0]
-    order = DICOMorder(data_subset, logger=logger)
+    order = DICOMorder(data_subset, logger=worker_logger)
     order.order('TriTime', secondary_param='AcqTime')
     if order.dicom_table.empty:
-        logger.error(f'No scans remaining after ordering for {session_id}')
+        worker_logger.error(f'No scans remaining after ordering for {session_id}')
         return order.dicom_table
     order.findPre()
     return order.dicom_table
 
 
-def _split_worker(data_subset: pd.DataFrame, logger: logging.Logger) -> tuple:
+def _split_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
     """Worker for splitting step — called per session subset."""
+    worker_logger = get_logger('02_parseDicom', log_dir)
     data_subset = data_subset.reset_index(drop=True)
-    splitter = DICOMsplit(data_subset, logger=logger)
+    splitter = DICOMsplit(data_subset, logger=worker_logger)
     if splitter.SCAN:
         if splitter.scan_complete:
             splitter.load_scan()
@@ -511,20 +514,21 @@ def _save_removal_worker(tup: tuple, save_dir: str) -> None:
         pass
 
 
-def _relocate_worker(commands: list, relocations: list, logger: logging.Logger) -> None:
+def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
     """Worker for symlinking temporary file relocations."""
-    logger.debug(f'Relocate called with {len(commands)} commands')
-    logger.debug(f'Current relocations: {len(relocations)}')
-    logger.debug(f'First command: {commands[0] if commands else "None"}')
+    worker_logger = get_logger('02_parseDicom', log_dir)
+    worker_logger.debug(f'Relocate called with {len(commands)} commands')
+    worker_logger.debug(f'Current relocations: {len(relocations)}')
+    worker_logger.debug(f'First command: {commands[0] if commands else "None"}')
     if not commands:
-        logger.warning('No commands supplied to relocate')
+        worker_logger.warning('No commands supplied to relocate')
         return
     destinations = list(set(cmd[1] for cmd in commands))
     parent_dirs = list(set(os.path.dirname(d) for d in destinations))
     for dest_dir in parent_dirs:
         os.makedirs(dest_dir, exist_ok=True)
     for command in commands:
-        logger.debug(f'Linking {command[0]} to {command[1]}')
+        worker_logger.debug(f'Linking {command[0]} to {command[1]}')
         src_path = os.path.abspath(command[0])
         dest_path = command[1]
         if os.path.exists(dest_path) or os.path.islink(dest_path):
@@ -669,12 +673,13 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         else:
             logger.info(f'Processing {len(Data_subsets)} session(s)')
 
+            log_dir = os.path.join(cfg.save_dir, 'logs/')
             filter_fn = functools.partial(
                 _filter_worker,
                 save_dir=cfg.save_dir,
                 computed_flags=cfg.computed_flags,
                 description_flags=cfg.description_flags,
-                logger=logger,
+                log_dir=log_dir,
             )
 
             batch_size = cfg.filter_batch_size
@@ -816,7 +821,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         else:
             logger.info(f'Splitting {len(split_subsets)} session(s)')
 
-            split_fn = functools.partial(_split_worker, logger=logger)
+            split_fn = functools.partial(_split_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
 
             for batch_start in range(0, len(split_subsets), cfg.filter_batch_size):
                 batch = split_subsets[batch_start:batch_start + cfg.filter_batch_size]
@@ -871,7 +876,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
     if not os.path.exists(out_path):
         logger.info('No ordered table found, starting ordering process')
-        order_fn = functools.partial(_order_worker, logger=logger)
+        order_fn = functools.partial(_order_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
 
         if cfg.resume:
             completed_ids, order_results = _load_order_checkpoint(cfg, logger)
@@ -928,7 +933,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         f'Temporary relocations: {len(temporary_relocation)}')
     relocate_fn = functools.partial(_relocate_worker,
                                     relocations=list(temporary_relocation),
-                                    logger=logger)
+                                    log_dir=os.path.join(cfg.save_dir, 'logs/'))
     if temporary_relocation:
         run_function(logger, relocate_fn, list(temporary_relocation),
                      Parallel=False, P_type='process')
