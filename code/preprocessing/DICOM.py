@@ -1210,16 +1210,19 @@ class DICOMsplit():
             'Series': [],
         }
         for file in files:
-            extractor = DICOMextract(file)
-            info['PATH'].append(file)
-            info['AcqTime'].append(extractor.Acq())
-            info['SrsTime'].append(extractor.Srs())
-            info['ConTime'].append(extractor.Con())
-            info['StuTime'].append(extractor.Stu())
-            info['TriTime'].append(extractor.Tri())
-            info['InjTime'].append(extractor.Inj())
-            info['Series'].append(extractor.Series())
-            del extractor
+            try:
+                extractor = DICOMextract(file)
+                info['PATH'].append(file)
+                info['AcqTime'].append(extractor.Acq())
+                info['SrsTime'].append(extractor.Srs())
+                info['ConTime'].append(extractor.Con())
+                info['StuTime'].append(extractor.Stu())
+                info['TriTime'].append(extractor.Tri())
+                info['InjTime'].append(extractor.Inj())
+                info['Series'].append(extractor.Series())
+                del extractor
+            except Exception as e:
+                self.logger.warning(f'Skipping corrupt DICOM file {file}: {e} | [{self.Session_ID}]')
         self.scan_results = pd.DataFrame(info)
         self.logger.debug(f'Found {len(self.scan_results)} DICOM files in the directory | [{self.Session_ID}]')
         self.scan_complete = True
