@@ -602,6 +602,13 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
     logger.info(f'N_TEST          : {cfg.n_test}')
     logger.info(f'EXPORT_FULLY_REMOVED: {cfg.export_fully_removed}')
 
+    total, used, free = shutil.disk_usage(cfg.save_dir)
+    free_gb = free / (1024**3)
+    if free_gb < 20:
+        logger.error(f'Insufficient disk space: {free_gb:.1f} GB remaining in {cfg.save_dir}. '
+                      f'Need at least 20 GB. Aborting.')
+        return
+
     # -- Overwrite guard -----------------------------------------------------
     out_path = os.path.join(cfg.save_dir, cfg.out_name)
     if os.path.exists(out_path):
