@@ -68,6 +68,7 @@ class ParseConfig:
     load_table: str = '/FL_system/data/Data_table.csv'
     dir_list: str = 'dirs_to_process.txt'
     dir_idx: Optional[int] = None
+    min_free_gb: float = 50
     filter_only: bool = False
     force: bool = False
     parallel: bool = False
@@ -107,6 +108,8 @@ def build_config() -> ParseConfig:
                         help='Resume filtering from checkpoint if available')
     parser.add_argument('--batch-size', type=int, default=10,
                         help='Number of sessions per batch before saving checkpoint (default: 10)')
+    parser.add_argument('--min-free-gb', type=float, default=50,
+                        help='Minimum free disk space in GB to proceed (default: 50)')
     args = parser.parse_args()
 
     cfg = ParseConfig(
