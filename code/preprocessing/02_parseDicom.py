@@ -61,6 +61,18 @@ from toolbox import get_logger, run_function
 from DICOM import DICOMfilter, DICOMorder, DICOMsplit
 
 
+def _check_disk_space(save_dir: str, threshold_gb: float) -> bool:
+    """Return True if free space in save_dir is below threshold.
+
+    Used to stop processing gracefully before disk fills up.
+    """
+    total, used, free = shutil.disk_usage(save_dir)
+    free_gb = free / (1024**3)
+    if free_gb < threshold_gb:
+        return True  # disk space is critically low
+    return False
+
+
 @dataclass
 class ParseConfig:
     """All runtime configuration for 02_parseDicom."""
@@ -728,6 +740,16 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 # Save checkpoint after each batch
                 _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
 
+                # Check disk space threshold
+                if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    total, used, free = shutil.disk_usage(cfg.save_dir)
+                    logger.warning(
+                        f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
+                        'Checkpoint saved. To resume, run:\n'
+                        f'  python 02_parseDicom.py --save_dir {cfg.save_dir} --resume'
+                    )
+                    return
+
             # Final assembly
             results = [df for df in all_results if not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
@@ -864,7 +886,17 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                         split_completed_ids.append(sid)
 
                 _save_split_checkpoint(cfg, logger, split_completed_ids,
-                                      all_split_results, all_split_redirections)
+                                       all_split_results, all_split_redirections)
+
+                # Check disk space threshold
+                if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    total, used, free = shutil.disk_usage(cfg.save_dir)
+                    logger.warning(
+                        f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
+                        'Checkpoint saved. To resume, run:\n'
+                        f'  python 02_parseDicom.py --save_dir {cfg.save_dir} --resume'
+                    )
+                    return
 
             results = [df for df in all_split_results if not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
@@ -931,6 +963,16 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
                 _save_order_checkpoint(cfg, logger, completed_ids, order_results)
 
+                # Check disk space threshold
+                if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    total, used, free = shutil.disk_usage(cfg.save_dir)
+                    logger.warning(
+                        f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
+                        'Checkpoint saved. To resume, run:\n'
+                        f'  python 02_parseDicom.py --save_dir {cfg.save_dir} --resume'
+                    )
+                    return
+
             Data_table = pd.concat(order_results).reset_index(drop=True)
 
             logger.info('Ordering complete')
@@ -952,6 +994,15 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
     if temporary_relocation:
         run_function(logger, relocate_fn, list(temporary_relocation),
                      Parallel=False, P_type='process')
+
+    if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+        logger.warning(
+            f'Disk space is critically low. Checkpoint has been saved. '
+            'To resume processing later, run with --resume flag.\n'
+            f'Example:\n'
+            f'  python 02_parseDicom.py --save_dir {cfg.save_dir} --resume'
+        )
+        return
 
     logger.info('Redirection complete')
     _remove_checkpoint(cfg, logger)
