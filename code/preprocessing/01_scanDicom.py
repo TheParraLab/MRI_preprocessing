@@ -222,6 +222,7 @@ def _extractDicom_impl(f: str, logger: logging.Logger) -> Optional[Dict[str, Any
             'DOB': extract.DOB(),
             'Series_desc': extract.Desc(),
             'Modality': extract.Modality(),
+            'Part': extract.Part(),
             'AcqTime': extract.Acq(),
             'SrsTime': extract.Srs(),
             'ConTime': extract.Con(),

@@ -38,7 +38,7 @@ class DICOMextract:
 
     def Orientation(self) -> Union[int, str]:
         """
-        Attempts to extract the orientation of the scan.
+        Attempts to extract the orientation of the scan.MRI_preprocessing
 
         Returns:
             Union[int, str]: Integer representing orientation (0 = sagittal, 1 = coronal,
@@ -131,7 +131,15 @@ class DICOMextract:
         except Exception as e:
             self.log_error('Unable to read AcquisitionTime', e)
             return self.UNKNOWN
-        
+    
+    def Part(self) -> str:
+        """Attempts to extract the body part examined in the scan"""
+        try:
+            return self.metadata.BodyPartExamined
+        except Exception as e:
+            self.log_error('Unable to read BodyPartExamined', e)
+            return self.UNKNOWN
+
     def Srs(self) -> str:
         """Attempts to extract the series time of the scan"""
         try:
