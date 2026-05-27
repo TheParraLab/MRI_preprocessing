@@ -488,6 +488,9 @@ for i in range(NUM_SESSIONS):
 
 df = pd.DataFrame(all_rows)
 
+# Insert Part column after Modality to match _extractDicom_impl key order
+df.insert(df.columns.get_loc('Modality') + 1, 'Part', 'BREAST')
+
 OUTPUT_PATH = '/mnt/projects/MRI_preprocessing/test/synthetic_Data_table.csv'
 df.to_csv(OUTPUT_PATH, index=False)
 

@@ -93,7 +93,7 @@ class TestScript01_Schema:
         """All 23 extractDicom output columns must exist."""
         required = {
             'PATH', 'Orientation', 'ID', 'Accession', 'Name', 'DATE', 'DOB',
-            'Series_desc', 'Modality', 'AcqTime', 'SrsTime', 'ConTime', 'StuTime',
+            'Series_desc', 'Modality', 'Part', 'AcqTime', 'SrsTime', 'ConTime', 'StuTime',
             'TriTime', 'InjTime', 'ScanDur', 'Lat', 'NumSlices', 'Thickness',
             'BreastSize', 'DWI', 'Type', 'Series',
         }

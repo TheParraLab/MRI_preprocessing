@@ -38,9 +38,9 @@ Group A: 01_scanDicom.py -- DICOM detection completeness (10 tests)
         A10 -- Non-MR modalities (CT, MRNS, US, CR, XA, NM, PT, RX, RTSTRUCT) are rejected
 
 Group B: 01_scanDicom.py -- Metadata extraction (3 tests)
-    Tests that extractDicom() correctly reads all 22 DICOM fields.
+    Tests that extractDicom() correctly reads all 23 DICOM fields.
     Verified scenarios:
-        B1  -- All 22 expected output keys are present in the dict
+        B1  -- All 23 expected output keys are present in the dict
         B2  -- RepetitionTime threshold (780 ms) correctly separates T1 from T2
               with boundary tests at 779.999 and 780.001
         B3  -- Missing DICOM tags (Accession, DOB, Lat) default to 'Unknown'
@@ -149,6 +149,7 @@ def _build_table_from_files(session_id, files_config):
             'DOB': dcm.DOB(),
             'Series_desc': dcm.Desc(),
             'Modality': dcm.Modality(),
+            'Part': dcm.Part(),
             'AcqTime': dcm.Acq(),
             'SrsTime': dcm.Srs(),
             'ConTime': dcm.Con(),
@@ -308,7 +309,7 @@ def test_A10_non_mr_modalities_not_returned(tmp_path):
 
 EXPECTED_KEYS = {
     'PATH', 'Orientation', 'ID', 'Accession', 'Name', 'DATE', 'DOB',
-    'Series_desc', 'Modality', 'AcqTime', 'SrsTime', 'ConTime', 'StuTime',
+    'Series_desc', 'Modality', 'Part', 'AcqTime', 'SrsTime', 'ConTime', 'StuTime',
     'TriTime', 'InjTime', 'ScanDur', 'Lat', 'NumSlices', 'Thickness',
     'BreastSize', 'DWI', 'Type', 'Series',
 }

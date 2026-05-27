@@ -30,6 +30,7 @@ def make_minimal_dcm(path, modality='MR', series_number=1, patient_id='P1'):
     ds.Modality = modality
     ds.SeriesNumber = series_number
     ds.StudyDate = datetime.datetime.now().strftime('%Y%m%d')
+    ds.BodyPartExamined = 'BREAST'
     ds.save_as(path, write_like_original=False, enforce_file_format=True)
     return path
 
@@ -118,6 +119,7 @@ def make_realistic_mr_dcm(path, **kwargs):
     ds.PatientName = defaults['patient_name']
     ds.PatientBirthDate = defaults['patient_birthdate']
     ds.PatientSex = defaults['patient_sex']
+    ds.BodyPartExamined = 'BREAST'
 
     # Study data
     ds.StudyDate = defaults['study_date']
@@ -161,6 +163,9 @@ def make_realistic_mr_dcm(path, **kwargs):
     # Laterality
     if defaults.get('laterality'):
         ds.Laterality = defaults['laterality']
+
+    # Body part
+    ds.BodyPartExamined = 'BREAST'
 
     # Additional modality-specific attributes
     if kwargs.get('modality_specific'):
