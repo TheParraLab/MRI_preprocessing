@@ -261,6 +261,33 @@ def _split_checkpoint_path(cfg: ParseConfig) -> str:
     return os.path.join(cfg.save_dir, SPLIT_CHECKPOINT_DIR)
 
 
+SPLIT_RELOCATION_FILE = 'split_relocations.pkl'
+
+
+def _save_split_relocations(cfg: ParseConfig, relocations: list) -> None:
+    """Persist split relocation list alongside the split CSV so symlinks can
+    be recreated on re-run even when the CSV already exists."""
+    path = os.path.join(cfg.save_dir, SPLIT_RELOCATION_FILE)
+    try:
+        with open(path, 'wb') as f:
+            pickle.dump(relocations, f)
+    except Exception as e:
+        logging.getLogger(__name__).error(f'Failed to save split relocations: {e}')
+
+
+def _load_split_relocations(cfg: ParseConfig) -> Optional[list]:
+    """Load previously saved split relocation list."""
+    path = os.path.join(cfg.save_dir, SPLIT_RELOCATION_FILE)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+    except Exception as e:
+        logging.getLogger(__name__).error(f'Failed to load split relocations: {e}')
+        return None
+
+
 def _save_split_checkpoint(
     cfg: ParseConfig,
     logger: logging.Logger,
@@ -818,7 +845,6 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
     # -- Splitting step --------------------------------------------------
     split_path = os.path.join(cfg.save_dir, 'Data_table_split.csv')
-    temporary_relocation = []
 
     if not os.path.exists(split_path):
         logger.info('No split table found, starting splitting process')
@@ -911,11 +937,15 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         logger.debug(f'Temp relocations example [first 3]: {temporary_relocation[:3]}')
 
         _atomic_write_csv(Data_table, split_path)
+        _save_split_relocations(cfg, temporary_relocation)
     else:
         logger.info('Split table found, loading split data')
         Data_table = pd.read_csv(split_path, low_memory=False)
-        temporary_relocation = []
-        logger.info('Temporary relocation list is empty (symlinks created on the fly)')
+        temporary_relocation = _load_split_relocations(cfg) or []
+        if temporary_relocation:
+            logger.info(f'Loaded {len(temporary_relocation)} persistent split relocations')
+        else:
+            logger.info('No persisted split relocations found')
 
     # -- Ordering step ---------------------------------------------------
     Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
@@ -988,12 +1018,11 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
     logger.debug(
         f'Creating symlinks for separated post scans. '
         f'Temporary relocations: {len(temporary_relocation)}')
-    relocate_fn = functools.partial(_relocate_worker,
-                                    relocations=list(temporary_relocation),
-                                    log_dir=os.path.join(cfg.save_dir, 'logs/'))
     if temporary_relocation:
-        run_function(logger, relocate_fn, list(temporary_relocation),
-                     Parallel=False, P_type='process')
+        _relocate_worker(
+            commands=temporary_relocation,
+            relocations=temporary_relocation,
+            log_dir=os.path.join(cfg.save_dir, 'logs/'))
 
     if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
         logger.warning(
