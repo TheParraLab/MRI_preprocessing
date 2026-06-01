@@ -643,7 +643,7 @@ class DICOMfilter():
                 mask = self.dicom_table['Pre_scan'] == 1
                 self.dicom_table.loc[mask & (self.dicom_table['Post_scan'] == 0), 'Pre_scan'] = contains_pre[mask].astype(bool)
             else:             
-                self.dicom_table.loc[self.dicom_table['Post_scan'] == 0, 'Pre_scan'] = contains_pre
+                self.dicom_table.loc[self.dicom_table['Post_scan'] == 0, 'Pre_scan'] = contains_pre.astype(bool)
             pre_found = self.dicom_table['Pre_scan'].to_numpy().astype(bool)
             self.logger.debug(f'Series Description pre scan detection found {pre_found.sum()} pre scans | {self.Session_ID}')
             return pre_found
@@ -954,10 +954,10 @@ class DICOMfilter():
                     # If post detection now workd, continue to applying post detection
                     self.logger.debug(f'Post detection failure ameliorated through laterality separation | {self.Session_ID}')
                     self.detect_post('apply')
-                    self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1]
-                    self.dicom_post['Post_scan'] = True
-                    self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0]
-                    self.dicom_table['Post_scan'] = False
+                    self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1].copy()
+                    self.dicom_post.loc[:, 'Post_scan'] = True
+                    self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0].copy()
+                    self.dicom_table.loc[:, 'Post_scan'] = False
                     self.apply_slices(use='post')
                     self.logger.debug(f'Successfully detected post sequence | {self.Session_ID}')
                     self.print_table(self.dicom_post, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
@@ -984,10 +984,10 @@ class DICOMfilter():
         # Post sequence can be determined immediately, detect and filter
         self.detect_post('apply')
         self.apply_slices(use='post')
-        self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1]
-        self.dicom_post['Post_scan'] = True
-        self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0]
-        self.dicom_table['Post_scan'] = False
+        self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1].copy()
+        self.dicom_post.loc[:, 'Post_scan'] = True
+        self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0].copy()
+        self.dicom_table.loc[:, 'Post_scan'] = False
         self.logger.debug(f'Successfully detected post sequence | {self.Session_ID}')
         self.print_table(self.dicom_post, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
         #self.print_table(self.dicom_table, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
@@ -1004,7 +1004,7 @@ class DICOMfilter():
             return False
         elif pre_success:
             self.detect_pre('apply')
-            self.dicom_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]
+            self.dicom_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1].copy()
             self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             self.logger.debug(f'Successfully detected pre sequence | {self.Session_ID}')
             self.print_table(self.dicom_pre, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Pre_scan'])
