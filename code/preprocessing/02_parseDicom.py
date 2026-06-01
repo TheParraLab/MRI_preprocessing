@@ -377,6 +377,7 @@ def _save_order_checkpoint(
     logger: logging.Logger,
     completed_ids: list,
     results: list,
+    removed: list = None,
 ) -> None:
     cp_dir = _order_checkpoint_path(cfg)
     os.makedirs(cp_dir, exist_ok=True)
@@ -387,6 +388,7 @@ def _save_order_checkpoint(
         'total_results': len(results),
     }
     results_path = os.path.join(cp_dir, 'results.pkl.tmp')
+    removed_path = os.path.join(cp_dir, 'removed.pkl.tmp')
 
     try:
         with open(meta_path, 'w') as f:
@@ -396,6 +398,11 @@ def _save_order_checkpoint(
         with open(results_path, 'wb') as f:
             pickle.dump(results, f)
         os.replace(results_path, os.path.join(cp_dir, 'results.pkl'))
+
+        if removed is not None:
+            with open(removed_path, 'wb') as f:
+                pickle.dump(removed, f)
+            os.replace(removed_path, os.path.join(cp_dir, 'removed.pkl'))
 
         logger.info(f'Order checkpoint saved: {len(completed_ids)} sessions done')
     except Exception as e:
@@ -409,10 +416,11 @@ def _load_order_checkpoint(
     cp_dir = _order_checkpoint_path(cfg)
     meta_path = os.path.join(cp_dir, 'meta.json')
     results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
 
     if not all(os.path.exists(p) for p in [meta_path, results_path]):
         logger.info('No valid order checkpoint found')
-        return None, None
+        return None, None, None
 
     try:
         with open(meta_path, 'r') as f:
@@ -420,13 +428,19 @@ def _load_order_checkpoint(
         with open(results_path, 'rb') as f:
             results = pickle.load(f)
 
+        removed = []
+        if os.path.exists(removed_path):
+            with open(removed_path, 'rb') as f:
+                removed = pickle.load(f)
+
         logger.info(
-            f'Loaded order checkpoint: {meta["total_results"]} results'
+            f'Loaded order checkpoint: {meta["total_results"]} results, '
+            f'{len(removed)} removed entries'
         )
-        return meta['completed_ids'], results
+        return meta['completed_ids'], results, removed
     except Exception as e:
         logger.error(f'Failed to load order checkpoint: {e}')
-        return None, None
+        return None, None, None
 
 
 def _remove_order_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
@@ -517,18 +531,23 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
     return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
 
-def _order_worker(data_subset: pd.DataFrame, log_dir: str) -> pd.DataFrame:
-    """Worker for ordering step — called per session subset."""
+def _order_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
+    """Worker for ordering step — called per session subset.
+
+    Returns (ordered_df, removed_df).  removed_df is non-empty when the
+    ordering step discards every row for the session so that lost scans
+    appear in the removal log.
+    """
     worker_logger = get_logger('02_parseDicom', log_dir)
     data_subset = data_subset.reset_index(drop=True)
     session_id = data_subset['SessionID'].values[0]
-    order = DICOMorder(data_subset, logger=worker_logger)
+    order = DICOMorder(data_subset.copy(), logger=worker_logger)
     order.order('TriTime', secondary_param='AcqTime')
     if order.dicom_table.empty:
         worker_logger.error(f'No scans remaining after ordering for {session_id}')
-        return order.dicom_table
+        return pd.DataFrame(columns=data_subset.columns), data_subset.copy()
     order.findPre()
-    return order.dicom_table
+    return order.dicom_table, pd.DataFrame(columns=data_subset.columns)
 
 
 def _split_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
@@ -956,7 +975,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         order_fn = functools.partial(_order_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
 
         if cfg.resume:
-            completed_ids, order_results = _load_order_checkpoint(cfg, logger)
+            completed_ids, order_results, order_removed = _load_order_checkpoint(
+                cfg, logger)
             if completed_ids is not None and order_results is not None:
                 remaining = [item for item in zip(order_input_ids, Data_subsets)
                              if item[0] not in completed_ids]
@@ -967,14 +987,43 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 Data_subsets = [item[1] for item in remaining]
                 order_input_ids = [item[0] for item in remaining]
                 if not Data_subsets:
-                    Data_table = pd.concat(order_results).reset_index(drop=True)
-                    logger.info('All ordering already completed from checkpoint')
+                    Data_table = pd.concat(
+                        [df for df in order_results if not df.empty]
+                    ).reset_index(drop=True)
+                    order_removed_df = pd.concat(
+                        [df for df in order_removed if not df.empty],
+                        ignore_index=True,
+                    )
+                    if not order_removed_df.empty:
+                        logger.info(
+                            f'{len(order_removed_df)} scans removed during '
+                            f'ordering for '
+                            f'{order_removed_df["SessionID"].nunique()} '
+                            f'session(s)')
+                        os.makedirs(
+                            os.path.join(cfg.save_dir, 'removal_log'),
+                            exist_ok=True,
+                        )
+                        _atomic_write_csv(
+                            order_removed_df,
+                            os.path.join(
+                                cfg.save_dir,
+                                'removal_log',
+                                'Removed_Ordering.csv',
+                            ),
+                        )
+                    else:
+                        logger.info('No scans removed during ordering')
+                    logger.info(
+                        'All ordering already completed from checkpoint')
             else:
                 order_results = []
                 completed_ids = []
+                order_removed = []
         else:
             order_results = []
             completed_ids = []
+            order_removed = []
 
         if Data_subsets:
             order_input = list(zip(order_input_ids, Data_subsets))
@@ -984,14 +1033,18 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 batch = [item[1] for item in order_input[start:end]]
                 batch_ids = [item[0] for item in order_input[start:end]]
 
-                new_results = run_function(
+                new_ordered, new_removed = run_function(
                     logger, order_fn, batch,
                     Parallel=cfg.parallel, P_type='process',
                 )
-                order_results.extend(new_results)
+                order_results.extend(new_ordered)
+                order_removed.extend(new_removed)
                 completed_ids.extend(batch_ids)
 
-                _save_order_checkpoint(cfg, logger, completed_ids, order_results)
+                _save_order_checkpoint(
+                    cfg, logger, completed_ids, order_results,
+                    order_removed,
+                )
 
                 # Check disk space threshold
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
@@ -1003,7 +1056,17 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            Data_table = pd.concat(order_results).reset_index(drop=True)
+            Data_table = pd.concat([df for df in order_results if not df.empty]).reset_index(drop=True)
+
+            order_removed_df = pd.concat([df for df in order_removed if not df.empty], ignore_index=True)
+            if not order_removed_df.empty:
+                logger.info(f'{len(order_removed_df)} scans removed during ordering for '
+                            f'{order_removed_df["SessionID"].nunique()} session(s)')
+                os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+                _atomic_write_csv(order_removed_df,
+                                  os.path.join(cfg.save_dir, 'removal_log', 'Removed_Ordering.csv'))
+            else:
+                logger.info('No scans removed during ordering')
 
             logger.info('Ordering complete')
             logger.info(f'Final sessions: {len(Data_table["SessionID"].unique())}')
