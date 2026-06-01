@@ -122,6 +122,8 @@ def build_config() -> ParseConfig:
                         help='Number of sessions per batch before saving checkpoint (default: 10)')
     parser.add_argument('--min-free-gb', type=float, default=50,
                         help='Minimum free disk space in GB to proceed (default: 50)')
+    parser.add_argument('--fully_removed', action='store_true',
+                        help='Export fully removed sessions')
     args = parser.parse_args()
 
     cfg = ParseConfig(
@@ -136,6 +138,7 @@ def build_config() -> ParseConfig:
         profile=args.profile,
         resume=args.resume,
         filter_batch_size=args.batch_size,
+        export_fully_removed=args.fully_removed,
     )
     return cfg
 
