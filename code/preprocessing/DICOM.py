@@ -359,9 +359,9 @@ class DICOMfilter():
         self.temporary_relocations = []
         self.multiple_lat = False
         if 'Pre_scan' not in self.dicom_table.columns:
-            self.dicom_table['Pre_scan'] = 0
+            self.dicom_table['Pre_scan'] = False
         if 'Post_scan' not in self.dicom_table.columns:
-            self.dicom_table['Post_scan'] = 0
+            self.dicom_table['Post_scan'] = False
         assert self.Session_ID.size == 1, 'Multiple Session_IDs found in the table'
         self.logger.debug('='*50)
         self.logger.debug(f'Analyzing {self.Session_ID}')
@@ -913,8 +913,8 @@ class DICOMfilter():
             self.logger.debug(f'Multiple laterality represented in dicom data, need to seperate... | {self.Session_ID}')
             self.multiple_lat = True
 
-        self.dicom_table['Post_scan'] = 0
-        self.dicom_table['Pre_scan'] = 0
+        self.dicom_table['Post_scan'] = False
+        self.dicom_table['Pre_scan'] = False
 
         # FINDING POST SEQUENCE
         post_success = self.detect_post('check')
