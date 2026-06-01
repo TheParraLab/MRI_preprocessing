@@ -41,6 +41,7 @@ def get_logger(name: str, save_dir: str = ''):
 
     # Initialize logger
     logger = logging.getLogger(name)
+    logger.handlers.clear()
     logger.setLevel(logging.DEBUG)
 
     # Create file handler which logs even debug messages
