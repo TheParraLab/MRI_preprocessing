@@ -122,7 +122,8 @@ def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List
                             LOGGER.error(f'Error in parallel processing for item {i}: {e}', exc_info=True)
                             retries -= 1
                         if retries == 0:
-                            LOGGER.error(f'Max retries reached for item {i}. Skipping...')
+                            LOGGER.error(f'Max retries reached for item {i}. Appending None placeholder...')
+                            results.append(None)
         else:
             for item in items:
                 if stop_flag and stop_flag.is_set():

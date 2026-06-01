@@ -37,6 +37,7 @@ import os
 import argparse
 import time
 import re
+import fcntl
 import random
 import json
 import pickle
@@ -789,6 +790,10 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 # Save checkpoint after each batch
                 _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
 
+                # Free memory: clear large DataFrame accumulators after checkpoint persisted
+                all_results.clear()
+                all_removed.clear()
+
                 # Check disk space threshold
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
                     total, used, free = shutil.disk_usage(cfg.save_dir)
@@ -799,10 +804,13 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            # Final assembly
-            results = [df for df in all_results if not df.empty]
+            # Final assembly: reload from checkpoint to reconstruct full state (in-memory
+            # lists were cleared post-batch to cap RAM)
+            _, all_results, all_removed = _load_filter_checkpoint(cfg, logger)
+            results = [df for df in all_results if df is not None and not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
 
+            all_removed = [r for r in all_removed if r is not None]
             _aggregate_removed(removed_tables, all_removed)
 
             # Clean up checkpoint on success
@@ -936,6 +944,10 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 _save_split_checkpoint(cfg, logger, split_completed_ids,
                                        all_split_results, all_split_redirections)
 
+                # Free memory: clear large accumulators after checkpoint persisted
+                all_split_results.clear()
+                all_split_redirections.clear()
+
                 # Check disk space threshold
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
                     total, used, free = shutil.disk_usage(cfg.save_dir)
@@ -946,7 +958,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            results = [df for df in all_split_results if not df.empty]
+            # Final assembly: reload from checkpoint so full state is available again
+            _, all_split_results, all_split_redirections = _load_split_checkpoint(cfg, logger)
+            results = [df for df in all_split_results if df is not None and not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
             temporary_relocation = list(all_split_redirections)
             Iden_uniq_after = Data_table['SessionID'].unique()
@@ -1049,6 +1063,10 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     order_removed,
                 )
 
+                # Free memory: clear large accumulators after checkpoint persisted
+                order_results.clear()
+                order_removed.clear()
+
                 # Check disk space threshold
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
                     total, used, free = shutil.disk_usage(cfg.save_dir)
@@ -1059,7 +1077,10 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            Data_table = pd.concat([df for df in order_results if not df.empty]).reset_index(drop=True)
+            # Final assembly: reload from checkpoint so full state is available again
+            _, order_results, order_removed = _load_order_checkpoint(cfg, logger)
+            order_results = [df for df in order_results if df is not None and not df.empty]
+            Data_table = pd.concat(order_results).reset_index(drop=True) if order_results else pd.DataFrame()
 
             order_removed_df = pd.concat([df for df in order_removed if not df.empty], ignore_index=True)
             if not order_removed_df.empty:
@@ -1134,37 +1155,82 @@ if __name__ == '__main__':
 
             main(cfg, logger)
 
-            if cfg.dir_idx == len(items) - 1:
-                logger.info('Last script, compiling results')
-                while True:
-                    tables = [t for t in os.listdir(save_dir_worker) if t.endswith('.csv')]
-                    if len(tables) >= len(items):
-                        break
-                    logger.info('Waiting for all tables to be compiled')
-                    time.sleep(5)
+            # Sentinel: every HPC job writes a done-marker after its work completes.
+            # Any job that detects all markers present triggers compilation (index-agnostic).
+            sentinel_base = os.path.join(save_dir_worker, '.done')
+            sentinel_path = f'{sentinel_base}.{cfg.dir_idx}'
+            marker_lock = f'{sentinel_base}.lock'
+            if not os.path.exists(sentinel_path):
+                with open(sentinel_path, 'w') as f:
+                    f.write(time.strftime('%Y-%m-%dT%H:%M:%S'))
+                logger.info(f'HPC sentinel {cfg.dir_idx} written')
 
-                logger.info('All tables present, compiling...')
-                frames = []
-                for table in tables:
-                    logger.info(f'Compiling {table}')
-                    try:
-                        frames.append(pd.read_csv(os.path.join(save_dir_worker, table)))
-                    except pd.errors.EmptyDataError:
-                        logger.error(f'{table} is empty, skipping')
-                        continue
-                    except Exception as e:
-                        logger.error(f'Error compiling {table}: {e}')
-                        break
-                combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            all_markers = all(
+                os.path.exists(f'{sentinel_base}.{i}') for i in range(len(items))
+            )
+            max_wait = len(items) * 60
+            waited = 0
 
-                final_dir = os.path.dirname(save_dir_worker.rstrip('/'))
-                combined.to_csv(os.path.join(final_dir, 'Data_table_timing.csv'), index=False)
-                logger.info(f'Compiled results saved to {final_dir}')
+            while not all_markers and waited < max_wait:
+                logger.info(
+                    f'Waiting for HPC workers ({waited}s of {max_wait}s max)')
+                time.sleep(10)
+                waited += 10
+                all_markers = all(
+                    os.path.exists(f'{sentinel_base}.{i}') for i in range(len(items))
+                )
+
+            if not all_markers:
+                logger.error(
+                    f'HPC compile timeout after {max_wait}s -- not all workers '
+                    f'completed. Skipping compile for dir_idx={cfg.dir_idx}')
+            else:
+                # File-lock so only one job runs the compile step
                 try:
-                    shutil.rmtree(save_dir_worker)
-                    logger.info(f'Deleted temporary directory {save_dir_worker}')
-                except Exception as e:
-                    logger.error(f'Error deleting {save_dir_worker}: {e}')
+                    lock_fd = open(marker_lock, 'w')
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                except Exception:
+                    logger.error(f'Failed to acquire compile lock: {marker_lock}')
+                else:
+                    try:
+                        tables = [
+                            t for t in os.listdir(save_dir_worker)
+                            if t.endswith('.csv')
+                        ]
+                        logger.info(f'All workers done, compiling {len(tables)} tables')
+                        frames = []
+                        for table in tables:
+                            logger.info(f'Compiling {table}')
+                            try:
+                                frames.append(
+                                    pd.read_csv(os.path.join(save_dir_worker, table))
+                                )
+                            except pd.errors.EmptyDataError:
+                                logger.error(f'{table} is empty, skipping')
+                                continue
+                            except Exception as e:
+                                logger.error(f'Error compiling {table}: {e}')
+                                break
+                        combined = (
+                            pd.concat(frames, ignore_index=True)
+                            if frames
+                            else pd.DataFrame()
+                        )
+
+                        final_dir = os.path.dirname(save_dir_worker.rstrip('/'))
+                        combined.to_csv(
+                            os.path.join(final_dir, 'Data_table_timing.csv'),
+                            index=False,
+                        )
+                        logger.info(f'Compiled results saved to {final_dir}')
+                        try:
+                            shutil.rmtree(save_dir_worker)
+                            logger.info(f'Deleted temporary directory {save_dir_worker}')
+                        except Exception as e:
+                            logger.error(f'Error deleting {save_dir_worker}: {e}')
+                    finally:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                        lock_fd.close()
 
     finally:
         if cfg.profile:
