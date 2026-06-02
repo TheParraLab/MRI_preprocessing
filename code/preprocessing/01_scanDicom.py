@@ -206,11 +206,15 @@ def _has_dcm_magic(path: str) -> bool:
 # Pipeline functions
 # ---------------------------------------------------------------------------
 
-def _extractDicom_impl(f: str, logger: logging.Logger) -> Optional[Dict[str, Any]]:
+def _extractDicom_impl(f: str, logger: logging.Logger, slice_counts: Dict[str, int] = None) -> Optional[Dict[str, Any]]:
     """Extract DICOM information from a specific file path."""
     try:
         logger.debug(f'Extracting information for file: {f}')
-        extract = DICOMextract(f)
+        directory = os.path.dirname(f)
+        num_slices = None
+        if slice_counts is not None:
+            num_slices = slice_counts.get(directory)
+        extract = DICOMextract(f, num_slices=num_slices)
 
         result = {
             'PATH': f,
@@ -283,14 +287,22 @@ def _find_all_dicom_dirs_impl(cfg: ScanConfig, logger: logging.Logger, directory
 
 
 def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[int],
-                       logger: logging.Logger) -> List[str]:
-    """Worker for findDicom — called per directory, accepts only plain args."""
+                       logger: logging.Logger) -> tuple:
+    """Worker for findDicom — called per directory, accepts only plain args.
+
+    Returns:
+        (dicom_files, slice_counts)
+    """
     dicom_files = []
+    slice_counts = {}
 
     for root, dirs, files in os.walk(directory):
         dcm_candidates = [f for f in files if f.lower().endswith('.dcm')]
         if not dcm_candidates:
             continue
+
+        # Pre-compute the number of .dcm files in this directory once
+        slice_counts[root] = len(dcm_candidates)
 
         # Decide whether to sample
         if sample_pct and sample_pct > 0 and len(dcm_candidates) > 1:
@@ -365,7 +377,7 @@ def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[
 
         logger.debug(f'{root} contains series {sorted(found_series.keys())} | {len(found_series)} series found')
 
-    return dicom_files
+    return [dicom_files, slice_counts]
 
 
 # ---------------------------------------------------------------------------
@@ -435,16 +447,31 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
             dicom_files = None
 
     if dicom_files is None:
-        dicom_files = run_function(
+        worker_results = run_function(
             logger, _find_dicom_worker, dicom_dirs,
             Parallel=cfg.parallel, P_type='thread',
             sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed, logger=logger,
         )
-        dicom_files = [f for sublist in dicom_files for f in sublist]
+        dicom_files = [f for files, _ in worker_results for f in files]
+        slice_counts = {}
+        for _, counts in worker_results:
+            slice_counts.update(counts)
         try:
             save_checkpoint(cfg, logger, 'dicom_files', dicom_files)
         except Exception:
             pass
+        try:
+            save_checkpoint(cfg, logger, 'slice_counts', slice_counts)
+        except Exception:
+            pass
+    else:
+        # Restore slice_counts when resuming from checkpoint
+        try:
+            slice_counts = load_checkpoint(cfg, logger, 'slice_counts')
+        except Exception:
+            slice_counts = {}
+        if slice_counts is None:
+            slice_counts = {}
     logger.info(f'Found {len(dicom_files)} dicom files in the input directory')
 
     # Extract the dicom information
@@ -459,7 +486,7 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
             info_list = None
 
     if info_list is None:
-        extract_partial = partial(_extractDicom_impl, logger=logger)
+        extract_partial = partial(_extractDicom_impl, logger=logger, slice_counts=slice_counts)
         info_list = run_function(
             logger, extract_partial, dicom_files,
             Parallel=cfg.parallel, P_type='thread',

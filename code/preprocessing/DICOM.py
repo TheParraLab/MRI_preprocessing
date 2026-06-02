@@ -14,13 +14,16 @@ class DICOMextract:
     """
     UNKNOWN = 'Unknown'
 
-    def __init__(self, file_path: str, debug: int = 0):
+    def __init__(self, file_path: str, debug: int = 0, num_slices: int = None):
         """
         Initialize the extractor with a DICOM file path.
 
         Args:
             file_path (str): The path to the DICOM file.
             debug (int): Debug level for logging.
+            num_slices (int, optional): Pre-computed number of .dcm files in the
+                directory.  If provided, NumSlices() returns this value directly,
+                avoiding an expensive glob.glob() call for every file.
 
         TODO: Consider lazy loading or selective tag reading if parsing thousands
               of massive files. `stop_before_pixels=True` helps, but further pydicom
@@ -29,6 +32,7 @@ class DICOMextract:
         self.debug = debug
         self.metadata = pyd.dcmread(file_path, stop_before_pixels=True)
         self.metadata.filepath = file_path
+        self._num_slices = num_slices
     
     def log_error(self, message, exception=None):
         if self.debug > 1 and exception:
@@ -287,12 +291,9 @@ class DICOMextract:
 
         Returns:
             Union[int, str]: Number of slices or UNKNOWN.
-
-        TODO: Performance bottleneck. `glob.glob` on the directory for every single
-              file processing can drastically slow down extraction, particularly on NFS.
-              Consider passing the slice count directly if it is already known or
-              caching directory sizes.
         """
+        if self._num_slices is not None:
+            return self._num_slices
         try:
             files = glob.glob('/'.join(self.metadata.filepath.split('/')[:-1])+'/*.dcm')
             n_slices = len(files)
