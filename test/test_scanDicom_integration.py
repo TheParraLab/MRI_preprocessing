@@ -51,7 +51,7 @@ def test_end_to_end_small(tmp_path, monkeypatch):
     dicom_dirs = scan._find_all_dicom_dirs_impl(cfg, logger, str(root))
     assert dicom_dirs, "Should find exactly one MR directory"
 
-    files = scan._find_dicom_worker(dicom_dirs[0], sample_pct=0.0, sample_seed=None, logger=logger)
+    files, _ = scan._find_dicom_worker(dicom_dirs[0], sample_pct=0.0, sample_seed=None, logger=logger)
     assert files, "Should return at least one .dcm file"
 
     info = [scan._extractDicom_impl(fp, logger) for fp in files]

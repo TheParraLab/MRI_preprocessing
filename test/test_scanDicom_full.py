@@ -232,8 +232,8 @@ def test_A4_missing_series_number_no_crash(tmp_path):
     d.mkdir()
     make_realistic_mr_dcm(str(d / "ns.dcm"), modality='MR', series_number=1)
     logger = _scan_logger()
-    result = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None, logger=logger)
-    assert isinstance(result, list)
+    found_files, _ = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None, logger=logger)
+    assert isinstance(found_files, list)
 
 
 # A5 — Duplicate series returns 1 representative
@@ -243,8 +243,8 @@ def test_A5_duplicate_series_returns_one(tmp_path):
     for i in range(5):
         make_minimal_dcm(str(root / f"dup_{i}.dcm"), modality='MR', series_number=42)
     logger = _scan_logger()
-    found = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None, logger=logger)
-    assert len(found) == 1
+    found_files, _ = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None, logger=logger)
+    assert len(found_files) == 1
 
 
 # A6 — Corrupt files don't crash
@@ -256,9 +256,9 @@ def test_A6_corrupt_files(tmp_path):
     (d / "bad2.dcm").write_bytes(b'\xff' * 512)
     (d / "bad3.dcm").write_bytes(b'\0' * 100)
     logger = _scan_logger()
-    found = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None, logger=logger)
-    assert len(found) == 1
-    assert "good.dcm" in found[0]
+    found_files, _ = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None, logger=logger)
+    assert len(found_files) == 1
+    assert "good.dcm" in found_files[0]
 
 
 # A7 — No .dcm extension files ignored
