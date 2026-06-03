@@ -250,7 +250,7 @@ def _extractDicom_impl(f: str, logger: logging.Logger, slice_counts: Dict[str, i
 
 
 def _find_all_dicom_dirs_impl(cfg: ScanConfig, logger: logging.Logger, directory: str,
-                               n_test: Optional[int] = None) -> List[str]:
+                                n_test: Optional[int] = None) -> List[str]:
     """Find all directories containing MRI DICOM files."""
     dicom_dirs = []
     n_found = 0
@@ -284,6 +284,144 @@ def _find_all_dicom_dirs_impl(cfg: ScanConfig, logger: logging.Logger, directory
     if n_test is not None:
         return dicom_dirs[:n_test]
     return dicom_dirs
+
+
+def _find_and_select_impl(directory: str,
+                          n_test: Optional[int],
+                          sample_pct: float,
+                          sample_seed: Optional[int],
+                          logger: logging.Logger
+                          ) -> tuple:
+    """Single-pass directory discovery + representative selection.
+
+    Walks the directory tree once. Each .dcm file that is read is checked for
+    MR modality (directory confirmation) and used as a series representative
+    in the same call, halving the number of ``pyd.dcmread`` invocations on
+    directories that contain both MR slices and representative files.
+
+    Returns:
+        (mr_dirs, dicom_files, slice_counts)
+    """
+    mr_dirs = []
+    dicom_files = []
+    slice_counts = {}
+    n_found = 0
+
+    for root, dirs, files in os.walk(directory, followlinks=False):
+        dcm_candidates = [f for f in files if f.lower().endswith('.dcm')]
+        if not dcm_candidates:
+            continue
+
+        # Record slice count for every directory with .dcm files
+        slice_counts[root] = len(dcm_candidates)
+
+        # ------ Decide whether to sample ----------------------------------
+        if sample_pct and sample_pct > 0 and len(dcm_candidates) > 1:
+            rng = random.Random(sample_seed) if sample_seed is not None else random
+            k = max(1, int(len(dcm_candidates) * (sample_pct / 100.0)))
+            if k >= len(dcm_candidates):
+                scan_list = dcm_candidates
+                fallback_allowed = False
+            else:
+                scan_list = rng.sample(dcm_candidates, k)
+                fallback_allowed = True
+        else:
+            scan_list = dcm_candidates
+            fallback_allowed = False
+
+        # ------ Primary scan: files with DICM magic bytes ------------------
+        is_mr = False
+        found_series = {}
+
+        likely = [fn for fn in scan_list if _has_dcm_magic(os.path.join(root, fn))]
+        fallback_cands = [fn for fn in scan_list if fn not in likely]
+
+        for fname in likely:
+            path = os.path.join(root, fname)
+            try:
+                data = pyd.dcmread(path, stop_before_pixels=True, force=False)
+            except Exception:
+                continue
+            if not is_mr and hasattr(data, 'Modality') and data.Modality == 'MR':
+                is_mr = True
+            series = getattr(data, 'SeriesNumber', None)
+            if series is not None and series not in found_series:
+                found_series[series] = path
+
+        # ------ Fallback: non-magic files ---------------------------------
+        if (not is_mr or not found_series) and fallback_cands:
+            for fname in fallback_cands:
+                path = os.path.join(root, fname)
+                try:
+                    data = pyd.dcmread(path, stop_before_pixels=True, force=False)
+                except Exception:
+                    continue
+                if not is_mr and hasattr(data, 'Modality') and data.Modality == 'MR':
+                    is_mr = True
+                series = getattr(data, 'SeriesNumber', None)
+                if series is not None and series not in found_series:
+                    found_series[series] = path
+
+        # ------ Sampling fallback: full rescan if nothing found ------------
+        if fallback_allowed and len(found_series) == 0:
+            full_found = {}
+            full_likely = [fn for fn in dcm_candidates
+                            if _has_dcm_magic(os.path.join(root, fn))]
+            full_fallback = [fn for fn in
+                            dcm_candidates if fn not in full_likely]
+            for fname in full_likely:
+                path = os.path.join(root, fname)
+                try:
+                    data = pyd.dcmread(path, stop_before_pixels=True,
+                                      force=False)
+                except Exception:
+                    continue
+                if not is_mr and hasattr(data, 'Modality') and \
+                        data.Modality == 'MR':
+                    is_mr = True
+                series = getattr(data, 'SeriesNumber', None)
+                if series is not None and series not in full_found:
+                    full_found[series] = path
+            if not full_found:
+                for fname in full_fallback:
+                    path = os.path.join(root, fname)
+                    try:
+                        data = pyd.dcmread(path, stop_before_pixels=True,
+                                          force=False)
+                    except Exception:
+                        continue
+                    if not is_mr and hasattr(data, 'Modality') and \
+                            data.Modality == 'MR':
+                        is_mr = True
+                    series = getattr(data, 'SeriesNumber', None)
+                    if series is not None and series not in full_found:
+                        full_found[series] = path
+            found_series = full_found
+
+        # ------ Record MR directories ------------------------------------
+        if is_mr:
+            mr_dirs.append(root)
+            n_found += 1
+            for series, path in found_series.items():
+                dicom_files.append(path)
+            logger.debug(
+                f'{root} contains series '
+                f'{sorted(found_series.keys())} | '
+                f'{len(found_series)} series found'
+            )
+            if n_test is not None and n_found >= n_test:
+                break
+
+    if not mr_dirs:
+        logger.warning(
+            f'No directories containing DICOM files found in {directory}'
+        )
+    else:
+        logger.info(
+            f'Found {len(mr_dirs)} directories containing DICOM files'
+        )
+
+    return mr_dirs, dicom_files, slice_counts
 
 
 def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[int],
@@ -413,40 +551,48 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
         logger.error(f'To re-run this step, delete the existing {out_name} file')
         return
 
-    # Finding main directory and subdirectories
+    # --- Combined scan & representative selection (single walk) ------
     logger.info('Finding all directories containing DICOM files')
     test_mode = cfg.test is not None
     n_test_val = cfg.n_test if test_mode else None
     if test_mode:
         logger.info(f'Running in test mode with a maximum of {cfg.n_test} directories')
 
-    # Try to resume finding directories from checkpoint if requested
-    dicom_dirs = None
+    # Attempt to resume from checkpoint
+    combined_result = None
     if cfg.resume:
         try:
-            dicom_dirs = load_checkpoint(cfg, logger, 'dirs')
+            combined_result = load_checkpoint(cfg, logger, 'scan_and_select')
         except Exception:
-            dicom_dirs = None
+            combined_result = None
 
-    if dicom_dirs is None:
-        dicom_dirs = _find_all_dicom_dirs_impl(cfg, logger, scan_dir, n_test=n_test_val)
+    if combined_result is None:
+        combined_result = _find_and_select_impl(
+            directory=scan_dir,
+            n_test=n_test_val,
+            sample_pct=cfg.sample_pct,
+            sample_seed=cfg.sample_seed,
+            logger=logger,
+        )
         try:
-            save_checkpoint(cfg, logger, 'dirs', dicom_dirs)
+            save_checkpoint(cfg, logger, 'scan_and_select', combined_result)
         except Exception:
             pass
 
-    # Scan the directories for dicom files
-    logger.info('Analyzing DICOM directories')
+    mr_dirs, dicom_files, slice_counts = combined_result
 
-    # Attempt to resume finding representative files from checkpoint
-    dicom_files = None
-    if cfg.resume:
-        try:
-            dicom_files = load_checkpoint(cfg, logger, 'dicom_files')
-        except Exception:
-            dicom_files = None
-
-    if dicom_files is None:
+    # Fallback to two-pass if combined pass found nothing and we haven't already
+    if dicom_files is None or not dicom_files:
+        # Try legacy checkpoint for MR dirs only
+        if cfg.resume:
+            try:
+                dicom_dirs = load_checkpoint(cfg, logger, 'dirs')
+            except Exception:
+                dicom_dirs = None
+        if dicom_dirs is None:
+            dicom_dirs = _find_all_dicom_dirs_impl(
+                cfg, logger, scan_dir, n_test=n_test_val)
+        mr_dirs = dicom_dirs
         worker_results = run_function(
             logger, _find_dicom_worker, dicom_dirs,
             Parallel=cfg.parallel, P_type='thread',
@@ -456,22 +602,11 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
         slice_counts = {}
         for _, counts in worker_results:
             slice_counts.update(counts)
-        try:
-            save_checkpoint(cfg, logger, 'dicom_files', dicom_files)
-        except Exception:
-            pass
-        try:
-            save_checkpoint(cfg, logger, 'slice_counts', slice_counts)
-        except Exception:
-            pass
-    else:
-        # Restore slice_counts when resuming from checkpoint
-        try:
-            slice_counts = load_checkpoint(cfg, logger, 'slice_counts')
-        except Exception:
-            slice_counts = {}
-        if slice_counts is None:
-            slice_counts = {}
+
+    if not slice_counts:
+        slice_counts = {}
+
+    logger.info('Analyzing DICOM directories')
     logger.info(f'Found {len(dicom_files)} dicom files in the input directory')
 
     # Extract the dicom information
@@ -508,7 +643,7 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
         logger.error(f'Failed to write output CSV {out_path}: {e}')
     logger.info(f'DICOM information extraction completed and saved to {out_name}')
     # Removing checkpoint files after successful completion
-    clear_checkpoint_files = ['dirs', 'dicom_files', 'info']
+    clear_checkpoint_files = ['dirs', 'dicom_files', 'info', 'scan_and_select']
     for chk in clear_checkpoint_files:
         chk_path = os.path.join(_ensure_checkpoint_dir(cfg), f'{chk}.pkl')
         if os.path.exists(chk_path):
