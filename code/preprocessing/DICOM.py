@@ -1,5 +1,6 @@
 import numpy as np
 import pydicom as pyd
+from pydicom import tag
 import glob
 import logging
 from typing import Union
@@ -7,6 +8,32 @@ import os
 import pandas as pd
 import re
 import shutil
+
+# Tags loaded during initialization to avoid parsing megabytes of vendor private blocks.
+# Maps one-to-one to every `self.metadata.<attr>` / `getattr(self.metadata, ...)` access.
+_DCM_SPECIFIC_TAGS = (
+    tag.Tag('ImageOrientationPatient'),   # Orientation(), LR()
+    tag.Tag('PatientID'),                 # ID()
+    tag.Tag('AccessionNumber'),           # Accession()
+    tag.Tag('StudyDate'),                 # Date()
+    tag.Tag('SeriesDescription'),         # Desc(), LR() fallback chain
+    tag.Tag('RepetitionTime'),            # Modality()
+    tag.Tag('AcquisitionTime'),           # Acq()
+    tag.Tag('BodyPartExamined'),          # Part()
+    tag.Tag('SeriesTime'),                # Srs()
+    tag.Tag('ContentTime'),               # Con()
+    tag.Tag('StudyTime'),                 # Stu()
+    tag.Tag('TriggerTime'),               # Tri()
+    tag.Tag('InjectionTime'),             # Inj()
+    tag.Tag('Laterality'),                # LR() primary path
+    tag.Tag('SliceThickness'),            # Thickness()
+    tag.Tag('DiffusionBValue'),           # DWI()
+    tag.Tag('ImageType'),                 # Type()
+    tag.Tag('SeriesNumber'),              # Series()
+    tag.Tag('PatientName'),               # Name()
+    tag.Tag('PatientBirthDate'),          # DOB()
+    ('0019', '105A'),                    # ScanDur() private acquisition duration
+)
 
 class DICOMextract:
     """
@@ -30,7 +57,7 @@ class DICOMextract:
               optimizations exist (e.g., `specific_tags`).
         """
         self.debug = debug
-        self.metadata = pyd.dcmread(file_path, stop_before_pixels=True)
+        self.metadata = pyd.dcmread(file_path, stop_before_pixels=True, specific_tags=_DCM_SPECIFIC_TAGS)
         self.metadata.filepath = file_path
         self._num_slices = num_slices
     
@@ -244,7 +271,7 @@ class DICOMextract:
             files = sorted(glob.glob(glob_pattern))
             if self.debug > 0:
                 logging.debug(f'[DIAGNOSTIC glob] found {len(files)} files')
-            rcsCoordX2 = pyd.dcmread(files[-1], stop_before_pixels=True).ImageOrientationPatient[0]
+            rcsCoordX2 = pyd.dcmread(files[-1], stop_before_pixels=True, specific_tags=(tag.Tag('ImageOrientationPatient'),)).ImageOrientationPatient[0]
             if np.mean([rcsCoordX1, rcsCoordX2]) > 0:
                 return 'left'
             elif np.mean([rcsCoordX1, rcsCoordX2]) < 0:
