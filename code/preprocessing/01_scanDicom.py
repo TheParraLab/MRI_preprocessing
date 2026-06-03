@@ -261,8 +261,6 @@ def _find_all_dicom_dirs_impl(cfg: ScanConfig, logger: logging.Logger, directory
         candidates = [fn for fn in files if fn.lower().endswith('.dcm')]
         for fn in candidates:
             file_path = os.path.join(root, fn)
-            if not _has_dcm_magic(file_path):
-                continue
             try:
                 dcm = pyd.dcmread(file_path, stop_before_pixels=True, force=False)
                 if hasattr(dcm, 'Modality') and dcm.Modality == 'MR':
@@ -331,14 +329,11 @@ def _find_and_select_impl(directory: str,
             scan_list = dcm_candidates
             fallback_allowed = False
 
-        # ------ Primary scan: files with DICM magic bytes ------------------
+        # ------ Primary scan: rely on pyd.dcmread() to reject non-DICOM --
         is_mr = False
         found_series = {}
 
-        likely = [fn for fn in scan_list if _has_dcm_magic(os.path.join(root, fn))]
-        fallback_cands = [fn for fn in scan_list if fn not in likely]
-
-        for fname in likely:
+        for fname in scan_list:
             path = os.path.join(root, fname)
             try:
                 data = pyd.dcmread(path, stop_before_pixels=True, force=False)
@@ -350,9 +345,10 @@ def _find_and_select_impl(directory: str,
             if series is not None and series not in found_series:
                 found_series[series] = path
 
-        # ------ Fallback: non-magic files ---------------------------------
-        if (not is_mr or not found_series) and fallback_cands:
-            for fname in fallback_cands:
+        # ------ Sampling fallback: full rescan if nothing found ------------
+        if fallback_allowed and len(found_series) == 0:
+            full_found = {}
+            for fname in dcm_candidates:
                 path = os.path.join(root, fname)
                 try:
                     data = pyd.dcmread(path, stop_before_pixels=True, force=False)
@@ -361,43 +357,8 @@ def _find_and_select_impl(directory: str,
                 if not is_mr and hasattr(data, 'Modality') and data.Modality == 'MR':
                     is_mr = True
                 series = getattr(data, 'SeriesNumber', None)
-                if series is not None and series not in found_series:
-                    found_series[series] = path
-
-        # ------ Sampling fallback: full rescan if nothing found ------------
-        if fallback_allowed and len(found_series) == 0:
-            full_found = {}
-            full_likely = [fn for fn in dcm_candidates
-                            if _has_dcm_magic(os.path.join(root, fn))]
-            full_fallback = [fn for fn in
-                            dcm_candidates if fn not in full_likely]
-            for fname in full_likely:
-                path = os.path.join(root, fname)
-                try:
-                    data = pyd.dcmread(path, stop_before_pixels=True,
-                                      force=False)
-                except Exception:
-                    continue
-                if not is_mr and hasattr(data, 'Modality') and \
-                        data.Modality == 'MR':
-                    is_mr = True
-                series = getattr(data, 'SeriesNumber', None)
                 if series is not None and series not in full_found:
                     full_found[series] = path
-            if not full_found:
-                for fname in full_fallback:
-                    path = os.path.join(root, fname)
-                    try:
-                        data = pyd.dcmread(path, stop_before_pixels=True,
-                                          force=False)
-                    except Exception:
-                        continue
-                    if not is_mr and hasattr(data, 'Modality') and \
-                            data.Modality == 'MR':
-                        is_mr = True
-                    series = getattr(data, 'SeriesNumber', None)
-                    if series is not None and series not in full_found:
-                        full_found[series] = path
             found_series = full_found
 
         # ------ Record MR directories ------------------------------------
@@ -460,11 +421,8 @@ def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[
 
         found_series = {}
 
-        # Pre-filter: likely vs fallback via magic bytes
-        likely = [fn for fn in sample_list if _has_dcm_magic(os.path.join(root, fn))]
-        fallback_cands = [fn for fn in sample_list if fn not in likely]
-
-        for fname in likely:
+        # Scan via pyd.dcmread() — exceptions handle non-DICOM files
+        for fname in sample_list:
             path = os.path.join(root, fname)
             try:
                 data = pyd.dcmread(path, stop_before_pixels=True, force=False)
@@ -474,24 +432,10 @@ def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[
             if series is not None and series not in found_series:
                 found_series[series] = path
 
-        # Fallback for files without DICM magic
-        if not found_series and fallback_cands:
-            for fname in fallback_cands:
-                path = os.path.join(root, fname)
-                try:
-                    data = pyd.dcmread(path, stop_before_pixels=True, force=False)
-                except Exception:
-                    continue
-                series = getattr(data, 'SeriesNumber', None)
-                if series is not None and series not in found_series:
-                    found_series[series] = path
-
         # Sampling fallback: rescan everything if nothing found
         if fallback_allowed and len(found_series) == 0:
             full_found = {}
-            full_likely = [fn for fn in dcm_candidates if _has_dcm_magic(os.path.join(root, fn))]
-            full_fallback = [fn for fn in dcm_candidates if fn not in full_likely]
-            for fname in full_likely:
+            for fname in dcm_candidates:
                 path = os.path.join(root, fname)
                 try:
                     data = pyd.dcmread(path, stop_before_pixels=True, force=False)
@@ -500,16 +444,6 @@ def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[
                 series = getattr(data, 'SeriesNumber', None)
                 if series is not None and series not in full_found:
                     full_found[series] = path
-            if not full_found:
-                for fname in full_fallback:
-                    path = os.path.join(root, fname)
-                    try:
-                        data = pyd.dcmread(path, stop_before_pixels=True, force=False)
-                    except Exception:
-                        continue
-                    series = getattr(data, 'SeriesNumber', None)
-                    if series is not None and series not in full_found:
-                        full_found[series] = path
             found_series = full_found
 
         for series, path in found_series.items():
