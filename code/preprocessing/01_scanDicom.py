@@ -626,7 +626,7 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
         extract_partial = partial(_extractDicom_impl, logger=logger, slice_counts=slice_counts)
         info_list = run_function(
             logger, extract_partial, dicom_files,
-            Parallel=cfg.parallel, P_type='thread',
+            Parallel=cfg.parallel, P_type='process', N_CPUS=cfg.n_cpus,
         )
         try:
             save_checkpoint(cfg, logger, 'info', info_list)
