@@ -68,6 +68,7 @@ class ScanConfig:
     test: Optional[int] = None
     n_test: int = 100
     parallel: bool = False
+    n_cpus: int = 0
     profile: bool = False
     sample_pct: float = 0.0
     sample_seed: Optional[int] = None
@@ -113,6 +114,7 @@ def build_config() -> ScanConfig:
         test=args.test,
         n_test=args.test if args.test is not None else 100,
         parallel=args.multi is not None,
+        n_cpus=args.multi if args.multi is not None else cpu_count() - 1,
         profile=args.profile,
         sample_pct=args.sample_pct,
         sample_seed=args.sample_seed,
@@ -595,7 +597,7 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
         mr_dirs = dicom_dirs
         worker_results = run_function(
             logger, _find_dicom_worker, dicom_dirs,
-            Parallel=cfg.parallel, P_type='thread',
+            Parallel=cfg.parallel, P_type='process', N_CPUS=cfg.n_cpus,
             sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed, logger=logger,
         )
         dicom_files = [f for files, _ in worker_results for f in files]
