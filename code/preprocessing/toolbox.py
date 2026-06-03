@@ -21,9 +21,7 @@ def _stop_all_listeners() -> None:
     """Flush + stop every listener started by get_logger."""
     for lst in list(_listener_registry.values()):
         try:
-            # Drain pending records then unblock the consumer thread.
-            lst.flush()
-            lst.enqueue_sentinel()
+            lst.stop()               # drains queue then exits consumer thread
         except (RuntimeError, OSError):
             pass                     # interpreter tearing down already
 
@@ -192,6 +190,8 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
         pass                                    # already handled
     elif not getattr(listener, 'daemon_threads', True):  # type: ignore[attr-defined]
         _listener_registry[name] = listener    # register for atexit flush + stop
+
+    listener.start()                           # begin draining the queue immediately
 
     logger._log_level = logging.DEBUG
     logger._file_path = os.path.abspath(file_path) if file_path else ''
