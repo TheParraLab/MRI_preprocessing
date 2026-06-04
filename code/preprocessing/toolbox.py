@@ -77,6 +77,9 @@ def _init_child_logger(
     fh.setFormatter(fmt)
     lgr.addHandler(fh)
 
+    # Prevent every log line from double-writing via propagation to root handler
+    lgr.propagate = False
+
     # Give the root logger a handler so bare logging.error/warning calls from
     # deep inside worker functions or library code also reach the log file.
     root = logging.getLogger()
@@ -182,8 +185,10 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
 
     fmt = logging.Formatter(formatter_str)
 
-    # Consumer-side handlers written to sequentially ----------
-    fh_file = FileHandlerWithLock(file_path, mode='a')
+    # Use plain FileHandler for the parent QueueListener consumer path.
+    # The listener drains records from a single thread, so there's only one
+    # concurrent writer and we don't need per-emit flock overhead.
+    fh_file = logging.FileHandler(file_path, mode='a')
     fh_file.setLevel(logging.DEBUG)
     fh_file.setFormatter(fmt)
 
@@ -203,6 +208,9 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     qh = QueueHandler(log_queue)
     logger.addHandler(qh)
 
+    # Prevent every log line from double-writing via propagation to root handler
+    logger.propagate = False
+
     listener = QueueListener(
         log_queue, fh_file, ch_stream,
         respect_handler_level=True,
@@ -214,10 +222,9 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     except AttributeError:
         pass
 
-    if hasattr(listener, '_stopper'):              # Python ≥3.12 renamed the internal attr
-        pass                                    # already handled
-    elif not getattr(listener, 'daemon_threads', True):  # type: ignore[attr-defined]
-        _listener_registry[name] = listener    # register for atexit flush + stop
+    _listener_registry[name] = listener   # unconditionally register for atexit flush
+
+    # Unconditional registration ensures pending queue records are never lost
 
     listener.start()                           # begin draining the queue immediately
 
@@ -339,10 +346,12 @@ def run_function(
 
         # ───────── hybrid: processes chunk + threads reuse I/O per-chunk ────
         elif Parallel and P_type == 'hybrid':
-            max_workers = min(32, 2 * N_CPUS)
-            threads_per_worker = (N_THREADS if N_THREADS > 0 else 2 * N_CPUS)
+            # Cap total concurrency to avoid filesystem thrashing on I/O-bound DICOM scans.
+            max_workers = min(16, N_CPUS)
+            effective_threads = N_THREADS if N_THREADS > 0 else max(2 * max_workers, cpu_count())
+            threads_per_worker = max(2, effective_threads // max(max_workers, 1))
 
-            LOGGER.debug(f'Using {P_type}: {max_workers} process workers, {threads_per_worker} threads each')
+            LOGGER.debug(f'Using {P_type}: ~{max_workers} process workers, ~{threads_per_worker} threads each')
 
             init_args = (LOGGER.name, LOGGER._log_level,
                          LOGGER._file_path, LOGGER._formatter_str)
