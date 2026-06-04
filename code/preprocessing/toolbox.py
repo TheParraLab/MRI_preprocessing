@@ -206,7 +206,7 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
 def run_function(
     LOGGER: Any,                          # can be a Logger or _LoggerProxy
     target: Callable[..., Any], items: List[Any],
-    Parallel: bool = True, P_type: str = 'thread', N_CPUS: int = 0,
+    Parallel: bool = True, P_type: str = 'thread', N_CPUS: int = 0, N_THREADS: int = 0,
     stop_flag: Optional[object] = None, *args: Any, **kwargs: Any,
 ) -> List[Any]:
     """Run a function over *items* in parallel or sequentially.
@@ -219,8 +219,12 @@ def run_function(
             (we must NOT send LOGGER across a pickle boundary).
         items (List[Any]): Items to feed into *target* one by one.
         Parallel (bool): Whether to dispatch in parallel at all (False → serial loop).
-        P_type (str): ``'thread'`` or ``'process'``.  Anything else falls back to serial.
+        P_type (str): ``'thread'``, ``'process'`` or ``'hybrid'``.  Anything else falls back to serial.
+            Hybrid mode spawns ProcessPoolExecutor workers -- each managing its own 
+            ThreadPoolExecutor of size *N_THREADS* for concurrent I/O within process-scoped network address space isolation.
         N_CPUS (int): Suggested worker count; 0 means "best auto-guess".
+        N_THREADS (int): Thread pool size per-hybrid-worker or max workers when P_type == 'thread';
+            0 uses default (2 * N_CPUS).
 
     Returns:
         List[Any]: Results in the same order as *items*.  If every result is a tuple,
@@ -304,6 +308,81 @@ def run_function(
                         ordered[idx] = None
 
                 results = list(ordered)
+
+        # ───────── hybrid: processes chunk + threads reuse I/O per-chunk ────
+        elif Parallel and P_type == 'hybrid':
+            max_workers = min(32, 2 * N_CPUS)
+            threads_per_worker = (N_THREADS if N_THREADS > 0 else 2 * N_CPUS)
+
+            LOGGER.debug(f'Using {P_type}: {max_workers} process workers, {threads_per_worker} threads each')
+
+            init_args = (LOGGER.name, LOGGER._log_level,
+                         LOGGER._file_path, LOGGER._formatter_str)
+
+            def _chunk_target(global_start: int, chunk_items: List[Any],
+                              target_fn: Callable, target_args: tuple,
+                              target_kwargs: dict, threads: int):
+                """Work inside one ProcessPoolExecutor child."""
+                ordered: List[Optional[Any]] = [None] * len(chunk_items)
+
+                with ThreadPoolExecutor(max_workers=threads) as inner_pool:
+                    fut_map = {}
+                    for j, item in enumerate(chunk_items):
+                        fut = inner_pool.submit(_process_worker, target_fn,
+                                                item, *target_args, **target_kwargs)
+                        fut_map[fut] = j
+
+                    for fut in as_completed(fut_map):
+                        idx_in_chunk = fut_map.pop(fut)
+                        try:
+                            result = fut.result()
+                            ordered[idx_in_chunk] = result
+                        except Exception as e:
+                            child_lgr = logging.getLogger('hybrid_' + (getattr(target_fn, '__name__', 'unknown')))
+                            child_lgr.error(
+                                f'Hybrid thread error (offset {global_start+idx_in_chunk}): {e}', exc_info=True)
+                            ordered[idx_in_chunk] = None
+
+                return global_start, ordered
+
+            # Create evenly-sized chunks and track global indices in parent.
+            n_workers = min(max_workers, len(items)) if items else 0
+            workers: List[Any] = []
+            for i in range(n_workers):
+                start = (i * len(items)) // n_workers
+                end = ((i + 1) * len(items)) // n_workers if i < n_workers - 1 else len(items)
+                chunk = items[start:end]
+                if chunk:
+                    workers.append((start, chunk))
+
+            results: List[Optional[Any]] = [None] * len(items)
+
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_init_child_logger,
+                initargs=init_args,
+            ) as pexecutor:
+                future_to_chunk = {
+                    pexecutor.submit(_chunk_target, start, chunk, target, args, kwargs,
+                                     threads_per_worker): (start, end)
+                    for start, chunk in workers
+                }
+
+                for fut in as_completed(future_to_chunk):
+                    idx_range = future_to_chunk.pop(fut)
+                    try:
+                        global_start, ordered_list = fut.result()
+                        if not isinstance(ordered_list, list):
+                            ordered_list = list(ordered_list)
+                        for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
+                                          ordered_list):
+                            if k < len(results):
+                                results[k] = val
+                    except KeyboardInterrupt:
+                        pexecutor.shutdown(wait=False, cancel_futures=True)
+                        raise
+
+                results = list(results)
 
         # ───────── fallback serial ─────────────
         else:
