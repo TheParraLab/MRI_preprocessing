@@ -24,7 +24,7 @@ _DCM_SPECIFIC_TAGS = (
     tag.Tag('ContentTime'),               # Con()
     tag.Tag('StudyTime'),                 # Stu()
     tag.Tag('TriggerTime'),               # Tri()
-    tag.Tag('InjectionTime'),             # Inj()
+    tag.Tag(0x0018, 0x2516),               # Inj() — DICOM tag (0018,2516) for InjectionTime; use hex to avoid keyword-dict failures in newer pydicom
     tag.Tag('Laterality'),                # LR() primary path
     tag.Tag('SliceThickness'),            # Thickness()
     tag.Tag('DiffusionBValue'),           # DWI()
