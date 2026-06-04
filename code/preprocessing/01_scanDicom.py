@@ -531,7 +531,7 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
         mr_dirs = dicom_dirs
         worker_results = run_function(
             logger, _find_dicom_worker, dicom_dirs,
-            Parallel=cfg.parallel, P_type='process', N_CPUS=cfg.n_cpus,
+            Parallel=cfg.parallel, P_type='hybrid', N_CPUS=cfg.n_cpus,
             sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed, logger=logger,
         )
         dicom_files = [f for files, _ in worker_results for f in files]
@@ -560,7 +560,7 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
         extract_partial = partial(_extractDicom_impl, logger=logger, slice_counts=slice_counts)
         info_list = run_function(
             logger, extract_partial, dicom_files,
-            Parallel=cfg.parallel, P_type='process', N_CPUS=cfg.n_cpus,
+            Parallel=cfg.parallel, P_type='hybrid', N_CPUS=cfg.n_cpus,
         )
         try:
             save_checkpoint(cfg, logger, 'info', info_list)
