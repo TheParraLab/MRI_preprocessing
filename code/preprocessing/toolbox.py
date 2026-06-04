@@ -67,12 +67,24 @@ def _init_child_logger(
     lgr.handlers.clear()
     lgr.setLevel(logger_level)
     lgr._log_level = logger_level          # so run_function can read it back.
+    lgr._formatter_str = formatter_str
+    file_path_abs = os.path.abspath(file_path) if file_path else ''
+    lgr._file_path = file_path_abs
 
     fmt = logging.Formatter(formatter_str)
     fh = FileHandlerWithLock(file_path, mode='a')
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     lgr.addHandler(fh)
+
+    # Give the root logger a handler so bare logging.error/warning calls from
+    # deep inside worker functions or library code also reach the log file.
+    root = logging.getLogger()
+    if not root.handlers:
+        root_fh = FileHandlerWithLock(file_path, mode='a')
+        root_fh.setLevel(logger_level)
+        root_fh.setFormatter(fmt)
+        root.addHandler(root_fh)
 
 
 # ---- Process worker wrapper ------------------------------------------------
@@ -156,6 +168,15 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
 
     # --- underlying Logger (managed by Python's logging system) ---------------
     logger = logging.getLogger(name)
+
+    # Stop any existing listener for this name to prevent thread + handler leak.
+    old_listener = _listener_registry.pop(name, None)
+    if old_listener is not None:
+        try:
+            old_listener.stop()
+        except (RuntimeError, OSError):
+            pass
+
     logger.handlers.clear()
     logger.setLevel(log_level)
 
@@ -169,6 +190,13 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     ch_stream = logging.StreamHandler()
     ch_stream.setLevel(logging.INFO)
     ch_stream.setFormatter(fmt)
+
+    # Ensure the root logger also has a handler so bare `logging.error()` calls work.
+    if not logging.getLogger().handlers:
+        root_fh = FileHandlerWithLock(file_path, mode='a')
+        root_fh.setLevel(log_level)
+        root_fh.setFormatter(fmt)
+        logging.getLogger().addHandler(root_fh)
 
     # Producer-side QueueHandler (cheap put only) -----------------
     log_queue: 'queue.Queue[logging.LogRecord]' = queue.Queue(-1)
@@ -338,9 +366,9 @@ def run_function(
                             result = fut.result()
                             ordered[idx_in_chunk] = result
                         except Exception as e:
-                            child_lgr = logging.getLogger('hybrid_' + (getattr(target_fn, '__name__', 'unknown')))
-                            child_lgr.error(
-                                f'Hybrid thread error (offset {global_start+idx_in_chunk}): {e}', exc_info=True)
+                            root = logging.getLogger()
+                            root.error(
+                                f'Hybrid thread error (offset {global_start+idx_in_chunk} in {getattr(target_fn, "__name__", "unknown")}): {e}', exc_info=True)
                             ordered[idx_in_chunk] = None
 
                 return global_start, ordered

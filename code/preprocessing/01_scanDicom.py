@@ -442,7 +442,7 @@ def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[
     dicom_files = []
     slice_counts = {}
 
-    for root, dirs, files in os.walk(directory):
+    for root, dirs, files in os.walk(directory, followlinks=False):
         dcm_candidates = [f for f in files if f.lower().endswith('.dcm')]
         if not dcm_candidates:
             continue
