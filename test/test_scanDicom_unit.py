@@ -95,7 +95,7 @@ def test_findDicom_series(tmp_path):
     make_minimal_dcm(str(root / "b.dcm"), modality='MR', series_number=2)
     make_minimal_dcm(str(root / "c.dcm"), modality='CT', series_number=3)
     logger = _make_logger()
-    found_files, _ = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None, logger=logger)
+    found_files, _ = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None)
     assert any("a.dcm" in f or "b.dcm" in f for f in found_files)
 
 
@@ -103,7 +103,7 @@ def test_extractDicom_basic(tmp_path):
     f = tmp_path / "x.dcm"
     make_minimal_dcm(str(f), modality='MR', series_number=5, patient_id='P1')
     logger = _make_logger()
-    out = scan._extractDicom_impl(str(f), logger)
+    out = scan._extractDicom_impl(str(f))
     assert isinstance(out, dict)
     assert isinstance(out['Modality'], str)
 
@@ -125,7 +125,7 @@ def test_findDicom_handles_unreadable_and_returns_mr_only(tmp_path):
     make_minimal_dcm(str(root / "mri.dcm"), modality='MR', series_number=10)
     (root / "garbage.dcm").write_text("corrupt")
     logger = _make_logger()
-    found_files, _ = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None, logger=logger)
+    found_files, _ = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None)
     assert any("mri.dcm" in f for f in found_files)
 
 
@@ -137,6 +137,6 @@ def test_findDicom_sampling_is_deterministic_with_seed(tmp_path):
         make_minimal_dcm(str(root / f"img_{i}.dcm"), modality='MR', series_number=series)
 
     logger = _make_logger()
-    first = scan._find_dicom_worker(str(root), sample_pct=20.0, sample_seed=123, logger=logger)
-    second = scan._find_dicom_worker(str(root), sample_pct=20.0, sample_seed=123, logger=logger)
+    first = scan._find_dicom_worker(str(root), sample_pct=20.0, sample_seed=123)
+    second = scan._find_dicom_worker(str(root), sample_pct=20.0, sample_seed=123)
     assert first == second

@@ -208,8 +208,9 @@ def _has_dcm_magic(path: str) -> bool:
 # Pipeline functions
 # ---------------------------------------------------------------------------
 
-def _extractDicom_impl(f: str, logger: logging.Logger, slice_counts: Dict[str, int] = None) -> Optional[Dict[str, Any]]:
+def _extractDicom_impl(f: str, slice_counts: Dict[str, int] = None) -> Optional[Dict[str, Any]]:
     """Extract DICOM information from a specific file path."""
+    logger = logging.getLogger('01_scanDicom')
     try:
         logger.debug(f'Extracting information for file: {f}')
         directory = os.path.dirname(f)
@@ -391,29 +392,53 @@ def _scan_subdir_worker(subdir: str, sample_pct: float, sample_seed: Optional[in
     """Worker for multiprocessing directory scanning.
 
     Calls `_find_dicom_worker` on its assigned single top-level subdirectory.
-    Creates its own logger inside the child process to avoid pickle-lock deadlock.
     Returns list of (dicom_files, slice_counts).
     """
-    wlogger = logging.getLogger(__name__ + '.worker')
-    return [_find_dicom_worker(subdir, sample_pct, sample_seed, wlogger)]
+    return [_find_dicom_worker(subdir, sample_pct, sample_seed)]
 
 
-def _scan_subdir(topdir: str):
-    """Return a list of subdirectories containing .dcm files."""
-    dirs_with_dcm = []
-    for root, _, files in os.walk(topdir, followlinks=False):
-        if any(f.lower().endswith('.dcm') for f in files):
-            dirs_with_dcm.append(root)
-    return dirs_with_dcm
+def _scan_subdir(topdir: str, min_targets: int = 16):
+    """Return a list of disjoint subdirectories that cover the entire tree.
+    We gather directories using BFS until we have enough targets. If a directory contains
+    files directly, we stop expanding it to keep subtrees disjoint for the os.walk workers."""
+    dirs_to_scan = []
+    queue = [topdir]
+
+    while queue and (len(dirs_to_scan) + len(queue)) < min_targets:
+        curr = queue.pop(0)
+        try:
+            with os.scandir(curr) as it:
+                subdirs = []
+                has_files = False
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        subdirs.append(entry.path)
+                    elif entry.is_file():
+                        if entry.name.lower().endswith('.dcm'):
+                            has_files = True
+
+                if has_files:
+                    dirs_to_scan.append(curr)
+                else:
+                    queue.extend(subdirs)
+        except Exception:
+            pass
+
+    dirs_to_scan.extend(queue)
+
+    if not dirs_to_scan:
+        dirs_to_scan = [topdir]
+
+    return dirs_to_scan
 
 
-def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[int],
-                       logger: logging.Logger) -> tuple:
+def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[int]) -> tuple:
     """Worker for findDicom — called per directory, accepts only plain args.
 
     Returns:
         (dicom_files, slice_counts)
     """
+    logger = logging.getLogger('01_scanDicom')
     dicom_files = []
     slice_counts = {}
 
@@ -524,20 +549,20 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
 
     if combined_result is None:
         if cfg.parallel:
-            # Parallel scan: walk the tree once to find subdirectories with .dcm files,
-            # then dispatch multiprocessing workers across them.
-            dirs_with_dcm = _scan_subdir(scan_dir)
-            logger.info(f'Found {len(dirs_with_dcm)} directories with DICOM files to scan')
+            # Parallel scan: we parallelize the walk by getting immediate subdirectories
+            # and dispatching multiprocessing workers to walk those subtrees independently.
+            target_dirs = _scan_subdir(scan_dir, min_targets=cfg.n_cpus * 4)
+            logger.info(f'Found {len(target_dirs)} branch directories to scan in parallel')
 
-            if len(dirs_with_dcm) > 1:
+            if len(target_dirs) > 1:
                 worker_results = run_function(
-                    logger, _scan_subdir_worker, dirs_with_dcm,
+                    logger, _scan_subdir_worker, target_dirs,
                     Parallel=True, P_type='hybrid', N_CPUS=cfg.n_cpus,
                     sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed,
                 )
             else:
                 worker_results = [run_function(
-                    logger, _scan_subdir_worker, dirs_with_dcm,
+                    logger, _scan_subdir_worker, target_dirs,
                     Parallel=False, P_type='thread', N_CPUS=1,
                     sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed,
                 )]
@@ -580,7 +605,7 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
         worker_results = run_function(
             logger, _find_dicom_worker, dicom_dirs,
             Parallel=cfg.parallel, P_type='hybrid', N_CPUS=cfg.n_cpus,
-            sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed, logger=logger,
+            sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed,
         )
         dicom_files = [f for files, _ in worker_results for f in files]
         slice_counts = {}
@@ -605,7 +630,7 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
             info_list = None
 
     if info_list is None:
-        extract_partial = partial(_extractDicom_impl, logger=logger, slice_counts=slice_counts)
+        extract_partial = partial(_extractDicom_impl, slice_counts=slice_counts)
         info_list = run_function(
             logger, extract_partial, dicom_files,
             Parallel=cfg.parallel, P_type='hybrid', N_CPUS=cfg.n_cpus,
