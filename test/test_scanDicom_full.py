@@ -232,7 +232,7 @@ def test_A4_missing_series_number_no_crash(tmp_path):
     d.mkdir()
     make_realistic_mr_dcm(str(d / "ns.dcm"), modality='MR', series_number=1)
     logger = _scan_logger()
-    found_files, _ = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None, logger=logger)
+    found_files, _ = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None)
     assert isinstance(found_files, list)
 
 
@@ -243,7 +243,7 @@ def test_A5_duplicate_series_returns_one(tmp_path):
     for i in range(5):
         make_minimal_dcm(str(root / f"dup_{i}.dcm"), modality='MR', series_number=42)
     logger = _scan_logger()
-    found_files, _ = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None, logger=logger)
+    found_files, _ = scan._find_dicom_worker(str(root), sample_pct=0.0, sample_seed=None)
     assert len(found_files) == 1
 
 
@@ -256,7 +256,7 @@ def test_A6_corrupt_files(tmp_path):
     (d / "bad2.dcm").write_bytes(b'\xff' * 512)
     (d / "bad3.dcm").write_bytes(b'\0' * 100)
     logger = _scan_logger()
-    found_files, _ = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None, logger=logger)
+    found_files, _ = scan._find_dicom_worker(str(d), sample_pct=0.0, sample_seed=None)
     assert len(found_files) == 1
     assert "good.dcm" in found_files[0]
 
@@ -278,8 +278,8 @@ def test_A8_sampling_deterministic(tmp_path):
     for i in range(20):
         make_minimal_dcm(str(root / f"f_{i:02d}.dcm"), modality='MR', series_number=(i % 5) + 1)
     logger = _scan_logger()
-    first = scan._find_dicom_worker(str(root), sample_pct=15.0, sample_seed=99, logger=logger)
-    second = scan._find_dicom_worker(str(root), sample_pct=15.0, sample_seed=99, logger=logger)
+    first = scan._find_dicom_worker(str(root), sample_pct=15.0, sample_seed=99)
+    second = scan._find_dicom_worker(str(root), sample_pct=15.0, sample_seed=99)
     assert first == second
 
 
@@ -320,7 +320,7 @@ def test_B1_extractDicom_has_all_keys(tmp_path):
     f = tmp_path / "extract_test.dcm"
     make_realistic_mr_dcm(str(f), repetition_time=500.0)
     logger = _scan_logger()
-    result = scan._extractDicom_impl(str(f), logger)
+    result = scan._extractDicom_impl(str(f))
     assert result is not None
     assert isinstance(result, dict)
     assert EXPECTED_KEYS.issubset(result.keys()), f"Missing keys: {EXPECTED_KEYS - result.keys()}"
@@ -331,21 +331,21 @@ def test_B2_T1_vs_T2_modality(tmp_path):
     logger = _scan_logger()
     t1_path = tmp_path / "t1.dcm"
     make_realistic_mr_dcm(str(t1_path), repetition_time=779.0)
-    t1_result = scan._extractDicom_impl(str(t1_path), logger)
+    t1_result = scan._extractDicom_impl(str(t1_path))
     assert t1_result['Modality'] == 'T1', f"Expected T1, got {t1_result['Modality']}"
 
     t2_path = tmp_path / "t2.dcm"
     make_realistic_mr_dcm(str(t2_path), repetition_time=780.0)
-    t2_result = scan._extractDicom_impl(str(t2_path), logger)
+    t2_result = scan._extractDicom_impl(str(t2_path))
     assert t2_result['Modality'] == 'T2', f"Expected T2, got {t2_result['Modality']}"
 
     t1_edge = tmp_path / "t1_edge.dcm"
     make_realistic_mr_dcm(str(t1_edge), repetition_time=779.999)
-    assert scan._extractDicom_impl(str(t1_edge), logger)['Modality'] == 'T1'
+    assert scan._extractDicom_impl(str(t1_edge))['Modality'] == 'T1'
 
     t2_edge = tmp_path / "t2_edge.dcm"
     make_realistic_mr_dcm(str(t2_edge), repetition_time=780.001)
-    assert scan._extractDicom_impl(str(t2_edge), logger)['Modality'] == 'T2'
+    assert scan._extractDicom_impl(str(t2_edge))['Modality'] == 'T2'
 
 
 # B3 — Unknown fields for missing tags
@@ -354,7 +354,7 @@ def test_B3_unknown_fields_missing_tags(tmp_path):
     d.mkdir()
     make_minimal_dcm(str(d / "sparse.dcm"), modality='MR', series_number=1)
     logger = _scan_logger()
-    result = scan._extractDicom_impl(str(d / "sparse.dcm"), logger)
+    result = scan._extractDicom_impl(str(d / "sparse.dcm"))
     assert result is not None
     for key in ['Accession', 'DOB', 'Lat']:
         assert result[key] == 'Unknown', f"{key} should be 'Unknown' but is '{result[key]}'"
