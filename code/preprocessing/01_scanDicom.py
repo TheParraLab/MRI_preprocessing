@@ -387,6 +387,26 @@ def _find_and_select_impl(directory: str,
     return mr_dirs, dicom_files, slice_counts
 
 
+def _scan_subdir_worker(subdir: str, sample_pct: float, sample_seed: Optional[int]) -> tuple:
+    """Worker for multiprocessing directory scanning.
+
+    Calls `_find_dicom_worker` on its assigned single top-level subdirectory.
+    Creates its own logger inside the child process to avoid pickle-lock deadlock.
+    Returns list of (dicom_files, slice_counts).
+    """
+    wlogger = logging.getLogger(__name__ + '.worker')
+    return [_find_dicom_worker(subdir, sample_pct, sample_seed, wlogger)]
+
+
+def _scan_subdir(topdir: str):
+    """Return a list of subdirectories containing .dcm files."""
+    dirs_with_dcm = []
+    for root, _, files in os.walk(topdir, followlinks=False):
+        if any(f.lower().endswith('.dcm') for f in files):
+            dirs_with_dcm.append(root)
+    return dirs_with_dcm
+
+
 def _find_dicom_worker(directory: str, sample_pct: float, sample_seed: Optional[int],
                        logger: logging.Logger) -> tuple:
     """Worker for findDicom — called per directory, accepts only plain args.
@@ -503,22 +523,50 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
             combined_result = None
 
     if combined_result is None:
-        combined_result = _find_and_select_impl(
-            directory=scan_dir,
-            n_test=n_test_val,
-            sample_pct=cfg.sample_pct,
-            sample_seed=cfg.sample_seed,
-            logger=logger,
-        )
-        try:
-            save_checkpoint(cfg, logger, 'scan_and_select', combined_result)
-        except Exception:
-            pass
+        if cfg.parallel:
+            # Parallel scan: walk the tree once to find subdirectories with .dcm files,
+            # then dispatch multiprocessing workers across them.
+            dirs_with_dcm = _scan_subdir(scan_dir)
+            logger.info(f'Found {len(dirs_with_dcm)} directories with DICOM files to scan')
 
-    mr_dirs, dicom_files, slice_counts = combined_result
+            if len(dirs_with_dcm) > 1:
+                worker_results = run_function(
+                    logger, _scan_subdir_worker, dirs_with_dcm,
+                    Parallel=True, P_type='hybrid', N_CPUS=cfg.n_cpus,
+                    sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed,
+                )
+            else:
+                worker_results = [run_function(
+                    logger, _scan_subdir_worker, dirs_with_dcm,
+                    Parallel=False, P_type='thread', N_CPUS=1,
+                    sample_pct=cfg.sample_pct, sample_seed=cfg.sample_seed,
+                )]
+            # Flatten results from all workers
+            dicom_files = [f for sublist in worker_results for files, _ in sublist for f in files]
+            slice_counts = {}
+            for sublist in worker_results:
+                for _, counts in sublist:
+                    slice_counts.update(counts)
+            mr_dirs = list(set(os.path.dirname(f) for f in dicom_files))
+
+            # Apply --test as an output limiter (never alter execution path)
+            if n_test_val is not None:
+                dicom_files = dicom_files[:n_test_val]
+                slice_counts = {k: v for k, v in slice_counts.items() if k in set(os.path.dirname(f) for f in dicom_files)}
+                mr_dirs = list(set(os.path.dirname(f) for f in dicom_files))
+
+        else:
+            combined_result = _find_and_select_impl(
+                directory=scan_dir,
+                n_test=n_test_val,
+                sample_pct=cfg.sample_pct,
+                sample_seed=cfg.sample_seed,
+                logger=logger,
+            )
+            mr_dirs, dicom_files, slice_counts = combined_result
 
     # Fallback to two-pass if combined pass found nothing and we haven't already
-    if dicom_files is None or not dicom_files:
+    if not dicom_files:
         # Try legacy checkpoint for MR dirs only
         if cfg.resume:
             try:
