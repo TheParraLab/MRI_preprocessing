@@ -90,6 +90,46 @@ def _init_child_logger(
         root.addHandler(root_fh)
 
 
+# ---- Hybrid chunk worker (module-level so it is picklable) -----------
+
+def _chunk_target(
+    global_start: int,
+    chunk_items: List[Any],
+    target_fn: Callable,
+    target_args: tuple,
+    target_kwargs: dict,
+    threads: int,
+) -> tuple:
+    """Work inside one ProcessPoolExecutor child.
+
+    Must live at module-level so ProcessPoolExecutor can pickle it and ship
+    it to worker processes via the ``spawn`` start method."""
+    ordered: List[Optional[Any]] = [None] * len(chunk_items)
+
+    with ThreadPoolExecutor(max_workers=threads) as inner_pool:
+        fut_map = {}
+        for j, item in enumerate(chunk_items):
+            fut = inner_pool.submit(_process_worker, target_fn,
+                                    item, *target_args, **target_kwargs)
+            fut_map[fut] = j
+
+        for fut in as_completed(fut_map):
+            idx_in_chunk = fut_map.pop(fut)
+            try:
+                result = fut.result()
+                ordered[idx_in_chunk] = result
+            except Exception as e:
+                root = logging.getLogger()
+                root.error(
+                    f'Hybrid thread error (offset {global_start+idx_in_chunk} '
+                    f'in {getattr(target_fn, "__name__", "unknown")}): {e}',
+                    exc_info=True,
+                )
+                ordered[idx_in_chunk] = None
+
+    return global_start, ordered
+
+
 # ---- Process worker wrapper ------------------------------------------------
 
 def _process_worker(target: Callable[..., Any], item: Any, *args: Any, **kwargs: Any):
@@ -356,31 +396,7 @@ def run_function(
             init_args = (LOGGER.name, LOGGER._log_level,
                          LOGGER._file_path, LOGGER._formatter_str)
 
-            def _chunk_target(global_start: int, chunk_items: List[Any],
-                              target_fn: Callable, target_args: tuple,
-                              target_kwargs: dict, threads: int):
-                """Work inside one ProcessPoolExecutor child."""
-                ordered: List[Optional[Any]] = [None] * len(chunk_items)
 
-                with ThreadPoolExecutor(max_workers=threads) as inner_pool:
-                    fut_map = {}
-                    for j, item in enumerate(chunk_items):
-                        fut = inner_pool.submit(_process_worker, target_fn,
-                                                item, *target_args, **target_kwargs)
-                        fut_map[fut] = j
-
-                    for fut in as_completed(fut_map):
-                        idx_in_chunk = fut_map.pop(fut)
-                        try:
-                            result = fut.result()
-                            ordered[idx_in_chunk] = result
-                        except Exception as e:
-                            root = logging.getLogger()
-                            root.error(
-                                f'Hybrid thread error (offset {global_start+idx_in_chunk} in {getattr(target_fn, "__name__", "unknown")}): {e}', exc_info=True)
-                            ordered[idx_in_chunk] = None
-
-                return global_start, ordered
 
             # Create evenly-sized chunks and track global indices in parent.
             n_workers = min(max_workers, len(items)) if items else 0
