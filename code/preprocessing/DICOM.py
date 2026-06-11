@@ -17,6 +17,8 @@ _DCM_SPECIFIC_TAGS = (
     tag.Tag('AccessionNumber'),           # Accession()
     tag.Tag('StudyDate'),                 # Date()
     tag.Tag('SeriesDescription'),         # Desc(), LR() fallback chain
+    tag.Tag('StudyDescription'),          # StudyDesc()
+    tag.Tag(0x0018, 0x0015),              # AnatomicRegion()
     tag.Tag('RepetitionTime'),            # Modality()
     tag.Tag('AcquisitionTime'),           # Acq()
     tag.Tag('BodyPartExamined'),          # Part()
@@ -121,6 +123,22 @@ class DICOMextract:
             return self.metadata.SeriesDescription
         except Exception as e:
             self.log_error('Unable to read SeriesDescription', e)
+            return self.UNKNOWN
+    
+    def StudyDesc(self) -> str:
+        """Attempts to extract the study description"""
+        try:
+            return self.metadata.StudyDescription
+        except Exception as e:
+            self.log_error('Unable to read StudyDescription', e)
+            return self.UNKNOWN
+    
+    def AnatomicRegion(self) -> str:
+        """Attempts to extract the anatomic region of the scan"""
+        try:
+            return self.metadata.AnatomicRegion
+        except Exception as e:
+            self.log_error('Unable to read AnatomicRegion', e)
             return self.UNKNOWN
         
     def Modality(self) -> str:
