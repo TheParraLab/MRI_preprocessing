@@ -125,5 +125,7 @@ echo "  bash code/preprocessing/00_preprocess.sh"
 echo "──────────────────────────────────────────────────────────"
 
 # Run the pipeline directly
-cd "${PROJECT_DIRECTORY_PATH}"
-bash code/preprocessing/00_preprocess.sh
+    cd "${PROJECT_DIRECTORY_PATH}"
+    bash code/preprocessing/00_preprocess.sh \
+      --scan-dir "${DATA_DIRECTORY_PATH}" \
+      --save-dir "${DATA_DIRECTORY_PATH}"

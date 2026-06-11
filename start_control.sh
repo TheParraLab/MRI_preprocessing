@@ -138,7 +138,7 @@ case "$RUNTIME" in
     echo "Binding project : $PROJECT_DIRECTORY_PATH → /FL\_system"
     echo ""
     echo "Once the prompt appears, run your pipeline scripts inside the container:"
-    echo "  python code/preprocessing/01_scanDicom.py -scan_dir /FL_system/data/raw --save_dir /FL_system/data"
+    echo "  python code/preprocessing/01_scanDicom.py --scan-dir /FL_system/data/raw --save-dir /FL_system/data"
     echo "  bash code/preprocessing/00_preprocess.sh              (runs all steps)"
     echo ""
 
@@ -195,7 +195,9 @@ case "$RUNTIME" in
     echo ""
 
     cd "${project_directory_path}"
-    bash code/preprocessing/00_preprocess.sh
+    bash code/preprocessing/00_preprocess.sh \
+      --scan-dir "${DATA_DIRECTORY_PATH}" \
+      --save-dir "${DATA_DIRECTORY_PATH}"
     ;;
 
   *)
