@@ -1,0 +1,27 @@
+Bootstrap: docker-source
+Source: nvidia/cuda:12.2.2-base-ubuntu2204
+
+%labels
+  AUTHOR TheParraLab
+  VERSION  v0.9.0
+  DESCRIPTION "MRI preprocessing pipeline (DICOM→NIfTI conversion + alignment via niftyreg)"
+  NVIDIA_CUDA_VERSION 12.2.2_ubuntu2204
+
+%post
+    apt-get update && \
+    apt-get install -y python3-pip python3-dev dcm2niix git cmake g++ ca-certificates curl gnupg && \
+    if [ ! -L /usr/bin/python ] && [ ! -e /usr/bin/python ]; then ln -s /usr/bin/python3 /usr/bin/python; fi && \
+    python3 -m pip install --upgrade pip && \
+    git clone --branch v2.0.0 https://github.com/KCL-BMEIS/niftyreg.git niftyreg-git && \
+    mkdir niftyreg-git/build && cd niftyreg-git/build && \
+    cmake .. -DBUILD_CUDA=ON && make install && cd ~ && rm -rf ~/niftyreg-git && \
+    apt-get remove --purge -y git cmake g++ ca-certificates curl gnupg && \
+    if [ ! -e /var/cache/apt/archives/lock ]; then rm -rf /var/lib/apt/lists/*; fi
+
+%post pip3 install pydicom numpy pandas nibabel scipy yappi --no-cache-dir
+
+%environment
+    export PATH=/usr/local/bin:$PATH  
+  PYTHONTYPE=python3  
+
+%start exec "$@"
