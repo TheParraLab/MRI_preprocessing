@@ -41,7 +41,10 @@ should_run() {
 
 # Step 01
 if should_run 1; then
-  python /FL_system/code/preprocessing/01_scanDicom.py
+  STEP01_ARGS=()
+  [ -n "$SCAN_DIR" ] && STEP01_ARGS+=("--scan-dir" "$SCAN_DIR")
+  [ -n "$SAVE_DIR" ] && STEP01_ARGS+=("--save-dir" "$SAVE_DIR")
+  python /FL_system/code/preprocessing/01_scanDicom.py "${STEP01_ARGS[@]}"
 else
   echo "Skipping step 01"
 fi
