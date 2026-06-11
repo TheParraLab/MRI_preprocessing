@@ -51,10 +51,10 @@ def test_end_to_end_small(tmp_path, monkeypatch):
     dicom_dirs = scan._find_all_dicom_dirs_impl(cfg, logger, str(root))
     assert dicom_dirs, "Should find exactly one MR directory"
 
-    files, _ = scan._find_dicom_worker(dicom_dirs[0], sample_pct=0.0, sample_seed=None, logger=logger)
+    files, _ = scan._find_dicom_worker(dicom_dirs[0], sample_pct=0.0, sample_seed=None)
     assert files, "Should return at least one .dcm file"
 
-    info = [scan._extractDicom_impl(fp, logger) for fp in files]
+    info = [scan._extractDicom_impl(fp) for fp in files]
     info = [i for i in info if i is not None]
 
     import pandas as pd

@@ -52,7 +52,15 @@ def random_acq_time():
     return f"{hour:02d}{minute:02d}{second:02d}"
 
 
-def build_session(session_idx):
+def build_session(session_idx, use_pre_label: bool = True):
+    """Build a synthetic session.
+
+    Args:
+        session_idx: Session index for deterministic generation.
+        use_pre_label: If True, the pre-contrast scan's Series_desc contains 'pre'.
+                      If False, the pre-contrast scan has a generic label so that
+                      the pipeline must rely on TriTime=='Unknown' to detect it.
+    """
     id_base = f"SYNTH_{session_idx:02d}"
     accession = 900000 + session_idx
     name = f"TestPat_{session_idx:02d}_{random.randint(100000, 999999):06d}"
@@ -64,6 +72,17 @@ def build_session(session_idx):
 
     rows = []
     file_idx = 1
+
+    # Pick a consistent post-scan configuration for this session
+    # Real post-contrast scans share the same (or 2 if bilateral) NumSlices
+    post_num_s = random.choice([144, 156, 160, 166, 176])
+    post_thick = random.choice(THICKNESS_OPTIONS)
+    post_orient = random.choice(['0', '1', '2'])
+    post_type = random.choice(["['ORIGINAL', 'PRIMARY', 'OTHER']", "['ORIGINAL', 'PRIMARY', 'PRIMARY', 'NONE']"])
+
+    # Pre gets the same slice count as post (pre slices == post slices in practice)
+    pre_num_s = post_num_s
+
     tri_times_post = sorted([random.randint(0, 100000) for _ in range(random.randint(6, 12))])
     num_post = len(tri_times_post)
 
@@ -72,7 +91,7 @@ def build_session(session_idx):
     num_localizer = random.randint(1, 2)
     for _ in range(num_localizer):
         acq = random_acq_time()
-        num_s = random.choice(NUM_SLICES_OPTIONS[:4])
+        loc_num_s = random.choice([30, 40, 44])
         thick = random.choice(THICKNESS_OPTIONS[:2])
         rows.append({
             'PATH': f"{dir_path}/{file_idx:04d}/img_{file_idx:04d}.dcm",
@@ -92,25 +111,27 @@ def build_session(session_idx):
             'InjTime': 'Unknown',
             'ScanDur': f"{random.randint(10000000, 500000000):.1f}",
             'Lat': 'Unknown',
-            'NumSlices': num_s,
+            'NumSlices': loc_num_s,
             'Thickness': thick,
-            'BreastSize': calc_breast_size(num_s, thick),
+            'BreastSize': calc_breast_size(loc_num_s, thick),
             'DWI': 'Unknown',
             'Type': random.choice(TYPE_VALUES[:4]),
             'Series': file_idx,
         })
         file_idx += 1
 
-    # 2. Pre-contrast T1 sequence
+    # 2. Pre-contrast T1 sequence (TriTime='Unknown' always)
     pre_acq = random_acq_time()
-    pre_num_s = random.choice(NUM_SLICES_OPTIONS)
-    pre_thick = random.choice(THICKNESS_OPTIONS)
+    pre_thick = post_thick
     pre_type = random.choice(["['ORIGINAL', 'PRIMARY', 'OTHER']", "['ORIGINAL', 'PRIMARY', 'PRIMARY', 'NONE']"])
-    pre_desc = random.choice(['T1 Sagittal pre', 'Axial T1 FS pre', 'Axial T1 pre', 'Axial T1', 'T1 pre'])
+    if use_pre_label:
+        pre_desc = random.choice(['T1 Sagittal pre', 'Axial T1 FS pre', 'Axial T1 pre', 'T1 pre'])
+    else:
+        pre_desc = random.choice(['T1 Sagittal', 'Axial T1', 'T1 non fat sat'])
     pre_lat = random.choices(['Unknown', 'right', 'left', 'bilateral'], weights=LAT_WEIGHTS, k=1)[0]
     rows.append({
         'PATH': f"{dir_path}/{file_idx:04d}/img_{file_idx:04d}.dcm",
-        'Orientation': random.choice(['0', '1', '2']),
+        'Orientation': post_orient,
         'ID': id_full,
         'Accession': str(accession),
         'Name': name,
@@ -196,20 +217,18 @@ def build_session(session_idx):
     })
     file_idx += 1
 
-    # 5. Post-contrast T1 sequences
+    # 5. Post-contrast T1 sequences (all share NumSlices & Orientation)
     post_acq_base = str(int(pre_acq) + random.randint(600, 1200))
     for i, tri_ms in enumerate(tri_times_post):
         acq = str(int(post_acq_base) + i)
-        num_s = random.choice(NUM_SLICES_OPTIONS)
-        thick = random.choice(THICKNESS_OPTIONS)
         post_desc = random.choice(['T1 Sagittal post', 'Axial T1 FS post', 'Axial T1 post', 'T1 post', 'T1 Axial AP'])
         post_lat = random.choices(['Unknown', 'right', 'left', 'bilateral'], weights=LAT_WEIGHTS, k=1)[0]
-        post_type = random.choice(["['ORIGINAL', 'PRIMARY', 'OTHER']", "['DERIVED', 'PRIMARY', 'OTHER', 'SUBTRACT']"])
+        p_type = random.choice(["['ORIGINAL', 'PRIMARY', 'OTHER']", "['DERIVED', 'PRIMARY', 'OTHER', 'SUBTRACT']"])
         # Occasional Unknown modality (~0.3%)
         mod = 'Unknown' if random.random() < 0.003 else 'T1'
         rows.append({
             'PATH': f"{dir_path}/{file_idx:04d}/img_{file_idx:04d}.dcm",
-            'Orientation': random.choice(['0', '1', '2']),
+            'Orientation': post_orient,
             'ID': id_full,
             'Accession': str(accession),
             'Name': name,
@@ -225,25 +244,25 @@ def build_session(session_idx):
             'InjTime': 'Unknown',
             'ScanDur': f"{random.randint(50000000, 400000000):.1f}",
             'Lat': post_lat,
-            'NumSlices': num_s,
-            'Thickness': thick,
-            'BreastSize': calc_breast_size(num_s, thick),
+            'NumSlices': post_num_s,
+            'Thickness': post_thick,
+            'BreastSize': calc_breast_size(post_num_s, post_thick),
             'DWI': 'Unknown',
-            'Type': post_type,
+            'Type': p_type,
             'Series': file_idx,
         })
         file_idx += 1
 
-    # 6. Optional MIP reconstruction
+    # 6. Optional MIP reconstruction (TriTime from post, small slice count = non-contrast)
     if random.random() < 0.6:
         acq = random_acq_time()
-        num_s = random.choice(NUM_SLICES_OPTIONS[:4])
-        thick = random.choice(THICKNESS_OPTIONS[:2])
+        mip_num_s = random.choice([30, 40, 44])
+        mip_thick = random.choice(THICKNESS_OPTIONS[:2])
         # Use a post tri_times for MIP
         mip_tri = random.choice(tri_times_post)
         rows.append({
             'PATH': f"{dir_path}/{file_idx:04d}/img_{file_idx:04d}.dcm",
-            'Orientation': '2',
+            'Orientation': post_orient,
             'ID': id_full,
             'Accession': str(accession),
             'Name': name,
@@ -259,9 +278,9 @@ def build_session(session_idx):
             'InjTime': 'Unknown',
             'ScanDur': f"{random.randint(20000000, 100000000):.1f}",
             'Lat': 'Unknown',
-            'NumSlices': num_s,
-            'Thickness': thick,
-            'BreastSize': calc_breast_size(num_s, thick),
+            'NumSlices': mip_num_s,
+            'Thickness': mip_thick,
+            'BreastSize': calc_breast_size(mip_num_s, mip_thick),
             'DWI': 'Unknown',
             'Type': "['DERIVED', 'PRIMARY', 'PROJECTION IMAGE', 'IVI']",
             'Series': file_idx,
@@ -483,7 +502,8 @@ def build_session(session_idx):
 
 all_rows = []
 for i in range(NUM_SESSIONS):
-    session_rows = build_session(i)
+    # Odd-indexed sessions have no explicit 'pre' label — pipeline must use TriTime
+    session_rows = build_session(i, use_pre_label=(i % 2 == 0))
     all_rows.extend(session_rows)
 
 df = pd.DataFrame(all_rows)
