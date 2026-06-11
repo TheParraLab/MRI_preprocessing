@@ -1,0 +1,16 @@
+name: mri_preproc
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3
+  - pydicom
+  - numpy
+  - pandas
+  - nibabel
+  - scipy
+  - yappi
+  - dcm2niix
+  - pytest>=7
+  - pytest-cov>=3

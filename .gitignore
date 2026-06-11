@@ -21,3 +21,7 @@ import os.py
 reset_02.sh
 *.log
 *.json
+.aider*
+
+# Singularity images (large, site-specific)
+*.sif
