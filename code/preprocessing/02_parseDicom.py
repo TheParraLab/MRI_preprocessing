@@ -1,272 +1,498 @@
-# Package imports
+"""
+DICOM Parsing Script
+====================
+
+This script filters, splits, and orders DICOM scan data extracted from Step 01.
+It isolates the primary sequence of scans, removes derived images, and handles
+temporal ordering based on trigger/acquisition times.
+
+Pipeline steps:
+    1. Filter scans (remove computed images, isolate primary sequences, handle DISCO scans)
+    2. Split scans with multiple post-contrast images in a single directory
+    3. Order scans by trigger time within each session
+    4. Create symbolic links for temporary file relocations
+
+Usage:
+    python 02_parseDicom.py --save_dir /path/to/output [--multi] [--filter-only] [--force] [--profile]
+
+Arguments:
+    --save_dir (str): Directory to save output tables and logs.
+    --load_table (str): Path to the input Data_table.csv from Step 01.
+    --multi (int): Enable multiprocessing with specified CPU count (default: max-1).
+    --filter-only: Run only the filtering step, skip ordering.
+    --force: Overwrite existing output files without prompting.
+    --profile: Enable yappi profiling.
+    --dir_idx (int): Index for HPC array jobs.
+    --dir_list (str): Path to directory list file for HPC jobs.
+
+Dependencies:
+    - pandas, numpy
+    - toolbox (custom)
+    - DICOM (custom)
+"""
+
+# Standard imports
+from dataclasses import dataclass, field, replace
 import os
-#import glob
-#import threading
-import pickle
-import shutil
 import argparse
 import time
-import subprocess
 import re
+import fcntl
 import random
+import json
+import pickle
+import logging
+from multiprocessing import cpu_count
+from typing import Any, Optional
+from collections import defaultdict
+import sys
+import shutil
+import functools
 
-#import pydicom as pyd
+# Third-party imports
 import numpy as np
 import pandas as pd
-#import statistics as stat
-# Function imports
-from multiprocessing import Manager, cpu_count, Lock#, Queue
-#from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from typing import Callable, List, Any
-from functools import partial
-from collections import defaultdict
+try:
+    import yappi
+except ImportError:
+    yappi = None
+
 # Custom imports
 from toolbox import get_logger, run_function
 from DICOM import DICOMfilter, DICOMorder, DICOMsplit
 
-# Global variables for progress bar
-Progress = None
-manager = Manager()
-disk_space_lock = Lock()
 
-def parse_args():
+def _check_disk_space(save_dir: str, threshold_gb: float) -> bool:
+    """Return True if free space in save_dir is below threshold.
+
+    Used to stop processing gracefully before disk fills up.
     """
-    Parse command-line arguments for the DICOM parsing script.
-
-    Returns:
-        argparse.Namespace: The parsed command-line arguments.
-    """
-    parser = argparse.ArgumentParser(description='Parse DICOM data')
-    parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
-    parser.add_argument('--save_dir', type=str, default='/FL_system/data/', help='Directory to save the updated tables')
-    parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
-    parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
-    parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv', help='Load table to use for the job')
-    parser.add_argument('--filter_only', action='store_true', help='Run only the filtering step without ordering')
-    parser.add_argument('--move', action='store_true', help='Move files to temporary locations')
-    return parser.parse_args()
+    total, used, free = shutil.disk_usage(save_dir)
+    free_gb = free / (1024**3)
+    if free_gb < threshold_gb:
+        return True  # disk space is critically low
+    return False
 
 
-# Define necessary parameters
-args = None
-SAVE_DIR = ''
-COMPUTED_FLAGS = ['slope', 'sub', 'subtract']#, 'secondary'] # Keywords to identify derived images, removed secondary  for now due to some primary images being marked as such.
-DESCRIPTION_FLAGS= ['loc', 'pjn', 'calib']
-PARALLEL = False
-TEST = False
-N_TEST = 25
-N_CPUS = cpu_count() - 1
-MOVE = False
+@dataclass
+class ParseConfig:
+    """All runtime configuration for 02_parseDicom."""
+    save_dir: str = '/FL_system/data/'
+    load_table: str = '/FL_system/data/Data_table.csv'
+    dir_list: str = 'dirs_to_process.txt'
+    dir_idx: Optional[int] = None
+    min_free_gb: float = 50
+    filter_only: bool = False
+    force: bool = False
+    parallel: bool = False
+    n_cpus: int = 0
+    profile: bool = False
+    n_test: int = 25
+    export_fully_removed: bool = False
+    computed_flags: list = field(default_factory=lambda: ['slope', 'sub', 'subtract'])
+    description_flags: list = field(default_factory=lambda: ['loc', 'pjn', 'calib'])
+    out_name: str = 'Data_table_timing.csv'
+    resume: bool = False
+    filter_batch_size: int = 10
+    target: Optional[str] = None
+    test: bool = False
 
-# Initialize logger
-LOGGER = None
-DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
-stop_flag = None
 
-def configure_runtime(parsed_args):
-    """
-    Initialize global variables and logger for script execution.
+def build_config() -> ParseConfig:
+    """Parse CLI arguments and return a ParseConfig instance."""
+    parser = argparse.ArgumentParser(description='Parse DICOM data: filter, split, and order scans')
+    parser.add_argument('--multi', '-m', nargs='?', const=max(1, cpu_count()-1), type=int,
+                        help='Run with multiprocessing enabled (default: max-1 CPUs)')
+    parser.add_argument('--save_dir', type=str, default='/FL_system/data/',
+                        help='Directory to save the updated tables (default: /FL_system/data/)')
+    parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv',
+                        help='Path to the input Data_table.csv (default: /FL_system/data/Data_table.csv)')
+    parser.add_argument('--dir_idx', type=int,
+                        help='Index of the folder to process from dirs_to_process.txt (for HPC array jobs)')
+    parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt',
+                        help='Path to the directory list file (for HPC array jobs)')
+    parser.add_argument('--filter_only', action='store_true',
+                        help='Run only the filtering step without ordering')
+    parser.add_argument('--force', action='store_true',
+                        help='Overwrite existing output files without prompting')
+    parser.add_argument('--profile', action='store_true',
+                        help='Run with profiler enabled')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume filtering from checkpoint if available')
+    parser.add_argument('--batch-size', type=int, default=10,
+                        help='Number of sessions per batch before saving checkpoint (default: 10)')
+    parser.add_argument('--min-free-gb', type=float, default=50,
+                        help='Minimum free disk space in GB to proceed (default: 50)')
+    parser.add_argument('--fully_removed', action='store_true',
+                        help='Export fully removed sessions')
+    args = parser.parse_args()
 
-    Args:
-        parsed_args (argparse.Namespace): The parsed command-line arguments.
-    """
-    global args, SAVE_DIR, PARALLEL, N_CPUS, MOVE, LOGGER, stop_flag
-    args = parsed_args
-    SAVE_DIR = args.save_dir
-    PARALLEL = args.multi is not None
-    N_CPUS = args.multi if PARALLEL else cpu_count() - 1
-    MOVE = args.move
-    LOGGER = get_logger('02_parseDicom', f'{SAVE_DIR}/logs/')
-    stop_flag = manager.Event()
+    cfg = ParseConfig(
+        save_dir=args.save_dir,
+        load_table=args.load_table,
+        dir_list=args.dir_list,
+        dir_idx=args.dir_idx,
+        filter_only=args.filter_only,
+        force=args.force,
+        parallel=args.multi is not None,
+        n_cpus=args.multi if args.multi is not None else cpu_count() - 1,
+        profile=args.profile,
+        resume=args.resume,
+        filter_batch_size=args.batch_size,
+        export_fully_removed=args.fully_removed,
+    )
+    return cfg
 
-# Profiler
-PROFILE = False
-if PROFILE:
-    import yappi
-    #import pstats
-    #import io
-    #yappi.set_clock_type('cpu')
 
-#### Preprocessing | Step 2: Parse DICOM data ####
-# This script uses the extracted dicom data to filter and order the identified scans
-# 
-# The script is meant to be run after the data has been extracted and saved to /data/Data_table.csv 
-#
-# The following filters are applied to the data:
-# - T2 modality
-# - Breast implants | Scans with breast implants are identified and removed based on the SeriesDescription and Type fields
-# - Laterality | Majority side is determined and scans not on the majority side are removed
-# - Number of slices | Majority number of slices is determined and scans not having the majority number of slices are removed
-# - Derived images | SeriesDescription and Type are checked for keywords indicating derived images
-#
-# The data is then ordered based on the following criteria:
-# - Trigger time | The time since the start of the scan is used to order the scans
-#
-# The goal of this script is to isolate the primary sequence of scans and remove any derived images or other unwanted scans
-#
-# The filtered and ordered data is saved to /data/Data_table_timing.csv
+def create_logger(cfg: ParseConfig) -> logging.Logger:
+    """Create logger instance from config."""
+    logger = logging.getLogger('02_parseDicom')
+    logger.handlers.clear()
+    return get_logger('02_parseDicom', f'{cfg.save_dir}/logs/')
 
-#########################################
-## Parallelization and Progress functions
-#########################################
-# Wrapper for progress updates
-def check_disk_space(directory: str) -> bool:
-    """
-    Check if there is enough disk space available.
+# ------ -- --- ----------------------------- ----- ----------------- --- ---
+# Utility helpers
+# ------ ---------------------------------- --- - -------------- --- --- ---
 
-    Args:
-        directory (str): The directory path to check for available space.
+def _atomic_write_csv(df: pd.DataFrame, path: str) -> None:
+    """Write a DataFrame to CSV atomically using tmp + os.replace."""
+    tmp_path = path + '.tmp'
+    try:
+        df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
-    Returns:
-        bool: True if available space exceeds the threshold, False otherwise.
-    """
-    statvfs = os.statvfs(directory)
-    available_space = statvfs.f_frsize * statvfs.f_bavail
-    if available_space < DISK_SPACE_THRESHOLD*2:
-        LOGGER.debug(f'Available space: {available_space}')
-    return available_space > DISK_SPACE_THRESHOLD
 
-def save_progress(data: list, filename: str) -> None:
-    """
-    Save the current relocation progress to a file.
+# ------ --------------------------- ---- - --------------- --- -- --------
+# Filter checkpoint helpers
+# ------ ---------------------------------- --- - -------------- --- --- ---
 
-    Args:
-        data (list): The data structure (e.g. list of temporary relocations) to save.
-        filename (str): The name of the file to save the data to.
-    """
-    LOGGER.info(f'Saving progress to {filename}')
-    if os.path.exists(f'{SAVE_DIR}{filename}'):
-        os.remove(f'{SAVE_DIR}{filename}')
-    with open(f'{SAVE_DIR}{filename}', 'wb') as f:
-        pickle.dump(data, f)
+CHECKPOINT_DIR = '.filter_checkpoint'
 
-def load_progress(filename: str) -> Any:
-    """
-    Load saved relocation progress from a file.
+def _checkpoint_path(cfg: ParseConfig) -> str:
+    """Return path to the checkpoint directory."""
+    return os.path.join(cfg.save_dir, CHECKPOINT_DIR)
 
-    Args:
-        filename (str): The name of the file to load progress from.
 
-    Returns:
-        Any: The loaded progress data, or None if the file does not exist.
-    """
-    if os.path.exists(f'{SAVE_DIR}{filename}'):
-        LOGGER.info(f'Loading progress from {filename}')
-        with open(f'{SAVE_DIR}{filename}', 'rb') as f:
+def _save_filter_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+    completed_ids: list,
+    results: list,
+    removed: list,
+) -> None:
+    """Save filter progress atomically: completed session IDs, results, removed entries."""
+    cp_dir = _checkpoint_path(cfg)
+    os.makedirs(cp_dir, exist_ok=True)
+
+    meta_path = os.path.join(cp_dir, 'meta.json.tmp')
+    meta = {
+        'completed_ids': completed_ids,
+        'total_results': len(results),
+        'total_removed': len(removed),
+    }
+
+    results_path = os.path.join(cp_dir, 'results.pkl.tmp')
+    removed_path = os.path.join(cp_dir, 'removed.pkl.tmp')
+
+    try:
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+        os.replace(meta_path, os.path.join(cp_dir, 'meta.json'))
+
+        with open(results_path, 'wb') as f:
+            pickle.dump(results, f)
+        os.replace(results_path, os.path.join(cp_dir, 'results.pkl'))
+
+        with open(removed_path, 'wb') as f:
+            pickle.dump(removed, f)
+        os.replace(removed_path, os.path.join(cp_dir, 'removed.pkl'))
+
+        logger.info(f'Checkpoint saved: {len(completed_ids)} sessions done')
+    except Exception as e:
+        logger.error(f'Failed to write checkpoint: {e}')
+
+
+def _load_filter_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    """Load filter checkpoint if available. Returns (completed_ids, results, removed) or (None, None, None)."""
+    cp_dir = _checkpoint_path(cfg)
+    meta_path = os.path.join(cp_dir, 'meta.json')
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
+
+    if not all(os.path.exists(p) for p in [meta_path, results_path, removed_path]):
+        logger.info('No valid filter checkpoint found')
+        return None, None, None
+
+    try:
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        with open(results_path, 'rb') as f:
+            results = pickle.load(f)
+        with open(removed_path, 'rb') as f:
+            removed = pickle.load(f)
+
+        logger.info(
+            f'Loaded filter checkpoint: {meta["total_results"]} results, '
+            f'{meta["total_removed"]} removed entries'
+        )
+        return meta['completed_ids'], results, removed
+    except Exception as e:
+        logger.error(f'Failed to load checkpoint: {e}')
+        return None, None, None
+
+
+def _remove_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
+    """Clean up the checkpoint directory after successful completion."""
+    cp_dir = _checkpoint_path(cfg)
+    if os.path.exists(cp_dir):
+        try:
+            shutil.rmtree(cp_dir)
+            logger.info('Removed checkpoint directory')
+        except Exception as e:
+            logger.error(f'Failed to remove checkpoint directory: {e}')
+
+
+SPLIT_CHECKPOINT_DIR = '.split_checkpoint'
+
+def _split_checkpoint_path(cfg: ParseConfig) -> str:
+    return os.path.join(cfg.save_dir, SPLIT_CHECKPOINT_DIR)
+
+
+SPLIT_RELOCATION_FILE = 'split_relocations.pkl'
+
+
+def _save_split_relocations(cfg: ParseConfig, relocations: list) -> None:
+    """Persist split relocation list alongside the split CSV so symlinks can
+    be recreated on re-run even when the CSV already exists."""
+    path = os.path.join(cfg.save_dir, SPLIT_RELOCATION_FILE)
+    try:
+        with open(path, 'wb') as f:
+            pickle.dump(relocations, f)
+    except Exception as e:
+        logging.getLogger(__name__).error(f'Failed to save split relocations: {e}')
+
+
+def _load_split_relocations(cfg: ParseConfig) -> Optional[list]:
+    """Load previously saved split relocation list."""
+    path = os.path.join(cfg.save_dir, SPLIT_RELOCATION_FILE)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'rb') as f:
             return pickle.load(f)
-    return None
-#############################
-## Main functions
-#############################
-def save_to_csv(tup: tuple) -> None:
-    """
-    Save removed scans to a corresponding CSV file.
+    except Exception as e:
+        logging.getLogger(__name__).error(f'Failed to load split relocations: {e}')
+        return None
 
-    Args:
-        tup (tuple): A tuple containing a string key (removal category) and a
-                     pandas DataFrame (the items removed).
 
-    TODO: Enhance error handling to avoid potential issues when saving files
-          concurrently if paths collide.
-    """
-    key, item = tup
-    item.to_csv(f'{SAVE_DIR}removal_log/Removed_{key}.csv', index=False)
+def _save_split_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+    completed_ids: list,
+    results: list,
+    redirections: list,
+) -> None:
+    cp_dir = _split_checkpoint_path(cfg)
+    os.makedirs(cp_dir, exist_ok=True)
 
-def orderDicom(Data_subset: pd.DataFrame) -> pd.DataFrame:
-    """
-    Order the provided DICOM data subset based on scan timings.
+    meta_path = os.path.join(cp_dir, 'meta.json.tmp')
+    meta = {
+        'completed_ids': completed_ids,
+        'total_results': len(results),
+        'total_redirections': len(redirections),
+    }
+    results_path = os.path.join(cp_dir, 'results.pkl.tmp')
+    redirect_path = os.path.join(cp_dir, 'redirections.pkl.tmp')
 
-    Trigger time is typically in ms post-injection.
-    Acquisition time is typically in HHMMSS format.
+    try:
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+        os.replace(meta_path, os.path.join(cp_dir, 'meta.json'))
 
-    Args:
-        Data_subset (pd.DataFrame): Subset of data specific to a single SessionID.
+        with open(results_path, 'wb') as f:
+            pickle.dump(results, f)
+        os.replace(results_path, os.path.join(cp_dir, 'results.pkl'))
 
-    Returns:
-        pd.DataFrame: Ordered dataframe representing the primary sequence of scans.
-    """
-    Data_subset = Data_subset.reset_index(drop=True)
-    SessionID = Data_subset['SessionID'].values[0]
-    order = DICOMorder(Data_subset, logger=LOGGER)
-    order.order('TriTime', secondary_param='AcqTime')
-    if order.dicom_table.empty:
-        LOGGER.error(f'No scans remaining after ordering for {SessionID}')
-        return order.dicom_table
-    else:
-        order.findPre()
-        return order.dicom_table
+        with open(redirect_path, 'wb') as f:
+            pickle.dump(redirections, f)
+        os.replace(redirect_path, os.path.join(cp_dir, 'redirections.pkl'))
 
-def splitDicom(Data_subset: pd.DataFrame) -> tuple:
-    """
-    Separate scans containing multiple post images within a single directory.
+        logger.info(f'Split checkpoint saved: {len(completed_ids)} sessions done')
+    except Exception as e:
+        logger.error(f'Failed to write split checkpoint: {e}')
 
-    Args:
-        Data_subset (pd.DataFrame): Subset of data specific to a single SessionID.
 
-    Returns:
-        tuple: (Updated dataframe, List of files to be relocated)
-    """
-    Data_subset = Data_subset.reset_index(drop=True)
-    splitter = DICOMsplit(Data_subset, logger=LOGGER)
-    if splitter.SCAN:
-        splitter.scan_all()
-        splitter.sort_scans()
-        return splitter.dicom_table, splitter.temporary_relocations
-    else:
-        return Data_subset, []
+def _load_split_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    cp_dir = _split_checkpoint_path(cfg)
+    meta_path = os.path.join(cp_dir, 'meta.json')
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    redirect_path = os.path.join(cp_dir, 'redirections.pkl')
 
-def filterDicom(Data_subset: pd.DataFrame) -> tuple:
-    """
-    Filter the provided DICOM data subset based on defined criteria to isolate
-    the primary scan sequence.
+    if not all(os.path.exists(p) for p in [meta_path, results_path, redirect_path]):
+        logger.info('No valid split checkpoint found')
+        return None, None, None
 
-    Args:
-        Data_subset (pd.DataFrame): Subset of data specific to a single SessionID.
+    try:
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        with open(results_path, 'rb') as f:
+            results = pickle.load(f)
+        with open(redirect_path, 'rb') as f:
+            redirections = pickle.load(f)
 
-    Returns:
-        tuple: (Filtered dataframe, Removed items dictionary, Temporary relocations list)
+        logger.info(
+            f'Loaded split checkpoint: {meta["total_results"]} results, '
+            f'{meta["total_redirections"]} redirections'
+        )
+        return meta['completed_ids'], results, redirections
+    except Exception as e:
+        logger.error(f'Failed to load split checkpoint: {e}')
+        return None, None, None
 
-    TODO: Deep review of the DISCO and steady-state isolation path. If a sequence
-          fails both approaches, it throws the scans into `Sequence_Failure` but might
-          discard perfectly valid scans in edge cases where sequences mix modalities
-          unusually. Should probably provide a more detailed secondary fallback.
-    """
-    Data_subset = Data_subset.reset_index(drop=True)
-    dicom_filter = DICOMfilter(Data_subset, logger=LOGGER, tmp_save=SAVE_DIR.replace('tmp/', 'tmp_data/'))
-    dicom_filter.Types(COMPUTED_FLAGS)
-    dicom_filter.Description(DESCRIPTION_FLAGS)
-    
+
+def _remove_split_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
+    cp_dir = _split_checkpoint_path(cfg)
+    if os.path.exists(cp_dir):
+        try:
+            shutil.rmtree(cp_dir)
+            logger.info('Removed split checkpoint directory')
+        except Exception as e:
+            logger.error(f'Failed to remove split checkpoint directory: {e}')
+
+
+ORDER_CHECKPOINT_DIR = '.order_checkpoint'
+
+def _order_checkpoint_path(cfg: ParseConfig) -> str:
+    return os.path.join(cfg.save_dir, ORDER_CHECKPOINT_DIR)
+
+
+def _save_order_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+    completed_ids: list,
+    results: list,
+    removed: list = None,
+) -> None:
+    cp_dir = _order_checkpoint_path(cfg)
+    os.makedirs(cp_dir, exist_ok=True)
+
+    meta_path = os.path.join(cp_dir, 'meta.json.tmp')
+    meta = {
+        'completed_ids': completed_ids,
+        'total_results': len(results),
+    }
+    results_path = os.path.join(cp_dir, 'results.pkl.tmp')
+    removed_path = os.path.join(cp_dir, 'removed.pkl.tmp')
+
+    try:
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+        os.replace(meta_path, os.path.join(cp_dir, 'meta.json'))
+
+        with open(results_path, 'wb') as f:
+            pickle.dump(results, f)
+        os.replace(results_path, os.path.join(cp_dir, 'results.pkl'))
+
+        if removed is not None:
+            with open(removed_path, 'wb') as f:
+                pickle.dump(removed, f)
+            os.replace(removed_path, os.path.join(cp_dir, 'removed.pkl'))
+
+        logger.info(f'Order checkpoint saved: {len(completed_ids)} sessions done')
+    except Exception as e:
+        logger.error(f'Failed to write order checkpoint: {e}')
+
+
+def _load_order_checkpoint(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    cp_dir = _order_checkpoint_path(cfg)
+    meta_path = os.path.join(cp_dir, 'meta.json')
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
+
+    if not all(os.path.exists(p) for p in [meta_path, results_path]):
+        logger.info('No valid order checkpoint found')
+        return None, None, None
+
+    try:
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        with open(results_path, 'rb') as f:
+            results = pickle.load(f)
+
+        removed = []
+        if os.path.exists(removed_path):
+            with open(removed_path, 'rb') as f:
+                removed = pickle.load(f)
+
+        logger.info(
+            f'Loaded order checkpoint: {meta["total_results"]} results, '
+            f'{len(removed)} removed entries'
+        )
+        return meta['completed_ids'], results, removed
+    except Exception as e:
+        logger.error(f'Failed to load order checkpoint: {e}')
+        return None, None, None
+
+
+def _remove_order_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
+    cp_dir = _order_checkpoint_path(cfg)
+    if os.path.exists(cp_dir):
+        try:
+            shutil.rmtree(cp_dir)
+            logger.info('Removed order checkpoint directory')
+        except Exception as e:
+            logger.error(f'Failed to remove order checkpoint directory: {e}')
+
+
+# ------
+# Pipeline workers  (accept plain args for run_function compatibility)
+# ------
+
+def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: list,
+                   description_flags: list, log_dir: str) -> tuple:
+    """Worker for filter step — called per session subset."""
+    worker_logger = get_logger('02_parseDicom', log_dir)
+    data_subset = data_subset.reset_index(drop=True)
+    base, last = os.path.split(save_dir.rstrip('/'))
+    tmp_save = os.path.join(base, 'tmp_data') if last == 'tmp' else save_dir
+    dicom_filter = DICOMfilter(data_subset, logger=worker_logger, tmp_save=tmp_save)
+    dicom_filter.Types(computed_flags)
+    dicom_filter.Description(description_flags)
+
     if len(dicom_filter.dicom_table) < 2:
         dicom_filter.logger.error(f'Not enough scans for {dicom_filter.Session_ID}, removing...')
-        dicom_filter.removed['N_samples'] = dicom_filter.dicom_table
+        dicom_filter.removed['Insufficient_Samples'] = dicom_filter.dicom_table.copy()
         dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
         return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
-    #filter.removeImplants()
-    #dicom_filter.removeSide()
-    #dicom_filter.removeSlices() # Temporarily removed to allow both DISCO and steady state scans to be processed
-    #dicom_filter.removeTimes(['TriTime']) # Omitted, Pre scans have unknown trigger time
-    #dicom_filter.removeDWI()
-
-    # Labelling DISCO scans
     disco_pattern = re.compile(r'disco', re.IGNORECASE)
-    dicom_filter.dicom_table['IS_DISCO'] = dicom_filter.dicom_table['Series_desc'].str.contains(disco_pattern, na=False)
-    
+    dicom_filter.dicom_table['IS_DISCO'] = dicom_filter.dicom_table['Series_desc'].str.contains(
+        disco_pattern, na=False)
+
     if dicom_filter.dicom_table['IS_DISCO'].sum() > 0:
-        # If DISCO files are found
         dicom_filter.logger.debug(f'DISCO scans detected | {dicom_filter.Session_ID}')
         dicom_filter.disco_table = dicom_filter.dicom_table.loc[dicom_filter.dicom_table['IS_DISCO'] == True]
         dicom_filter.dicom_table = dicom_filter.dicom_table.loc[dicom_filter.dicom_table['IS_DISCO'] == False]
         if len(dicom_filter.dicom_table) > 2:
-            # Attempt to isolate the primary sequence of scans using steady state information
             dicom_filter.logger.debug(f'Will attempt to determine steady state sequence | {dicom_filter.Session_ID}')
             if not dicom_filter.isolate_sequence():
-                # If unable to isolate the sequence using steady state information, attempt to use DISCO information to isolate the sequence
                 dicom_filter.logger.debug(f'Failed to isolate steady state sequence | {dicom_filter.Session_ID}')
                 dicom_filter.logger.debug(f'Attempting to solve with disco | {dicom_filter.Session_ID}')
                 dicom_filter.dicom_table = dicom_filter.disco_table
-                if not dicom_filter.isolate_sequence(): # If DISCO isolation fails, return an empty table
-                    # If steady state and disco both fail
+                if not dicom_filter.isolate_sequence():
                     dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
                     dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
                     dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
@@ -275,393 +501,743 @@ def filterDicom(Data_subset: pd.DataFrame) -> tuple:
             else:
                 dicom_filter.logger.debug(f'Sequence isolated using steady state information | {dicom_filter.Session_ID}')
         elif len(dicom_filter.disco_table) > 2:
-            # If not enough steady state information to isolate the sequence, attempt to use DISCO information to isolate the sequence
-            dicom_filter.logger.debug(f'Forced to utilize DISCO, not enough steady state information [{len(dicom_filter.dicom_table)}] | {dicom_filter.Session_ID}')
+            dicom_filter.logger.debug(
+                f'Forced to utilize DISCO, not enough steady state information '
+                f'[{len(dicom_filter.dicom_table)}] | {dicom_filter.Session_ID}')
             dicom_filter.dicom_table = dicom_filter.disco_table
-            if not dicom_filter.isolate_sequence(): # Attempt to isolate the primary sequence of scans using DISCO
+            if not dicom_filter.isolate_sequence():
                 dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
                 dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
                 dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
             else:
                 dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
         else:
-            dicom_filter.logger.error(f'Not enough scans to identify sequence [DISCO or SS] | {dicom_filter.Session_ID}')
-            dicom_filter.removed['Sequence_Failure'] = pd.concat([dicom_filter.dicom_table, dicom_filter.disco_table])
+            dicom_filter.logger.error(
+                f'Not enough scans to identify sequence [DISCO or SS] | {dicom_filter.Session_ID}')
+            dicom_filter.removed['Sequence_Failure'] = pd.concat(
+                [dicom_filter.dicom_table, dicom_filter.disco_table])
             dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
     else:
         dicom_filter.logger.debug(f'No DISCO scans detected | {dicom_filter.Session_ID}')
         if dicom_filter.isolate_sequence():
-            dicom_filter.logger.debug(f'Sequence isolated using steady state information | {dicom_filter.Session_ID}')
+            dicom_filter.logger.debug(
+                f'Sequence isolated using steady state information | {dicom_filter.Session_ID}')
         else:
-            dicom_filter.logger.debug(f'Failed to isolate sequence using steady state information | {dicom_filter.Session_ID}')
+            dicom_filter.logger.debug(
+                f'Failed to isolate sequence using steady state information | {dicom_filter.Session_ID}')
             dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
             dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
+
+    session_id = data_subset['SessionID'].values[0]
     if len(dicom_filter.dicom_table) == 0:
-        LOGGER.error(f'No scans remaining after filtering for {Data_subset["SessionID"].values[0]}')
-    
+        worker_logger.error(f'No scans remaining after filtering for {session_id}')
+
     return dicom_filter.dicom_table, dicom_filter.removed, dicom_filter.temporary_relocations
 
-#def split_table(ID: str) -> pd.DataFrame:
-#    """
-#    Filter the global Data_table for a specific SessionID.
-#
-#    Args:
-#        ID (str): The unique SessionID to filter for.
-#
-#    Returns:
-#        pd.DataFrame: A copy of the rows matching the ID.
-#    """
-#    global Data_table
-#    LOGGER.debug(f'Splitting table for ID: {ID}')
-#    return Data_table[Data_table['SessionID'] == ID].copy()
 
-def agg_removed(removed_table: dict) -> None:
+def _order_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
+    """Worker for ordering step — called per session subset.
+
+    Returns (ordered_df, removed_df).  removed_df is non-empty when the
+    ordering step discards every row for the session so that lost scans
+    appear in the removal log.
     """
-    Aggregate removed scans across multiple processing runs.
+    worker_logger = get_logger('02_parseDicom', log_dir)
+    data_subset = data_subset.reset_index(drop=True)
+    session_id = data_subset['SessionID'].values[0]
+    order = DICOMorder(data_subset.copy(), logger=worker_logger)
+    order.order('TriTime', secondary_param='AcqTime')
+    if order.dicom_table.empty:
+        worker_logger.error(f'No scans remaining after ordering for {session_id}')
+        return pd.DataFrame(columns=data_subset.columns), data_subset.copy()
+    order.findPre()
+    return order.dicom_table, pd.DataFrame(columns=data_subset.columns)
 
-    Args:
-        removed_table (dict): Dictionary mapping removal categories to DataFrames.
 
-    TODO: Using `pd.concat` in a loop can degrade performance on very large logs.
-          Consider refactoring `Remove_Tables` to collect lists of DataFrames and
-          concatenate them once at the end.
-    """
-    global Remove_Tables
-    for key, value in removed_table.items():
-        Remove_Tables[key] = pd.concat([Remove_Tables[key], value], ignore_index=True)
+def _split_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
+    """Worker for splitting step — called per session subset."""
+    worker_logger = get_logger('02_parseDicom', log_dir)
+    data_subset = data_subset.reset_index(drop=True)
+    splitter = DICOMsplit(data_subset, logger=worker_logger)
+    if splitter.SCAN:
+        if splitter.scan_complete:
+            splitter.load_scan()
+        else:
+            splitter.scan_all()
+        splitter.sort_scans()
+        return splitter.dicom_table, splitter.temporary_relocations
+    return data_subset, []
 
-def init_data(load_table: str='', target: str=None) -> None:
-    """
-    Initialize data globally, reading the extracted CSV and formatting IDs.
 
-    Args:
-        load_table (str): Path to the input Data_table.csv.
-        target (str, optional): An optional specific ID to filter on startup.
-    """
-    global Data_table
-    Data_table = pd.read_csv(f'{load_table}', low_memory=False)
+def _save_removal_worker(tup: tuple, save_dir: str) -> None:
+    """Worker for saving removal logs — called per category."""
+    key, item = tup
+    out_path = os.path.join(save_dir, 'removal_log', f'Removed_{key}.csv')
+    try:
+        item.to_csv(out_path, index=False)
+    except Exception:
+        pass
+
+
+def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
+    """Worker for symlinking temporary file relocations."""
+    worker_logger = get_logger('02_parseDicom', log_dir)
+    worker_logger.debug(f'Relocate called with {len(commands)} commands')
+    worker_logger.debug(f'Current relocations: {len(relocations)}')
+    worker_logger.debug(f'First command: {commands[0] if commands else "None"}')
+    if not commands:
+        worker_logger.warning('No commands supplied to relocate')
+        return
+    destinations = list(set(cmd[1] for cmd in commands))
+    parent_dirs = list(set(os.path.dirname(d) for d in destinations))
+    for dest_dir in parent_dirs:
+        os.makedirs(dest_dir, exist_ok=True)
+    for command in commands:
+        worker_logger.debug(f'Linking {command[0]} to {command[1]}')
+        src_path = os.path.abspath(command[0])
+        dest_path = command[1]
+        if os.path.exists(dest_path) or os.path.islink(dest_path):
+            os.remove(dest_path)
+        try:
+            os.symlink(src_path, dest_path)
+        except OSError:
+            worker_logger.warning(
+                f'Symlink failed, copying file instead: {src_path} -> {dest_path}')
+            shutil.copy2(src_path, dest_path)
+    # ---------------------------------------------------------------------------
+# Aggregation helpers (no globals)
+# ---------------------------------------------------------------------------
+
+def _init_data_table(load_table: str, target: Optional[str],
+                     logger: logging.Logger) -> tuple:
+    """Load and prepare the data table, return (table, removed_dict)."""
+    data_table = pd.read_csv(load_table, low_memory=False)
     if target is not None:
         try:
-            Data_table = Data_table[Data_table['ID'] == target]
-            LOGGER.info(f'Filtering data for target ID: {target}')
+            data_table = data_table[data_table['ID'] == target]
+            logger.info(f'Filtering data for target ID: {target}')
         except Exception as e:
-            LOGGER.error(f'Error filtering data for target ID {target}: {e}')
+            logger.error(f'Error filtering data for target ID {target}: {e}')
             raise
-    # Create a unique identifier for each session/exam
-    Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
-    global Remove_Tables
-    Remove_Tables = defaultdict(pd.DataFrame)  # Use defaultdict to initialize empty DataFrames for each key
-    #Remove_Tables = {}
-    #Remove_Tables['T2'] = pd.DataFrame()
-    #Remove_Tables['Slices'] = pd.DataFrame()
-    #Remove_Tables['Computed'] = pd.DataFrame()
-    #Remove_Tables['No_pre'] = pd.DataFrame()
-    #Remove_Tables['DISCO'] = pd.DataFrame()
-    #Remove_Tables['No_post'] = pd.DataFrame()
+    data_table['SessionID'] = data_table['ID'] + '_' + data_table['DATE'].astype(str)
+    removed_tables = defaultdict(pd.DataFrame)
+    return data_table, removed_tables
 
-def relocate(commands: list, relocations: list) -> None:
-    """
-    Relocate files to new paths based on provided commands.
 
-    Args:
-        commands (list): List of [source, destination] pairs.
-        relocations (list): Global list of pending relocations, synchronized across processes.
+def _aggregate_removed(removed_tables: dict, removed_list: list) -> None:
+    """Concatenate per-worker removal dicts into the accumulator."""
+    buffer = defaultdict(list)
+    for removed_dict in removed_list:
+        for key, value in removed_dict.items():
+            buffer[key].append(value)
+    for key, df_list in buffer.items():
+        removed_tables[key] = pd.concat([removed_tables[key], pd.concat(df_list, ignore_index=True)], ignore_index=True)
 
-    TODO: Thread-safety check: `shutil.copy` may hit race conditions if multiple processes
-          attempt to create or interact with the exact same parent directories simultaneously
-          despite `os.makedirs`. Consider robust directory locking or centralized moving.
-    """
-    LOGGER.debug(f'Relocate called with {len(commands)} commands')
-    LOGGER.debug(f'Current relocations: {len(relocations)}')
-    LOGGER.debug(f'First command: {commands[0] if commands else "None"}')
-    if not commands:
-        LOGGER.warning('No commands supplied to relocate')
-        return
-    destinations = [cmd[1] for cmd in commands]
-    destinations = list(set(destinations))
-    for dest in destinations:
-        if not os.path.exists(dest):
-            os.makedirs(dest)
-        else:
-            LOGGER.warning(f'{dest} already exists')
-    with disk_space_lock:
-        try:
-            LOGGER.debug(commands[0][1])
-            LOGGER.debug('/'.join(commands[0][1].split('/')[0:-2]))
-        except:
-            LOGGER.warning(commands)
-        if not check_disk_space('/'.join(commands[0][1].split('/')[0:-2])):
-            if not stop_flag.is_set():
-                LOGGER.warning('Disk space is running low.  Pausing...')
-                stop_flag.set()
-                LOGGER.warning('Stop flag set')
-            return
-    try:
-        for command in commands:
-            LOGGER.debug(f'Linking {command[0]} to {command[1]}')
-            src_path = os.path.abspath(command[0])
-            dest_path = command[1]
-            if os.path.exists(dest_path) or os.path.islink(dest_path):
-                os.remove(dest_path)
-            os.symlink(src_path, dest_path)
-        with disk_space_lock:
-            relocations.remove(commands)
-    except Exception as e:
-        LOGGER.error(f'Error in relocating files: {e}', exc_info=True)
 
-def chunk_list(lst: list, chunk_size: int):
-    """Yield successive chunk_size-sized chunks from lst."""
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i:i + chunk_size]
+def _normalize_bool_cols(data_table: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Pre_scan and Post_scan columns to proper booleans."""
+    data_table.loc[data_table['Pre_scan'].isin([True, 'True', 'true', 1, '1']), 'Pre_scan'] = True
+    data_table.loc[data_table['Pre_scan'].isin([False, 'False', 'false', 0, '0']), 'Pre_scan'] = False
+    data_table.loc[data_table['Post_scan'].isin([True, 'True', 'true', 1, '1']), 'Post_scan'] = True
+    data_table.loc[data_table['Post_scan'].isin([False, 'False', 'false', 0, '0']), 'Post_scan'] = False
+    return data_table
 
 #############################
 ## Main script
 #############################
-def main(out_name: str=f'Data_table_timing.csv', SAVE_DIR: str='', target: str=None) -> None:
+
+def main(cfg: ParseConfig, logger: logging.Logger) -> None:
     """
     Main orchestration function for parsing DICOM data.
 
-    This function sequentially filters out bad scans, sorts out mixed directories,
-    orders scans correctly by time, and writes out the resulting files.
+    Sequentially filters, splits, and orders DICOM scan sequences, writing
+    intermediate checkpoints and final output CSV.
 
     Args:
-        out_name (str): Filename for the successfully ordered output CSV.
-        SAVE_DIR (str): Location to save outputs, checkpoints, and logs.
-        target (str, optional): A specific ID to process independently.
-
-    TODO: Error Handling: While processing large groups, if `filterDicom` encounters
-          catastrophic failure, it could crash the main script. Wrap processing steps in
-          tighter try-except blocks to allow gracefully dropping broken sessions rather
-          than halting the entire parallel pool.
+        cfg: ParseConfig dataclass with all runtime parameters.
+        logger: Configured logger instance.
     """
-    global Data_table, Remove_Tables
+    # -- Setup ---------------------------------------------------------------
+    os.makedirs(cfg.save_dir, exist_ok=True)
 
-    # Create the save directory if it does not exist
-    if not os.path.exists(SAVE_DIR):
-        try:
-            os.makedirs(SAVE_DIR)
-            LOGGER.info(f'Created directory: {SAVE_DIR}')
-        except Exception as e:
-            LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
-            exit()
-            
-    # Print the current configuration
-    LOGGER.info('Starting parseDicom: Step 02')
-    LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
-    LOGGER.info(f'COMPUTED_FLAGS: {COMPUTED_FLAGS}')
-    LOGGER.info(f'PARALLEL: {PARALLEL}')
-    if PROFILE:
-        LOGGER.info('Profiling enabled')
+    logger.info('Starting parseDicom: Step 02')
+    logger.info(f'SAVE_DIR        : {cfg.save_dir}')
+    logger.info(f'COMPUTED_FLAGS  : {cfg.computed_flags}')
+    logger.info(f'DESCRIPTION_FLG : {cfg.description_flags}')
+    logger.info(f'PARALLEL        : {cfg.parallel}')
+    logger.info(f'PROFILE         : {cfg.profile}')
+    logger.info(f'FILTER_ONLY     : {cfg.filter_only}')
+    logger.info(f'FORCE           : {cfg.force}')
+    logger.info(f'TEST            : {cfg.test}')
+    logger.info(f'N_TEST          : {cfg.n_test}')
+    logger.info(f'EXPORT_FULLY_REMOVED: {cfg.export_fully_removed}')
 
-    # Check if the output already exists
-    if out_name in os.listdir(SAVE_DIR):
-        LOGGER.error(f'{out_name} already exists')
-        if input('Would you like to reprocess? [Y/n]?\n').lower() != 'y':
-            LOGGER.error('Stopping Processing')
-            exit()
+    total, used, free = shutil.disk_usage(cfg.save_dir)
+    free_gb = free / (1024**3)
+    if free_gb < 20:
+        logger.error(f'Insufficient disk space: {free_gb:.1f} GB remaining in {cfg.save_dir}. '
+                      f'Need at least 20 GB. Aborting.')
+        return
 
-    progress = load_progress('parseDicom_progress.pkl')
-    if progress:
-        LOGGER.info(f'Progress file found. {len(progress)} items remaining')
-        temporary_relocation = manager.list(progress)
-    else:
-        # Load in the data table
-        init_data(args.load_table, target)
-        
-        # TEMP - REMOVE 16-328 protocol
-        #Data_table = Data_table[Data_table['ID'].apply(lambda x: x.split('_')[1]) == '20-425']
-        # Get the unique identifiers
-        Iden_uniq = np.unique(Data_table['SessionID'])
-        PRE_TABLE = Data_table.copy()
-        if TEST:
-            Iden_uniq = Iden_uniq[:N_TEST]
-            LOGGER.info(f'Running in test mode with {N_TEST} sessions')
-        if PARALLEL:
-            LOGGER.debug('Running in parallel mode')
-        # Split the data table into subsets based on the unique identifiers
-        #Data_subsets = run_function(LOGGER, split_table, Iden_uniq, Parallel=PARALLEL, P_type='process')
-        Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
-        random.shuffle(Data_subsets)
-        # Filter the data based on the criteria defined in DICOMfilter and filterDicom
-        results, removed, temporary_relocation = run_function(LOGGER, filterDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
-        #temporary_relocation = list(temporary_relocation)
-        #temporary_relocation = manager.list([item for sublist in temporary_relocation for item in sublist])
+    # -- Overwrite guard -----------------------------------------------------
+    out_path = os.path.join(cfg.save_dir, cfg.out_name)
+    if os.path.exists(out_path):
+        if cfg.force:
+            logger.info(f'{cfg.out_name} already exists -- overwriting (--force)')
+        else:
+            logger.warning(f'{cfg.out_name} already exists')
+            if sys.stdin.isatty() == False:
+                logger.warning('Running in non-interactive mode, skipping prompt and exiting to avoid overwrite')
+                logger.warning('To force overwrite, use the --force flag.')
+                return
+            try:
+                answer = input('Would you like to reprocess? [Y/n]: ')
+            except (EOFError, KeyboardInterrupt):
+                logger.warning('No input received, aborting.')
+                logger.warning('To force overwrite without prompt, use the --force flag.')
+                return
+            if answer.lower() != 'y':
+                logger.info('Stopping processing.')
+                return
 
-        # Filtered results and removed scans are concatenated into a single table
-        results = list(results)
-        results = [df for df in results if not df.empty]
-        removed = list(removed)
-        Data_table = pd.concat(results)
-        Data_table = Data_table.reset_index(drop=True)
-        Data_table['SessionID'] = Data_table['ID'] + '_' + Data_table['DATE'].astype(str)
-        Iden_uniq_after = Data_table['SessionID'].unique()
-        Iden_uniq_after_clean = []
-        for i in Iden_uniq_after:
-            if i[-2:] in ('_a', '_b', '_l', '_r'):
-                Iden_uniq_after_clean.append(i[:-2])
+    # -- Init data table --------------------------------------------------
+    Data_table, removed_tables = _init_data_table(cfg.load_table, cfg.target, logger)
+    Iden_uniq = np.unique(Data_table['SessionID'])
+    PRE_TABLE = Data_table.copy()
+
+    if cfg.test:
+        Iden_uniq = Iden_uniq[:cfg.n_test]
+        logger.info(f'Running in test mode with {cfg.n_test} sessions')
+
+    if cfg.parallel:
+        logger.debug('Running in parallel mode')
+
+    # -- Filtering step --------------------------------------------------
+    filter_path = os.path.join(cfg.save_dir, 'Data_table_filtered.csv')
+    temporary_relocation = []
+
+    if not os.path.exists(filter_path):
+        logger.info('No filtered table found, starting filtering process')
+
+        # Try to resume from checkpoint
+        completed_ids = []
+        all_results = []
+        all_removed = []
+
+        if cfg.resume:
+            completed_ids, all_results, all_removed = _load_filter_checkpoint(cfg, logger)
+            if completed_ids is not None:
+                logger.info(f'Resuming from checkpoint: {len(completed_ids)} sessions already filtered')
             else:
-                Iden_uniq_after_clean.append(i)
-        Iden_uniq_after_clean = list(set(Iden_uniq_after_clean)) # Get unique IDs without laterality suffix
-        run_function(LOGGER, agg_removed, removed, Parallel=False)
+                cfg.resume = False
 
-        # Display the results of the filtering process
-        LOGGER.info('Filtering Results:')
-        LOGGER.info(f'Initial number of unique sessions: {len(Iden_uniq)}')
-        LOGGER.info(f'Final number of unique sessions: {len(Iden_uniq_after_clean)}')
-        LOGGER.info(f'Final number of sesions, including laterality suffix: {len(Iden_uniq_after)}')
-        LOGGER.info(f'Number of removed sessions: {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
+        # Build work queue (exclude already-completed sessions if resuming)
+        if completed_ids:
+            completed_set = set(completed_ids)
+            Data_subsets = [
+                group.copy()
+                for sid, group in Data_table.groupby('SessionID')
+                if sid in Iden_uniq and sid not in completed_set
+            ]
+        else:
+            Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
+            random.shuffle(Data_subsets)
 
-        for key, value in Remove_Tables.items():
-            LOGGER.info(f'===== {key} =====')
-            Rem_ID = value['SessionID'].unique()
-            Gone_ID = set(Rem_ID) - set(Iden_uniq_after_clean)
-            LOGGER.info(f'  Number of unique sessions missing from final output: {len(Gone_ID)}')
-            LOGGER.info(f'  Number of scans removed: {len(value)}')
-        LOGGER.info(f'Saving filtered data to {SAVE_DIR}Data_table_filtered.csv')
-        Data_table.to_csv(f'{SAVE_DIR}Data_table_filtered.csv', index=False)
+        if not Data_subsets:
+            logger.info('All sessions already processed or no data to filter')
+            Data_table = pd.concat(all_results).reset_index(drop=True) if all_results else pd.DataFrame()
+            _aggregate_removed(removed_tables, all_removed)
+        else:
+            logger.info(f'Processing {len(Data_subsets)} session(s)')
 
+            log_dir = os.path.join(cfg.save_dir, 'logs/')
+            filter_fn = functools.partial(
+                _filter_worker,
+                save_dir=cfg.save_dir,
+                computed_flags=cfg.computed_flags,
+                description_flags=cfg.description_flags,
+                log_dir=log_dir,
+            )
 
-        # Save a .csv for each item in the full_removed dictionary
-        if not os.path.exists(f'{SAVE_DIR}removal_log'):
-            os.mkdir(f'{SAVE_DIR}removal_log')
-        run_function(LOGGER, save_to_csv, list(Remove_Tables.items()), Parallel=PARALLEL, P_type='process')
-        fully_removed = pd.DataFrame()
-        for ID in Iden_uniq:
-            if ID not in Iden_uniq_after:
-                LOGGER.debug(f'Session {ID} was completely removed')
-                fully_removed = pd.concat([fully_removed, PRE_TABLE[PRE_TABLE['SessionID'] == ID]], ignore_index=True)
-        if not fully_removed.empty:
-            fully_removed.to_csv(f'{SAVE_DIR}removal_log/Removed_fully.csv', index=False)
-            LOGGER.info(f'Saved fully removed sessions to {SAVE_DIR}removal_log/Removed_fully.csv')
-        if args.filter_only:
-            LOGGER.info('Filter only mode enabled. Exiting after filtering step.')
-            return
+            batch_size = cfg.filter_batch_size
+            for batch_start in range(0, len(Data_subsets), batch_size):
+                batch = Data_subsets[batch_start:batch_start + batch_size]
+                logger.info(
+                    f'Filtering batch {batch_start // batch_size + 1}: '
+                    f'{batch_start + 1}-{min(batch_start + batch_size, len(Data_subsets))} '
+                    f'of {len(Data_subsets)} sessions'
+                )
 
-        # Resplit the filtered data table into subsets based on the unique identifiers
-        #Data_subsets = run_function(LOGGER, split_table, Iden_uniq_after, Parallel=PARALLEL, P_type='process')
-        Data_subsets = [group.copy() for id, group in Data_table.groupby('SessionID') if id in Iden_uniq_after]
+                batch_results, batch_removed, batch_temp_rels = run_function(
+                    logger, filter_fn, batch,
+                    Parallel=cfg.parallel, P_type='process',
+                )
 
-        # Seperating scans which contain multiple post images in a single directory
-        results, redirections = run_function(LOGGER, splitDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
-        results = [df for df in results if not df.empty]
-        Data_table = pd.concat(results)
-        Data_table = Data_table.reset_index(drop=True)
-        temporary_relocation = manager.list([item for sublist in redirections for item in sublist])
-        Iden_uniq_after = Data_table['SessionID'].unique()
-        LOGGER.info(f'Updated number of scans after splitting multi-post scans: {len(Data_table)}')
-        LOGGER.info(f'Updated number of unique sessions after splitting multi-post scans: {len(Iden_uniq_after)}')
-        LOGGER.info(f'Number of temporary relocations after splitting multi-post scans: {len(temporary_relocation)}')
-        LOGGER.debug(f'Temporary relocations example [first 3 entries]: {temporary_relocation[0:3]}')
-        # subgrouping temporary_relocation into 100n item chunks for processing
-        temporary_relocation = list(chunk_list(list(temporary_relocation), 100))
+                batch_results = [df for df in batch_results if not df.empty]
+                all_results.extend(batch_results)
+                all_removed.extend(batch_removed)
+                temporary_relocation.extend(batch_temp_rels)
 
+                # Track completed session IDs
+                for df in batch_results:
+                    for sid in df['SessionID'].unique():
+                        completed_ids.append(sid)
+                for subset in batch:
+                    sid = subset['SessionID'].values[0]
+                    if sid not in completed_ids:
+                        completed_ids.append(sid)
 
-        Data_table.to_csv(f'{SAVE_DIR}Data_table_split.csv', index=False)
-        Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
-        #Data_subsets = run_function(LOGGER, split_table, Data_table['SessionID'].unique(), Parallel=PARALLEL, P_type='process')
+                # Save checkpoint after each batch
+                _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
 
-        # Order the data based on the criteria defined in DICOMorder and orderDicom
-        results = run_function(LOGGER, orderDicom, Data_subsets, Parallel=PARALLEL, P_type='process')
-        Data_table = pd.concat(results)
-        Data_table = Data_table.reset_index(drop=True)
-        LOGGER.info('')
-        LOGGER.info('Ordering complete')
-        LOGGER.info(f'Final number of unique sessions: {len(Data_table["SessionID"].unique())}')
-        LOGGER.info(f'Final number of scans: {len(Data_table)}')
-        LOGGER.info(f'Saving ordered data to {SAVE_DIR}{out_name}')
-        Data_table.to_csv(f'{SAVE_DIR}{out_name}', index=False)
+                # Free memory: clear large DataFrame accumulators after checkpoint persisted
+                all_results.clear()
+                all_removed.clear()
 
-    # Saving temporary relocation list to a file for review and running later
-    with open(f'{SAVE_DIR}temporary_relocation.pkl', 'wb') as f:
-        pickle.dump(list(temporary_relocation), f)
-    print('Temporary relocation list saved to temporary_relocation.pkl')
+                # Check disk space threshold
+                if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    total, used, free = shutil.disk_usage(cfg.save_dir)
+                    logger.warning(
+                        f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
+                        'Checkpoint saved. To resume, run:\n'
+                        f'  python 02_parseDicom.py --save_dir {cfg.save_dir} --resume'
+                    )
+                    return
 
-    #save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
-    #exit()
+            # Final assembly: reload from checkpoint to reconstruct full state (in-memory
+            # lists were cleared post-batch to cap RAM)
+            _, all_results, all_removed = _load_filter_checkpoint(cfg, logger)
+            results = [df for df in all_results if df is not None and not df.empty]
+            Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
 
-    if MOVE:
-        run_function(LOGGER, partial(relocate, relocations=list(temporary_relocation)), list(temporary_relocation), Parallel=PARALLEL, P_type='process')
+            all_removed = [r for r in all_removed if r is not None]
+            _aggregate_removed(removed_tables, all_removed)
 
-    if not stop_flag.is_set():
-        LOGGER.info('redirection complete without stop flag')
-        LOGGER.info('Removing progress file')
-        if os.path.exists('parseDicom_progress.pkl'):
-            os.remove('parseDicom_progress.pkl')
+            # Clean up checkpoint on success
+            _remove_checkpoint(cfg, logger)
+
     else:
-        LOGGER.info('Nifti conversion complete with stop flag')
-        if os.path.exists('parseDicom_progress.pkl'):
-            os.remove('parseDicom_progress.pkl')
-        save_progress(list(temporary_relocation), 'parseDicom_progress.pkl')
-        LOGGER.info('checkpoint file saved')
+        logger.info('Filtered table found, loading filtered data')
+        Data_table = pd.read_csv(filter_path, low_memory=False)
+
+    Iden_uniq_after = Data_table['SessionID'].unique() if not Data_table.empty else []
+
+    Iden_uniq_after_clean = []
+    for sid in Iden_uniq_after:
+        if sid[-2:] in ('_a', '_b', '_l', '_r'):
+            Iden_uniq_after_clean.append(sid[:-2])
+        else:
+            Iden_uniq_after_clean.append(sid)
+    Iden_uniq_after_clean = list(set(Iden_uniq_after_clean))
+
+    logger.info('Filtering Results:')
+    logger.info(f'Initial number of unique sessions: {len(Iden_uniq)}')
+    logger.info(f'Final number of unique sessions  : {len(Iden_uniq_after_clean)}')
+    logger.info(f'Final number of sessions (w/ lat): {len(Iden_uniq_after)}')
+    logger.info(f'Removed sessions                 : {len(Iden_uniq) - len(Iden_uniq_after_clean)}')
+
+    for key, value in removed_tables.items():
+        logger.info(f'=== {key} ===')
+        rem_id = value['SessionID'].unique()
+        gone_id = set(rem_id) - set(Iden_uniq_after_clean)
+        logger.info(f'  Sessions missing from output: {len(gone_id)}')
+        logger.info(f'  Scans removed               : {len(value)}')
+
+    Data_table = _normalize_bool_cols(Data_table)
+
+    if not os.path.exists(filter_path):
+        logger.info(f'Saving filtered data to {filter_path}')
+        _atomic_write_csv(Data_table, filter_path)
+
+        os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+        save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir)
+        run_function(logger, save_fn, list(removed_tables.items()),
+                    Parallel=cfg.parallel, P_type='process')
+
+        if cfg.export_fully_removed:
+            logger.info('Compiling fully removed sessions...')
+            iden_uniq_after_set = set(Iden_uniq_after)
+            fully_removed_list = [
+                PRE_TABLE[PRE_TABLE['SessionID'] == sid]
+                for sid in Iden_uniq if sid not in iden_uniq_after_set
+            ]
+            if fully_removed_list:
+                fully_removed = pd.concat(fully_removed_list, ignore_index=True)
+                fully_path = os.path.join(cfg.save_dir, 'removal_log', 'Removed_fully.csv')
+                fully_removed.to_csv(fully_path, index=False)
+                logger.info(f'Saved fully removed sessions to {fully_path}')
+        else:
+            logger.info('Export of fully removed sessions skipped.')
+
+    if cfg.filter_only:
+        logger.info('Filter only mode enabled. Exiting after filtering step.')
+        return
+
+    # -- Splitting step --------------------------------------------------
+    split_path = os.path.join(cfg.save_dir, 'Data_table_split.csv')
+
+    if not os.path.exists(split_path):
+        logger.info('No split table found, starting splitting process')
+
+        split_subsets = [
+            group.copy() for sid, group in Data_table.groupby('SessionID')
+            if sid in Iden_uniq_after
+        ]
+
+        # Try to resume from checkpoint
+        split_completed_ids = []
+        all_split_results = []
+        all_split_redirections = []
+
+        if cfg.resume:
+            split_completed_ids, all_split_results, all_split_redirections = \
+                _load_split_checkpoint(cfg, logger)
+            if split_completed_ids is not None:
+                logger.info(f'Resuming split checkpoint: {len(split_completed_ids)} sessions already split')
+            else:
+                cfg.resume = False
+
+        if split_completed_ids:
+            completed_set = set(split_completed_ids)
+            split_subsets = [
+                group.copy()
+                for sid, group in Data_table.groupby('SessionID')
+                if sid in Iden_uniq_after and sid not in completed_set
+            ]
+
+        if not split_subsets:
+            logger.info('All sessions already split or no data to split')
+            if all_split_results:
+                Data_table = pd.concat([df for df in all_split_results if not df.empty]).reset_index(drop=True)
+                temporary_relocation = list(all_split_redirections)
+                Iden_uniq_after = Data_table['SessionID'].unique()
+        else:
+            logger.info(f'Splitting {len(split_subsets)} session(s)')
+
+            split_fn = functools.partial(_split_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
+
+            for batch_start in range(0, len(split_subsets), cfg.filter_batch_size):
+                batch = split_subsets[batch_start:batch_start + cfg.filter_batch_size]
+                logger.info(
+                    f'Splitting batch {(batch_start // cfg.filter_batch_size) + 1}: '
+                    f'{batch_start + 1}-{min(batch_start + cfg.filter_batch_size, len(split_subsets))} '
+                    f'of {len(split_subsets)} sessions'
+                )
+
+                batch_results, batch_redirects = run_function(
+                    logger, split_fn, batch,
+                    Parallel=cfg.parallel, P_type='process',
+                )
+
+                batch_results = [df for df in batch_results if not df.empty]
+                all_split_results.extend(batch_results)
+                all_split_redirections.extend(batch_redirects)
+
+                for df in batch_results:
+                    for sid in df['SessionID'].unique():
+                        split_completed_ids.append(sid)
+                for subset in batch:
+                    sid = subset['SessionID'].values[0]
+                    if sid not in split_completed_ids:
+                        split_completed_ids.append(sid)
+
+                _save_split_checkpoint(cfg, logger, split_completed_ids,
+                                       all_split_results, all_split_redirections)
+
+                # Free memory: clear large accumulators after checkpoint persisted
+                all_split_results.clear()
+                all_split_redirections.clear()
+
+                # Check disk space threshold
+                if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    total, used, free = shutil.disk_usage(cfg.save_dir)
+                    logger.warning(
+                        f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
+                        'Checkpoint saved. To resume, run:\n'
+                        f'  python 02_parseDicom.py --save_dir {cfg.save_dir} --resume'
+                    )
+                    return
+
+            # Final assembly: reload from checkpoint so full state is available again
+            _, all_split_results, all_split_redirections = _load_split_checkpoint(cfg, logger)
+            results = [df for df in all_split_results if df is not None and not df.empty]
+            Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
+            temporary_relocation = list(all_split_redirections)
+            Iden_uniq_after = Data_table['SessionID'].unique()
+
+            _remove_split_checkpoint(cfg, logger)
+
+        logger.info(f'Updated scans after splitting            : {len(Data_table)}')
+        logger.info(f'Updated sessions after splitting          : {len(Iden_uniq_after)}')
+        logger.info(f'Temporary relocations after splitting     : {len(temporary_relocation)}')
+        logger.debug(f'Temp relocations example [first 3]: {temporary_relocation[:3]}')
+
+        _atomic_write_csv(Data_table, split_path)
+        _save_split_relocations(cfg, temporary_relocation)
+    else:
+        logger.info('Split table found, loading split data')
+        Data_table = pd.read_csv(split_path, low_memory=False)
+        temporary_relocation = _load_split_relocations(cfg) or []
+        if temporary_relocation:
+            logger.info(f'Loaded {len(temporary_relocation)} persistent split relocations')
+        else:
+            logger.info('No persisted split relocations found')
+
+    # -- Ordering step ---------------------------------------------------
+    Data_subsets = [group.copy() for _, group in Data_table.groupby('SessionID')]
+    order_input_ids = [subset['SessionID'].iloc[0] for subset in Data_subsets]
+
+    if not os.path.exists(out_path):
+        logger.info('No ordered table found, starting ordering process')
+        order_fn = functools.partial(_order_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
+
+        if cfg.resume:
+            completed_ids, order_results, order_removed = _load_order_checkpoint(
+                cfg, logger)
+            if completed_ids is not None and order_results is not None:
+                remaining = [item for item in zip(order_input_ids, Data_subsets)
+                             if item[0] not in completed_ids]
+                logger.info(
+                    f'Resuming order from checkpoint: '
+                    f'{len(completed_ids)} done, {len(remaining)} remaining'
+                )
+                Data_subsets = [item[1] for item in remaining]
+                order_input_ids = [item[0] for item in remaining]
+                if not Data_subsets:
+                    Data_table = pd.concat(
+                        [df for df in order_results if not df.empty]
+                    ).reset_index(drop=True)
+                    order_removed_df = pd.concat(
+                        [df for df in order_removed if not df.empty],
+                        ignore_index=True,
+                    )
+                    if not order_removed_df.empty:
+                        logger.info(
+                            f'{len(order_removed_df)} scans removed during '
+                            f'ordering for '
+                            f'{order_removed_df["SessionID"].nunique()} '
+                            f'session(s)')
+                        os.makedirs(
+                            os.path.join(cfg.save_dir, 'removal_log'),
+                            exist_ok=True,
+                        )
+                        _atomic_write_csv(
+                            order_removed_df,
+                            os.path.join(
+                                cfg.save_dir,
+                                'removal_log',
+                                'Removed_Ordering.csv',
+                            ),
+                        )
+                    else:
+                        logger.info('No scans removed during ordering')
+                    logger.info(
+                        'All ordering already completed from checkpoint')
+            else:
+                order_results = []
+                completed_ids = []
+                order_removed = []
+        else:
+            order_results = []
+            completed_ids = []
+            order_removed = []
+
+        if Data_subsets:
+            order_input = list(zip(order_input_ids, Data_subsets))
+            batch_size = getattr(cfg, 'filter_batch_size', 10)
+            for start in range(0, len(order_input), batch_size):
+                end = min(start + batch_size, len(order_input))
+                batch = [item[1] for item in order_input[start:end]]
+                batch_ids = [item[0] for item in order_input[start:end]]
+
+                new_ordered, new_removed = run_function(
+                    logger, order_fn, batch,
+                    Parallel=cfg.parallel, P_type='process',
+                )
+                order_results.extend(new_ordered)
+                order_removed.extend(new_removed)
+                completed_ids.extend(batch_ids)
+
+                _save_order_checkpoint(
+                    cfg, logger, completed_ids, order_results,
+                    order_removed,
+                )
+
+                # Free memory: clear large accumulators after checkpoint persisted
+                order_results.clear()
+                order_removed.clear()
+
+                # Check disk space threshold
+                if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    total, used, free = shutil.disk_usage(cfg.save_dir)
+                    logger.warning(
+                        f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
+                        'Checkpoint saved. To resume, run:\n'
+                        f'  python 02_parseDicom.py --save_dir {cfg.save_dir} --resume'
+                    )
+                    return
+
+            # Final assembly: reload from checkpoint so full state is available again
+            _, order_results, order_removed = _load_order_checkpoint(cfg, logger)
+            order_results = [df for df in order_results if df is not None and not df.empty]
+            Data_table = pd.concat(order_results).reset_index(drop=True) if order_results else pd.DataFrame()
+
+            order_removed_df = pd.concat([df for df in order_removed if not df.empty], ignore_index=True)
+            if not order_removed_df.empty:
+                logger.info(f'{len(order_removed_df)} scans removed during ordering for '
+                            f'{order_removed_df["SessionID"].nunique()} session(s)')
+                os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+                _atomic_write_csv(order_removed_df,
+                                  os.path.join(cfg.save_dir, 'removal_log', 'Removed_Ordering.csv'))
+            else:
+                logger.info('No scans removed during ordering')
+
+            logger.info('Ordering complete')
+            logger.info(f'Final sessions: {len(Data_table["SessionID"].unique())}')
+            logger.info(f'Final scans   : {len(Data_table)}')
+            logger.info(f'Saving ordered data to {out_path}')
+            _atomic_write_csv(Data_table, out_path)
+    else:
+        logger.info('Ordered table found, loading ordered data')
+        Data_table = pd.read_csv(out_path, low_memory=False)
+
+    # -- Symlink relocations ------------------------------------------------
+    logger.debug(
+        f'Creating symlinks for separated post scans. '
+        f'Temporary relocations: {len(temporary_relocation)}')
+    if temporary_relocation:
+        _relocate_worker(
+            commands=temporary_relocation,
+            relocations=temporary_relocation,
+            log_dir=os.path.join(cfg.save_dir, 'logs/'))
+
+    if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+        logger.warning(
+            f'Disk space is critically low. Checkpoint has been saved. '
+            'To resume processing later, run with --resume flag.\n'
+            f'Example:\n'
+            f'  python 02_parseDicom.py --save_dir {cfg.save_dir} --resume'
+        )
+        return
+
+    logger.info('Redirection complete')
+    _remove_checkpoint(cfg, logger)
+    _remove_split_checkpoint(cfg, logger)
+    _remove_order_checkpoint(cfg, logger)
+
 
 if __name__ == '__main__':
-    configure_runtime(parse_args())
-    # Start the profiler if enabled
-    if PROFILE:
-        LOGGER.info('Profiling enabled')
-        yappi.start()
-        LOGGER.info('Starting main function')
-    
-    # Create the save directory when necessary
-    if not os.path.exists(SAVE_DIR):
-        # Use try-except to handle directory creation, in case parallel processes try to create the same directory
-        try:
-            os.makedirs(SAVE_DIR)
-            LOGGER.info(f'Created directory: {SAVE_DIR}')
-        except Exception as e:
-            LOGGER.error(f'Error creating directory: {e}')
-    
-    # If not running on an HPC
-    if args.dir_idx is None:
-        main(SAVE_DIR=SAVE_DIR)
-    # If running on an HPC
-    else:
-        PARALLEL = False
-        assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
-        # Save to a temporary directory
-        SAVE_DIR = os.path.join(SAVE_DIR, 'tmp/')
-        with open(args.dir_list, 'rb') as f:
-            items = pickle.load(f)
-        target = items[args.dir_idx].strip()
-        LOGGER.info(f'Processing single directory: {args.dir_idx}')
-        main(out_name=f'Data_table_timing_{args.dir_idx}.csv', SAVE_DIR=SAVE_DIR, target=target)
+    cfg = build_config()
+    logger = create_logger(cfg)
 
-        if args.dir_idx == len(items) - 1:
-            LOGGER.info('Last script, compiling results')
-            Tables = []
-            while len(Tables) < len(items):
-                LOGGER.info('Waiting for all tables to be compiled')
-                time.sleep(5)
-                Tables = os.listdir(SAVE_DIR)
-                Tables = [table for table in Tables if table.endswith('.csv')]
-            LOGGER.info('All tables present, compiling...')
-            Data_table = pd.DataFrame()
-            for table in Tables:
-                LOGGER.info(f'Compiling {table}')
+    try:
+        if cfg.profile:
+            yappi.start()
+
+        os.makedirs(cfg.save_dir, exist_ok=True)
+
+        if cfg.dir_idx is None:
+            main(cfg, logger)
+        else:
+            cfg.parallel = False
+            assert os.path.exists(cfg.dir_list), \
+                f'Directory list file {cfg.dir_list} does not exist'
+            save_dir_worker = os.path.join(cfg.save_dir, 'tmp/')
+            cfg = replace(cfg, save_dir=save_dir_worker)
+            logger = create_logger(cfg)
+
+            with open(cfg.dir_list, 'rb') as f:
+                items = pickle.load(f)
+            target = items[cfg.dir_idx].strip()
+            logger.info(f'Processing single directory: {cfg.dir_idx}')
+            cfg = replace(cfg, target=target,
+                                            out_name=f'Data_table_timing_{cfg.dir_idx}.csv')
+
+            main(cfg, logger)
+
+            # Sentinel: every HPC job writes a done-marker after its work completes.
+            # Any job that detects all markers present triggers compilation (index-agnostic).
+            sentinel_base = os.path.join(save_dir_worker, '.done')
+            sentinel_path = f'{sentinel_base}.{cfg.dir_idx}'
+            marker_lock = f'{sentinel_base}.lock'
+            if not os.path.exists(sentinel_path):
+                with open(sentinel_path, 'w') as f:
+                    f.write(time.strftime('%Y-%m-%dT%H:%M:%S'))
+                logger.info(f'HPC sentinel {cfg.dir_idx} written')
+
+            all_markers = all(
+                os.path.exists(f'{sentinel_base}.{i}') for i in range(len(items))
+            )
+            max_wait = len(items) * 60
+            waited = 0
+
+            while not all_markers and waited < max_wait:
+                logger.info(
+                    f'Waiting for HPC workers ({waited}s of {max_wait}s max)')
+                time.sleep(10)
+                waited += 10
+                all_markers = all(
+                    os.path.exists(f'{sentinel_base}.{i}') for i in range(len(items))
+                )
+
+            if not all_markers:
+                logger.error(
+                    f'HPC compile timeout after {max_wait}s -- not all workers '
+                    f'completed. Skipping compile for dir_idx={cfg.dir_idx}')
+            else:
+                # File-lock so only one job runs the compile step
                 try:
-                    tmp_table = pd.read_csv(os.path.join(SAVE_DIR, table))
-                    Data_table = pd.concat([Data_table, tmp_table], ignore_index=True)
-                except pd.errors.EmptyDataError:
-                    LOGGER.error(f'{table} appears to be empty, skipping...')
-                    continue
-                except Exception as e:
-                    LOGGER.error(f'Error compiling {table}: {e}')
-                    break
-            SAVE_DIR = SAVE_DIR.replace('tmp/', '')
-            Data_table.to_csv(f'{SAVE_DIR}Data_table_timing.csv', index=False)
-            LOGGER.info(f'Compiled results saved to {SAVE_DIR}Data_table_timing.csv')
-            try:
-                subprocess.run(['rm', '-r', f'{SAVE_DIR}tmp/'], check=True)
-                LOGGER.info(f'Deleted temporary directory {SAVE_DIR}tmp/')
-            except Exception as e:
-                LOGGER.error(f'Error deleting temporary directory {SAVE_DIR}tmp/: {e}')
-    
-    # Finalize the profiler if enabled
-    if PROFILE:
-        LOGGER.info('Main function completed')
-        yappi.stop()
-        profile_output_path = 'step02_profile.yappi'
-        LOGGER.info(f'Writing profile results to {profile_output_path}')
-        yappi.get_func_stats().save(profile_output_path, type='pstat')
-        LOGGER.info(f'Profile results saved to {profile_output_path}')
-    exit()
+                    lock_fd = open(marker_lock, 'w')
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                except Exception:
+                    logger.error(f'Failed to acquire compile lock: {marker_lock}')
+                else:
+                    try:
+                        tables = [
+                            t for t in os.listdir(save_dir_worker)
+                            if t.endswith('.csv')
+                        ]
+                        logger.info(f'All workers done, compiling {len(tables)} tables')
+                        frames = []
+                        for table in tables:
+                            logger.info(f'Compiling {table}')
+                            try:
+                                frames.append(
+                                    pd.read_csv(os.path.join(save_dir_worker, table))
+                                )
+                            except pd.errors.EmptyDataError:
+                                logger.error(f'{table} is empty, skipping')
+                                continue
+                            except Exception as e:
+                                logger.error(f'Error compiling {table}: {e}')
+                                break
+                        combined = (
+                            pd.concat(frames, ignore_index=True)
+                            if frames
+                            else pd.DataFrame()
+                        )
+
+                        final_dir = os.path.dirname(save_dir_worker.rstrip('/'))
+                        combined.to_csv(
+                            os.path.join(final_dir, 'Data_table_timing.csv'),
+                            index=False,
+                        )
+                        logger.info(f'Compiled results saved to {final_dir}')
+                        try:
+                            shutil.rmtree(save_dir_worker)
+                            logger.info(f'Deleted temporary directory {save_dir_worker}')
+                        except Exception as e:
+                            logger.error(f'Error deleting {save_dir_worker}: {e}')
+                    finally:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                        lock_fd.close()
+
+    finally:
+        if cfg.profile:
+            yappi.stop()
+            profile_path = 'step02_profile.yappi'
+            logger.info(f'Writing profile results to {profile_path}')
+            yappi.get_func_stats().save(profile_path, type='pstat')
+            logger.info(f'Profile results saved to {profile_path}')
+
+    sys.exit(0)

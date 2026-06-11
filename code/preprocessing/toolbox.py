@@ -2,152 +2,470 @@ import time
 import logging
 import os
 import fcntl
+import queue
+import atexit as _atexit
+import sys
 
-from typing import Callable, List, Any
+from typing import Callable, List, Any, Optional
 from functools import partial
-from multiprocessing import cpu_count, Event
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from multiprocessing import cpu_count
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from logging.handlers import QueueHandler, QueueListener
+
+
+# ---- Module state ----------------------------------------------------------
+_listener_registry: dict[str, QueueListener] = {}
+
+
+def _stop_all_listeners() -> None:
+    """Flush + stop every listener started by get_logger."""
+    for lst in list(_listener_registry.values()):
+        try:
+            lst.stop()               # drains queue then exits consumer thread
+        except (RuntimeError, OSError):
+            pass                     # interpreter tearing down already
+
+
+_atexit.register(_stop_all_listeners)
+
+
+# ---- Handlers --------------------------------------------------------------
 
 class FileHandlerWithLock(logging.FileHandler):
-    """Custom FileHandler that uses a file lock to prevent concurrent writes."""
-    def emit(self, record):
-        with open(self.baseFilename, self.mode) as f:
-            fcntl.flock(f, fcntl.LOCK_EX)  # Acquire exclusive lock
-            try:
-                self.stream = f
-                super().emit(record)
-            finally:
-                self.stream = None
-                fcntl.flock(f, fcntl.LOCK_UN)  # Release lock
+    """File handler with per-emit advisory lock for child processes.
 
-def get_logger(name: str, save_dir: str = ''):
-    """Create a logger for the given name and save directory.
-    Args:
-        name (str): Name of the logger.
-        save_dir (str): Directory to save the log file.
-    Returns:
-        logging.Logger: Configured logger object.
-    """
-    # Check if save_dir exists
-    if save_dir and save_dir[-1] != '/':
-        save_dir += '/'
-    
-    if save_dir and not os.path.exists(save_dir):
-        # Use try for parallel creation of directories
+    Used when multiple **processes** (ProcessPoolExecutor workers) write to the
+    same log file concurrently.  Each emit() opens its own handle, acquires an
+    exclusive flock(), writes, then closes — so no shared mutable stream state."""
+
+    def __init__(self, filename: str, mode: str = 'a', encoding: Optional[str] = None):
+        super().__init__(filename, mode, encoding, delay=True)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = self.format(record)
+        with open(self.baseFilename, self.mode, encoding=self.encoding) as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                fh.write(msg + self.terminator)
+                fh.flush()
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+# ---- Child-process initialiser ---------------------------------------------
+
+def _init_child_logger(
+    logger_name: str,
+    logger_level: int,
+    file_path: str,
+    formatter_str: str,
+) -> None:
+    """Called once per spawned child process.
+
+    Installs a direct FileHandlerWithLock (no queue needed in an isolated process)."""
+    lgr = logging.getLogger(logger_name)
+    lgr.handlers.clear()
+    lgr.setLevel(logger_level)
+    lgr._log_level = logger_level          # so run_function can read it back.
+    lgr._formatter_str = formatter_str
+    file_path_abs = os.path.abspath(file_path) if file_path else ''
+    lgr._file_path = file_path_abs
+
+    fmt = logging.Formatter(formatter_str)
+    fh = FileHandlerWithLock(file_path, mode='a')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    lgr.addHandler(fh)
+
+    # Prevent every log line from double-writing via propagation to root handler
+    lgr.propagate = False
+
+    # Give the root logger a handler so bare logging.error/warning calls from
+    # deep inside worker functions or library code also reach the log file.
+    root = logging.getLogger()
+    if not root.handlers:
+        root_fh = FileHandlerWithLock(file_path, mode='a')
+        root_fh.setLevel(logger_level)
+        root_fh.setFormatter(fmt)
+        root.addHandler(root_fh)
+
+
+# ---- Hybrid chunk worker (module-level so it is picklable) -----------
+
+def _chunk_target(
+    global_start: int,
+    chunk_items: List[Any],
+    target_fn: Callable,
+    target_args: tuple,
+    target_kwargs: dict,
+    threads: int,
+) -> tuple:
+    """Work inside one ProcessPoolExecutor child.
+
+    Must live at module-level so ProcessPoolExecutor can pickle it and ship
+    it to worker processes via the ``spawn`` start method."""
+    ordered: List[Optional[Any]] = [None] * len(chunk_items)
+
+    with ThreadPoolExecutor(max_workers=threads) as inner_pool:
+        fut_map = {}
+        for j, item in enumerate(chunk_items):
+            fut = inner_pool.submit(_process_worker, target_fn,
+                                    item, *target_args, **target_kwargs)
+            fut_map[fut] = j
+
+        for fut in as_completed(fut_map):
+            idx_in_chunk = fut_map.pop(fut)
+            try:
+                result = fut.result()
+                ordered[idx_in_chunk] = result
+            except Exception as e:
+                root = logging.getLogger()
+                root.error(
+                    f'Hybrid thread error (offset {global_start+idx_in_chunk} '
+                    f'in {getattr(target_fn, "__name__", "unknown")}): {e}',
+                    exc_info=True,
+                )
+                ordered[idx_in_chunk] = None
+
+    return global_start, ordered
+
+
+# ---- Process worker wrapper ------------------------------------------------
+
+def _process_worker(target: Callable[..., Any], item: Any, *args: Any, **kwargs: Any):
+    """Top-level callable submitted to ProcessPoolExecutor."""
+    return target(item, *args, **kwargs)
+
+
+# ---- Logger proxy (drop-in replacement for a raw logging.Logger) -----------
+
+class _LoggerProxy(logging.Logger):
+    """Wraps a logging.Logger so that attribute access is forwarded.
+
+    Allows us to stash extra attributes (_log_level, _file_path, etc.) without
+    polluting the global Logger class — but callers never notice: they still
+    have ``LOGGER.debug(...)`` working exactly as before."""
+
+    def __init__(self, logger: logging.Logger):
+        # Stash a reference we can reach via __getattr / __setattr__.
+        object.__setattr__(self, '_wrapped', logger)
+        # Copy over instance-level attrs so that the underlying loggers are
+        # independent if get_logger() is called twice with a previously-unseen name.
+
+    def _fwd(self: logging.Logger, *a: Any, **kw: Any) -> None: ...  # type: ignore[override]
+
+    def debug(self, msg: str, *args: Any, **kwargs: Any):
+        self._wrapped.debug(msg, *args, **kwargs)
+
+    def info(self, msg: str, *args: Any, **kwargs: Any):
+        self._wrapped.info(msg, *args, **kwargs)
+
+    def warning(self, msg: str, *args: Any, **kwargs: Any):
+        self._wrapped.warning(msg, *args, **kwargs)
+
+    def warn(self, msg: str, *args: Any, **kwargs: Any):
+        self._wrapped.warn(msg, *args, **kwargs)
+
+    def error(self, msg: str, *args: Any, **kwargs: Any):
+        self._wrapped.error(msg, *args, **kwargs)
+
+    def exception(self, msg: str, *args: Any, **kwargs: Any):
+        self._wrapped.exception(msg, *args, **kwargs)
+
+    def critical(self, msg: str, *args: Any, **kwargs: Any):
+        self._wrapped.critical(msg, *args, **kwargs)
+
+    def fatal(self, msg: str, *args: Any, **kwargs: Any):
+        self._wrapped.fatal(msg, *args, **kwargs)
+
+    # ---- attribute delegation -----------------------------------------------
+
+    def __getattr__(self, name: str) -> Any:
+        return object.__getattribute__(self, '_wrapped').__getattribute__(name)
+
+    def __setattr__(self, name: str, value: Any):
+        if name == "_wrapped":
+            super().__setattr__(name, value)
+        else:
+            object.__getattribute__(self, '_wrapped').__setattr__(name, value)
+
+
+# ---- Public API ------------------------------------------------------------
+
+def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
+    """Create a logger that is fast under high concurrency.
+
+    The hot-path from *every* producer thread / process is an expensive-free
+    ``queue.put(record)`` call to our :class:`~logging.handlers.QueueHandler`.  A
+    single daemon consumer drains the queue and does all file + stream I/O
+    sequentially — meaning zero per-emit lock contention."""
+
+    if save_dir:
+        if save_dir[-1] != '/':
+            save_dir += '/'
+        os.makedirs(save_dir, exist_ok=True)
+
+    log_level = logging.DEBUG
+    formatter_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    file_path = save_dir + name + '.log'
+
+    # --- underlying Logger (managed by Python's logging system) ---------------
+    logger = logging.getLogger(name)
+
+    # Stop any existing listener for this name to prevent thread + handler leak.
+    old_listener = _listener_registry.pop(name, None)
+    if old_listener is not None:
         try:
-            os.makedirs(save_dir)
-        except FileExistsError:
+            old_listener.stop()
+        except (RuntimeError, OSError):
             pass
 
-    # Initialize logger
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    logger.setLevel(log_level)
 
-    # Create file handler which logs even debug messages
-    fh = FileHandlerWithLock(save_dir + name + '.log')
-    fh.setLevel(logging.DEBUG)
+    fmt = logging.Formatter(formatter_str)
 
-    # Create console handler with a higher log level
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    # Use plain FileHandler for the parent QueueListener consumer path.
+    # The listener drains records from a single thread, so there's only one
+    # concurrent writer and we don't need per-emit flock overhead.
+    fh_file = logging.FileHandler(file_path, mode='a')
+    fh_file.setLevel(logging.DEBUG)
+    fh_file.setFormatter(fmt)
 
-    # Create formatter and add it to the handlers
-    fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    ch.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+    ch_stream = logging.StreamHandler()
+    ch_stream.setLevel(logging.INFO)
+    ch_stream.setFormatter(fmt)
 
-    # Add the handlers to the logger
-    logger.addHandler(fh)
-    logger.addHandler(ch)
+    # Ensure the root logger also has a handler so bare `logging.error()` calls work.
+    if not logging.getLogger().handlers:
+        root_fh = FileHandlerWithLock(file_path, mode='a')
+        root_fh.setLevel(log_level)
+        root_fh.setFormatter(fmt)
+        logging.getLogger().addHandler(root_fh)
 
-    return logger
+    # Producer-side QueueHandler (cheap put only) -----------------
+    log_queue: 'queue.Queue[logging.LogRecord]' = queue.Queue(-1)
+    qh = QueueHandler(log_queue)
+    logger.addHandler(qh)
 
-def run_function(LOGGER: logging.Logger, target: Callable[..., Any], items: List[Any], Parallel: bool=True, P_type: str='thread', N_CPUS: int=0, stop_flag: Event=None, *args, **kwargs) -> List[Any]:
-    """Run a function with a list of items in parallel or sequentially.
+    # Prevent every log line from double-writing via propagation to root handler
+    logger.propagate = False
+
+    listener = QueueListener(
+        log_queue, fh_file, ch_stream,
+        respect_handler_level=True,
+    )
+    # Non-daemon so interpreter waits for it -> flushes pending records.
+    listener.daemon_threads = False          # type: ignore[attr-defined]
+    try:
+        listener._thread.daemon = False      # explicit flag for older stdlib versions
+    except AttributeError:
+        pass
+
+    _listener_registry[name] = listener   # unconditionally register for atexit flush
+
+    # Unconditional registration ensures pending queue records are never lost
+
+    listener.start()                           # begin draining the queue immediately
+
+    logger._log_level = logging.DEBUG
+    logger._file_path = os.path.abspath(file_path) if file_path else ''
+    logger._formatter_str = formatter_str
+
+    ctx = _LoggerProxy(logger)
+    return ctx
+
+
+# ---- Parallel runner -------------------------------------------------------
+
+def run_function(
+    LOGGER: Any,                          # can be a Logger or _LoggerProxy
+    target: Callable[..., Any], items: List[Any],
+    Parallel: bool = True, P_type: str = 'thread', N_CPUS: int = 0, N_THREADS: int = 0,
+    stop_flag: Optional[object] = None, *args: Any, **kwargs: Any,
+) -> List[Any]:
+    """Run a function over *items* in parallel or sequentially.
+
     Args:
-        LOGGER (logging.Logger): Logger object for logging.
-        target (Callable[..., Any]): The function to run.
-        items (List[Any]): List of items to process.
-        Parallel (bool): Whether to run in parallel or sequentially.
-        P_type (str): Type of parallelism ('thread' or 'process').
-        N_CPUS (int): Number of CPUs to use for parallel processing.
-        *args: Additional arguments to pass to the target function.
-        **kwargs: Additional keyword arguments to pass to the target function.
+        LOGGER (:class:`logging.Logger`): Logger for diagnostic output.
+        target (Callable[..., Any]): Worker function. First argument receives the item.
+            In thread / sequential mode logger is passed via closure or global state;
+            under process mode child processes receive their own freshly initialised logger
+            (we must NOT send LOGGER across a pickle boundary).
+        items (List[Any]): Items to feed into *target* one by one.
+        Parallel (bool): Whether to dispatch in parallel at all (False → serial loop).
+        P_type (str): ``'thread'``, ``'process'`` or ``'hybrid'``.  Anything else falls back to serial.
+            Hybrid mode spawns ProcessPoolExecutor workers -- each managing its own 
+            ThreadPoolExecutor of size *N_THREADS* for concurrent I/O within process-scoped network address space isolation.
+        N_CPUS (int): Suggested worker count; 0 means "best auto-guess".
+        N_THREADS (int): Thread pool size per-hybrid-worker or max workers when P_type == 'thread';
+            0 uses default (2 * N_CPUS).
+
     Returns:
-        List[Any]: List of results from the target function.
-    """
+        List[Any]: Results in the same order as *items*.  If every result is a tuple,
+        returns ``list(zip(*results))`` for backwards compatibility."""
 
     target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
-    if N_CPUS == 0:
-        N_CPUS = cpu_count() - 1
-    else:
-        N_CPUS = min(N_CPUS, cpu_count() - 1)
-            
-    # Debugging information
-    LOGGER.debug(f'Running {target_name} {" in parallel" if Parallel else "sequentially"}')
+
+    def _effective_cpus(n: int) -> int:
+        total = cpu_count() - 1
+        return n if n > 0 else max(total, 1)
+
+    N_CPUS = _effective_cpus(N_CPUS)
+
+    LOGGER.debug(f'Running {target_name} {" in parallel" if Parallel else "serially"}')
     LOGGER.debug(f'Number of items: {len(items)}')
 
-    # Run the target function with a progress bar
-    results = []
+    results: List[Any] = []
     try:
-        if Parallel:
+        # ───────── process mode ─────────
+        if Parallel and P_type == 'process':
             max_workers = min(32, 2 * N_CPUS)
-            LOGGER.debug(f'Using {P_type} with max_workers={max_workers}')
-            Executor = ThreadPoolExecutor if P_type == 'thread' else ProcessPoolExecutor
-            with Executor(max_workers=max_workers) as executor:
-                futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-                for i, future in enumerate(futures):
-                    if stop_flag and stop_flag.is_set():
-                        LOGGER.info('Stopping parallel processing due to stop flag')
+            LOGGER.debug(f'Using {P_type} workers={max_workers}')
+            init_args = (LOGGER.name, LOGGER._log_level,
+                         LOGGER._file_path, LOGGER._formatter_str)
+
+            with ProcessPoolExecutor(max_workers=max_workers,
+                                     initializer=_init_child_logger,
+                                     initargs=init_args) as executor:
+                future_map = {executor.submit(_process_worker, target, item, *args, **kwargs): i
+                              for i, item in enumerate(items)}
+                ordered: List[Optional[Any]] = [None] * len(future_map)
+
+                for fut in as_completed(future_map):
+                    idx = future_map.pop(fut)
+                    if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
+                        LOGGER.info('Stopping parallel processing (stop flag).')
                         break
-                    retries = 3
-                    while retries > 0:
-                        try:
-                            LOGGER.debug(f'Waiting for future {i} to complete: {retries} retries left') 
-                            result = future.result(timeout=300)
-                            results.append(result)
-                            LOGGER.debug(f'Future {i} completed successfully')
-                            break
-                        except TimeoutError:
-                            LOGGER.error(f'Timeout error for item {i}. Retrying...')
-                            retries -= 1
-                        except KeyboardInterrupt:
-                            LOGGER.error('KeyboardInterrupt received. Stopping processing.')
-                            if stop_flag:
-                                stop_flag.set()
-                            for f in futures:
-                                f.cancel()
-                            executor.shutdown(wait=False, cancel_futures=True)
-                        except Exception as e:
-                            LOGGER.error(f'Error in parallel processing for item {i}: {e}', exc_info=True)
-                            retries -= 1
-                        if retries == 0:
-                            LOGGER.error(f'Max retries reached for item {i}. Skipping...')
+                    try:
+                        result = fut.result()         # fast path for already-completed work
+                        ordered[idx] = result
+                        LOGGER.debug(f'Future {idx} completed successfully')
+                    except KeyboardInterrupt:
+                        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
+                        if stop_flag and getattr(stop_flag, 'set', None):
+                            stop_flag.set()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception as e:
+                        LOGGER.error(
+                            f'Error parallel processing item {idx}: {e}', exc_info=True)
+                        ordered[idx] = None
+
+                results = list(ordered)
+
+        # ───────── thread mode ────────────────
+        elif Parallel and P_type == 'thread':
+            max_workers = min(32, 2 * N_CPUS)
+            LOGGER.debug(f'Using {P_type} workers={max_workers}')
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {executor.submit(target, item, *args, **kwargs): i
+                              for i, item in enumerate(items)}
+                ordered = [None] * len(future_map)
+
+                for fut in as_completed(future_map):
+                    idx = future_map.pop(fut)
+                    if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
+                        LOGGER.info('Stopping parallel processing (stop flag).')
+                        break
+                    try:
+                        result = fut.result()
+                        ordered[idx] = result
+                        LOGGER.debug(f'Future {idx} completed successfully')
+                    except KeyboardInterrupt:
+                        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
+                        if stop_flag and getattr(stop_flag, 'set', None):
+                            stop_flag.set()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception as e:
+                        LOGGER.error(f'Error parallel processing item {idx}: {e}', exc_info=True)
+                        ordered[idx] = None
+
+                results = list(ordered)
+
+        # ───────── hybrid: processes chunk + threads reuse I/O per-chunk ────
+        elif Parallel and P_type == 'hybrid':
+            # Cap total concurrency to avoid filesystem thrashing on I/O-bound DICOM scans.
+            max_workers = min(16, N_CPUS)
+            effective_threads = N_THREADS if N_THREADS > 0 else max(2 * max_workers, cpu_count())
+            threads_per_worker = max(2, effective_threads // max(max_workers, 1))
+
+            LOGGER.debug(f'Using {P_type}: ~{max_workers} process workers, ~{threads_per_worker} threads each')
+
+            init_args = (LOGGER.name, LOGGER._log_level,
+                         LOGGER._file_path, LOGGER._formatter_str)
+
+
+
+            # Create evenly-sized chunks and track global indices in parent.
+            n_workers = min(max_workers, len(items)) if items else 0
+            workers: List[Any] = []
+            for i in range(n_workers):
+                start = (i * len(items)) // n_workers
+                end = ((i + 1) * len(items)) // n_workers if i < n_workers - 1 else len(items)
+                chunk = items[start:end]
+                if chunk:
+                    workers.append((start, chunk))
+
+            results: List[Optional[Any]] = [None] * len(items)
+
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_init_child_logger,
+                initargs=init_args,
+            ) as pexecutor:
+                future_to_chunk = {
+                    pexecutor.submit(_chunk_target, start, chunk, target, args, kwargs,
+                                     threads_per_worker): (start, end)
+                    for start, chunk in workers
+                }
+
+                for fut in as_completed(future_to_chunk):
+                    idx_range = future_to_chunk.pop(fut)
+                    try:
+                        global_start, ordered_list = fut.result()
+                        if not isinstance(ordered_list, list):
+                            ordered_list = list(ordered_list)
+                        for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
+                                          ordered_list):
+                            if k < len(results):
+                                results[k] = val
+                    except KeyboardInterrupt:
+                        pexecutor.shutdown(wait=False, cancel_futures=True)
+                        raise
+
+                results = list(results)
+
+        # ───────── fallback serial ─────────────
         else:
-            for item in items:
-                if stop_flag and stop_flag.is_set():
-                    LOGGER.info('Stopping sequential processing due to stop flag')
+            if Parallel and P_type not in ('thread', 'process'):
+                LOGGER.error(f'Unknown P_type={P_type}, falling back to serial.')
+            for i, item in enumerate(items):
+                if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
                     break
                 try:
-                    result = target(item, *args, **kwargs)
-                    results.append(result)
-                except Exception as e:
-                    LOGGER.exception(f'Error in sequential processing')
+                    results.append(target(item, *args, **kwargs))
+                except Exception as exc:
+                    LOGGER.exception(f'Error at index {i}')
+
     except KeyboardInterrupt:
         LOGGER.error('KeyboardInterrupt received. Stopping processing.')
-        if stop_flag:
+        if stop_flag and getattr(stop_flag, 'set', None):
             stop_flag.set()
     finally:
-        LOGGER.debug(f'Completed {target_name} {" in parallel" if Parallel else "sequentially"}')
+        LOGGER.debug(f'Completed {target_name} {" in parallel" if Parallel else "serially"}')
         LOGGER.debug(f'Number of results: {len(results)}')
 
-    # Check if results is a list of tuples before returning zip(*results)
+    # Backwards compat with workers returning (list, dict) tuples.
     if results and isinstance(results[0], tuple):
-        return zip(*results)
+        return list(zip(*results))
     return results
 
+
+# ---- Progress bar ----------------------------------------------------------
+
 class ProgressBar:
-    # Class to create a progress bar
-    # Will display a progress bar with the current progress, the current step, the status, and the estimated time remaining
     def __init__(self, total, splits=20, update_interval=1):
         self.total = total
         self.splits = splits

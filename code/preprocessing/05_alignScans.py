@@ -14,8 +14,8 @@ import subprocess
 import threading
 
 from toolbox import ProgressBar, get_logger, run_function
-#BASE_PATH = '/FL_system'
-BASE_PATH = '/home/nleotta000/Projects/'
+BASE_PATH = '/FL_system'
+#BASE_PATH = '/home/nleotta000/Projects/'
 # Global variables for progress bar and lock
 Progress = None
 manager = Manager()
@@ -32,6 +32,12 @@ parser.add_argument('--prune', '-p', action='store_true', help='Enable the delet
 args = parser.parse_args()
 
 LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
+# Log niftyreg version
+try:
+    result = subprocess.run(['reg_f3d', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+    LOGGER.info(f'NiftyReg version: {result.stdout.strip()}')
+except subprocess.CalledProcessError as e:
+    LOGGER.error(f'Error checking NiftyReg version: {e}')
 
 # Define necessary directories
 LOAD_DIR = args.load_dir
@@ -191,8 +197,8 @@ if __name__ == '__main__':
         if TEST:
             Dirs = Dirs[:N_TEST]
         LOGGER.info(f'Processing {len(Dirs)} directories')
-        #run_with_progress(align, Dirs, Parallel=PARALLAL)
-        run_function(align, Dirs, Parallel=PARALLAL, P_type = 'Process')
+        run_with_progress(align, Dirs, Parallel=PARALLAL)
+        #run_function(align, Dirs, Parallel=PARALLAL, P_type = 'Process')
     else:
         # if running on an HPC
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
@@ -204,8 +210,8 @@ if __name__ == '__main__':
             LOGGER.debug(f'Converting Dir to list: {Dir}')
             Dir = [Dir]
         LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
-        #run_with_progress(align, Dir, Parallel=PARALLAL)
-        run_function(align, Dir, Parallel=PARALLAL, P_type = 'Process') 
+        run_with_progress(align, Dir, Parallel=PARALLAL)
+        #run_function(align, Dir, Parallel=PARALLAL, P_type = 'Process') 
         Dirs = Dir
     
     if PRUNE:

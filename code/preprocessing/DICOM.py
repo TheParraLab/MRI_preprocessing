@@ -1,5 +1,6 @@
 import numpy as np
 import pydicom as pyd
+from pydicom import tag
 import glob
 import logging
 from typing import Union
@@ -8,27 +9,57 @@ import pandas as pd
 import re
 import shutil
 
+# Tags loaded during initialization to avoid parsing megabytes of vendor private blocks.
+# Maps one-to-one to every `self.metadata.<attr>` / `getattr(self.metadata, ...)` access.
+_DCM_SPECIFIC_TAGS = (
+    tag.Tag('ImageOrientationPatient'),   # Orientation(), LR()
+    tag.Tag('PatientID'),                 # ID()
+    tag.Tag('AccessionNumber'),           # Accession()
+    tag.Tag('StudyDate'),                 # Date()
+    tag.Tag('SeriesDescription'),         # Desc(), LR() fallback chain
+    tag.Tag('RepetitionTime'),            # Modality()
+    tag.Tag('AcquisitionTime'),           # Acq()
+    tag.Tag('BodyPartExamined'),          # Part()
+    tag.Tag('SeriesTime'),                # Srs()
+    tag.Tag('ContentTime'),               # Con()
+    tag.Tag('StudyTime'),                 # Stu()
+    tag.Tag('TriggerTime'),               # Tri()
+    tag.Tag(0x0018, 0x2516),               # Inj() — DICOM tag (0018,2516) for InjectionTime; use hex to avoid keyword-dict failures in newer pydicom
+    tag.Tag('Laterality'),                # LR() primary path
+    tag.Tag('SliceThickness'),            # Thickness()
+    tag.Tag('DiffusionBValue'),           # DWI()
+    tag.Tag('ImageType'),                 # Type()
+    tag.Tag('SeriesNumber'),              # Series()
+    tag.Tag('PatientName'),               # Name()
+    tag.Tag('PatientBirthDate'),          # DOB()
+    ('0019', '105A'),                    # ScanDur() private acquisition duration
+)
+
 class DICOMextract:
     """
     Class for extracting relevant metadata from DICOM files.
     """
     UNKNOWN = 'Unknown'
 
-    def __init__(self, file_path: str, debug: int = 0):
+    def __init__(self, file_path: str, debug: int = 0, num_slices: int = None):
         """
         Initialize the extractor with a DICOM file path.
 
         Args:
             file_path (str): The path to the DICOM file.
             debug (int): Debug level for logging.
+            num_slices (int, optional): Pre-computed number of .dcm files in the
+                directory.  If provided, NumSlices() returns this value directly,
+                avoiding an expensive glob.glob() call for every file.
 
         TODO: Consider lazy loading or selective tag reading if parsing thousands
               of massive files. `stop_before_pixels=True` helps, but further pydicom
               optimizations exist (e.g., `specific_tags`).
         """
         self.debug = debug
-        self.metadata = pyd.dcmread(file_path, stop_before_pixels=True)
+        self.metadata = pyd.dcmread(file_path, stop_before_pixels=True, specific_tags=_DCM_SPECIFIC_TAGS)
         self.metadata.filepath = file_path
+        self._num_slices = num_slices
     
     def log_error(self, message, exception=None):
         if self.debug > 1 and exception:
@@ -38,7 +69,7 @@ class DICOMextract:
 
     def Orientation(self) -> Union[int, str]:
         """
-        Attempts to extract the orientation of the scan.
+        Attempts to extract the orientation of the scan.MRI_preprocessing
 
         Returns:
             Union[int, str]: Integer representing orientation (0 = sagittal, 1 = coronal,
@@ -95,14 +126,33 @@ class DICOMextract:
     def Modality(self) -> str:
         """Attempts to extract the modality of the scan"""
         try:
-            if self.metadata.RepetitionTime >= 780:
+            # DIAGNOSTIC LOG: Validate RepetitionTime attribute existence and value
+            rep_time_raw = getattr(self.metadata, 'RepetitionTime', None)
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC Modality] RepetitionTime raw value = {rep_time_raw} (type={type(rep_time_raw).__name__}) | File: {getattr(self.metadata, "filepath", "N/A")}')
+            
+            # Handle case where RepetitionTime exists but is a pydicom DataElement (not raw value)
+            if rep_time_raw is not None and not isinstance(rep_time_raw, (int, float)):
+                rep_time = float(rep_time_raw) if rep_time_raw is not None else None
+            else:
+                rep_time = rep_time_raw
+            
+            if rep_time is None:
+                logging.warning(f'[DIAGNOSTIC Modality] RepetitionTime is None, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
+                return self.UNKNOWN
+            
+            if rep_time >= 780:
                 modality = 'T2'
             else:
                 modality = 'T1'
+            
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC Modality] Final modality = {modality} (rep_time={rep_time}) | File: {getattr(self.metadata, "filepath", "N/A")}')
             return modality
         except Exception as e:
             self.log_error('Unable to read RepetitionTime', e)
             return self.UNKNOWN
+
         
     def Acq(self) -> str:
         """Attempts to extract the acquisition time of the scan"""
@@ -112,7 +162,15 @@ class DICOMextract:
         except Exception as e:
             self.log_error('Unable to read AcquisitionTime', e)
             return self.UNKNOWN
-        
+    
+    def Part(self) -> str:
+        """Attempts to extract the body part examined in the scan"""
+        try:
+            return self.metadata.BodyPartExamined
+        except Exception as e:
+            self.log_error('Unable to read BodyPartExamined', e)
+            return self.UNKNOWN
+
     def Srs(self) -> str:
         """Attempts to extract the series time of the scan"""
         try:
@@ -201,8 +259,19 @@ class DICOMextract:
         try:
             rcsCoordX1 = self.metadata.ImageOrientationPatient[0]
             directory = os.path.dirname(self.metadata.filepath)
-            files = sorted(glob.glob(directory, '*.dcm'))
-            rcsCoordX2 = pyd.dcmread(files[-1], stop_before_pixels=True).ImageOrientationPatient[0]
+            # DIAGNOSTIC LOG: Validate glob.glob arguments
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC glob] directory={directory}')
+            # FIX: glob.glob takes a single pattern string, not separate directory and extension
+            # Original buggy code: glob.glob(directory, '*.dcm')
+            # Correct usage: glob.glob(os.path.join(directory, '*.dcm'))
+            glob_pattern = os.path.join(directory, '*.dcm')
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC glob] pattern={glob_pattern}')
+            files = sorted(glob.glob(glob_pattern))
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC glob] found {len(files)} files')
+            rcsCoordX2 = pyd.dcmread(files[-1], stop_before_pixels=True, specific_tags=(tag.Tag('ImageOrientationPatient'),)).ImageOrientationPatient[0]
             if np.mean([rcsCoordX1, rcsCoordX2]) > 0:
                 return 'left'
             elif np.mean([rcsCoordX1, rcsCoordX2]) < 0:
@@ -249,12 +318,9 @@ class DICOMextract:
 
         Returns:
             Union[int, str]: Number of slices or UNKNOWN.
-
-        TODO: Performance bottleneck. `glob.glob` on the directory for every single
-              file processing can drastically slow down extraction, particularly on NFS.
-              Consider passing the slice count directly if it is already known or
-              caching directory sizes.
         """
+        if self._num_slices is not None:
+            return self._num_slices
         try:
             files = glob.glob('/'.join(self.metadata.filepath.split('/')[:-1])+'/*.dcm')
             n_slices = len(files)
@@ -321,9 +387,9 @@ class DICOMfilter():
         self.temporary_relocations = []
         self.multiple_lat = False
         if 'Pre_scan' not in self.dicom_table.columns:
-            self.dicom_table['Pre_scan'] = 0
+            self.dicom_table['Pre_scan'] = False
         if 'Post_scan' not in self.dicom_table.columns:
-            self.dicom_table['Post_scan'] = 0
+            self.dicom_table['Post_scan'] = False
         assert self.Session_ID.size == 1, 'Multiple Session_IDs found in the table'
         self.logger.debug('='*50)
         self.logger.debug(f'Analyzing {self.Session_ID}')
@@ -605,7 +671,7 @@ class DICOMfilter():
                 mask = self.dicom_table['Pre_scan'] == 1
                 self.dicom_table.loc[mask & (self.dicom_table['Post_scan'] == 0), 'Pre_scan'] = contains_pre[mask].astype(bool)
             else:             
-                self.dicom_table.loc[self.dicom_table['Post_scan'] == 0, 'Pre_scan'] = contains_pre
+                self.dicom_table.loc[self.dicom_table['Post_scan'] == 0, 'Pre_scan'] = contains_pre.astype(bool)
             pre_found = self.dicom_table['Pre_scan'].to_numpy().astype(bool)
             self.logger.debug(f'Series Description pre scan detection found {pre_found.sum()} pre scans | {self.Session_ID}')
             return pre_found
@@ -875,8 +941,8 @@ class DICOMfilter():
             self.logger.debug(f'Multiple laterality represented in dicom data, need to seperate... | {self.Session_ID}')
             self.multiple_lat = True
 
-        self.dicom_table['Post_scan'] = 0
-        self.dicom_table['Pre_scan'] = 0
+        self.dicom_table['Post_scan'] = False
+        self.dicom_table['Pre_scan'] = False
 
         # FINDING POST SEQUENCE
         post_success = self.detect_post('check')
@@ -916,10 +982,10 @@ class DICOMfilter():
                     # If post detection now workd, continue to applying post detection
                     self.logger.debug(f'Post detection failure ameliorated through laterality separation | {self.Session_ID}')
                     self.detect_post('apply')
-                    self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1]
-                    self.dicom_post['Post_scan'] = True
-                    self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0]
-                    self.dicom_table['Post_scan'] = False
+                    self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1].copy()
+                    self.dicom_post.loc[:, 'Post_scan'] = True
+                    self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0].copy()
+                    self.dicom_table.loc[:, 'Post_scan'] = False
                     self.apply_slices(use='post')
                     self.logger.debug(f'Successfully detected post sequence | {self.Session_ID}')
                     self.print_table(self.dicom_post, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
@@ -946,10 +1012,10 @@ class DICOMfilter():
         # Post sequence can be determined immediately, detect and filter
         self.detect_post('apply')
         self.apply_slices(use='post')
-        self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1]
-        self.dicom_post['Post_scan'] = True
-        self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0]
-        self.dicom_table['Post_scan'] = False
+        self.dicom_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1].copy()
+        self.dicom_post.loc[:, 'Post_scan'] = True
+        self.dicom_table = self.dicom_table.loc[self.dicom_table['Post_scan'] == 0].copy()
+        self.dicom_table.loc[:, 'Post_scan'] = False
         self.logger.debug(f'Successfully detected post sequence | {self.Session_ID}')
         self.print_table(self.dicom_post, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
         #self.print_table(self.dicom_table, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Post_scan'])
@@ -966,13 +1032,19 @@ class DICOMfilter():
             return False
         elif pre_success:
             self.detect_pre('apply')
-            self.dicom_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]
+            self.dicom_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1].copy()
             self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             self.logger.debug(f'Successfully detected pre sequence | {self.Session_ID}')
             self.print_table(self.dicom_pre, columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'Pre_scan'])
 
         self.dicom_pre['Pre_scan'] = True
+        self.dicom_pre['Post_scan'] = False
+        self.dicom_post['Pre_scan'] = False
         self.dicom_post['Post_scan'] = True
+        self.dicom_pre['Pre_scan'] = self.dicom_pre['Pre_scan'].astype(bool)
+        self.dicom_pre['Post_scan'] = self.dicom_pre['Post_scan'].astype(bool)
+        self.dicom_post['Pre_scan'] = self.dicom_post['Pre_scan'].astype(bool)
+        self.dicom_post['Post_scan'] = self.dicom_post['Post_scan'].astype(bool)
         self.dicom_table = pd.concat([self.dicom_pre, self.dicom_post])
 
         # FINDING NUMBER OF SLICES - not needed anymore? solved by .apply_slices()?
@@ -1029,6 +1101,31 @@ class DICOMfilter():
                 return False
         self.dicom_table = pd.concat([self.dicom_post, self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]])
 
+        if self.multiple_lat & (self.dicom_table['Lat'].nunique() == 1):
+            self.logger.debug(f'Multiple laterality expected but only one detected, seperating into unknown_a and unknown_b | {self.Session_ID}')
+            n_slices = self.dicom_table['NumSlices'].unique()
+            if len(n_slices) == 2:
+                self.dicom_table.loc[self.dicom_table['NumSlices'] == n_slices[0], 'Lat'] = 'Unknown_A'
+                self.dicom_table.loc[self.dicom_table['NumSlices'] == n_slices[1], 'Lat'] = 'Unknown_B'
+            else:
+                # Check if slice numbers are multiples, if so seperate based on that
+                n_slices_pre = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1, 'NumSlices'].unique()
+                n_slices_post = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()
+                if len(n_slices_pre) != 2:
+                    self.logger.error(f'Unable to seperate laterality based on slice numbers, expected 2 unique slice counts among pre scans but found {n_slices_pre} | {self.Session_ID}')
+                    self.removed['Laterality_Seperation_Failure'] = self.dicom_table.copy()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+                    return False
+                # Find lowest common slices between pre and post, seperate based on that
+                lowest_slices = [s for s in n_slices_pre if any(p % s == 0 for p in n_slices_post)]
+                if len(lowest_slices) != 2:
+                    self.logger.error(f'Unable to seperate laterality based on slice numbers, expected 2 unique lowest common slice counts between pre and post but found {lowest_slices} | {self.Session_ID}')
+                    self.removed['Laterality_Seperation_Failure'] = self.dicom_table.copy()
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+                    return False
+                self.dicom_table.loc[self.dicom_table['NumSlices'] % lowest_slices[0] == 0, 'Lat'] = 'Unknown_A'
+                self.dicom_table.loc[self.dicom_table['NumSlices'] % lowest_slices[1] == 0, 'Lat'] = 'Unknown_B'
+
         # self.dicom_table = self.dicom_table.loc[(self.dicom_table['Post_scan'] == 1)|(self.dicom_table['Pre_scan'] == 1)]
         laterality = self.dicom_table.loc[self.dicom_table['Pre_scan']  == 1, 'Lat'].unique()
         if len(laterality) > 1:
@@ -1077,6 +1174,7 @@ class DICOMsplit():
         self.scan_path = None
         self.scan_results = None
         self.tmp_save = tmp_save
+        self.scan_complete = False
 
         self.logger = logger or logging.getLogger(__name__)
         if dicom_table.empty:
@@ -1084,22 +1182,30 @@ class DICOMsplit():
         if dicom_table['SessionID'].nunique() != 1:
             raise ValueError('Multiple Session_IDs found in the table')
         self.dicom_table = dicom_table.reset_index(drop=True)
+  
         self.Session_ID = self.dicom_table['SessionID'].unique()[0]
         # Get the common element of all paths
         self.directory = os.path.commonpath(self.dicom_table['PATH'].tolist())
         self.logger.debug(f'Found common path: {self.directory} | [{self.Session_ID}]')
-        # Legacy path-correction removed.
-        # Previously this block attempted to rewrite paths for datasets imported from other systems
-        # (MSKCC_16-328, RIA_19-093, RIA_20-425). Path normalization should be handled upstream
-        # (when constructing the DataFrame) or via a dedicated migration script. If live
-        # corrections are required again, reintroduce a small, well-tested helper here.
 
         # Determine expectations for the scan
-        self.scan_path = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'PATH'].values[0]
+        post_paths = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'PATH']
+        pre_slices = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1, 'NumSlices']
+
+        if post_paths.empty or pre_slices.empty:
+            self.logger.warning(
+                f'Cannot initialize split: missing pre/post rows '
+                f'[post={len(post_paths)}, pre={len(pre_slices)}] | [{self.Session_ID}]'
+            )
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+            self.SCAN = False
+            return
+
+        self.scan_path = post_paths.values[0]
         # Remove file from path to get directory
         self.scan_path = os.path.dirname(self.scan_path)
 
-        self.pre_slices = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1, 'NumSlices'].unique()[0]
+        self.pre_slices = pre_slices.unique()[0]
 
         # Determine if scanning is required
         if all(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'] == self.pre_slices):
@@ -1107,6 +1213,9 @@ class DICOMsplit():
             self.SCAN = False
         elif (len(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()) == 1) and(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()[0] % self.pre_slices == 0):
             self.logger.debug(f'Post scans have different number of slices, scanning required | [{self.Session_ID}]')
+            if os.path.exists(f'{self.tmp_save}/directory_scan/{self.Session_ID}.csv'):
+                self.logger.debug(f'Existing scan results found for session, loading from csv | [{self.Session_ID}]')
+                self.scan_complete = True
             self.SCAN = True
             self.logger.debug(f'Set scan path to: {self.scan_path} | [{self.Session_ID}]')
             self.num_post_scans = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].values[0] // self.pre_slices
@@ -1114,6 +1223,9 @@ class DICOMsplit():
             self.logger.warning(f'Unable to make sense of pre and post scans, removing session, further logic required | [{self.Session_ID}]')
             self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             self.SCAN = False
+
+    def load_scan(self):
+        self.scan_results = pd.read_csv(f'{self.tmp_save}/directory_scan/{self.Session_ID}.csv', low_memory=False)
 
     def scan_all(self):
         """Scans all files in the directory"""
@@ -1134,18 +1246,22 @@ class DICOMsplit():
             'Series': [],
         }
         for file in files:
-            extractor = DICOMextract(file)
-            info['PATH'].append(file)
-            info['AcqTime'].append(extractor.Acq())
-            info['SrsTime'].append(extractor.Srs())
-            info['ConTime'].append(extractor.Con())
-            info['StuTime'].append(extractor.Stu())
-            info['TriTime'].append(extractor.Tri())
-            info['InjTime'].append(extractor.Inj())
-            info['Series'].append(extractor.Series())
-            del extractor
+            try:
+                extractor = DICOMextract(file)
+                info['PATH'].append(file)
+                info['AcqTime'].append(extractor.Acq())
+                info['SrsTime'].append(extractor.Srs())
+                info['ConTime'].append(extractor.Con())
+                info['StuTime'].append(extractor.Stu())
+                info['TriTime'].append(extractor.Tri())
+                info['InjTime'].append(extractor.Inj())
+                info['Series'].append(extractor.Series())
+                del extractor
+            except Exception as e:
+                self.logger.warning(f'Skipping corrupt DICOM file {file}: {e} | [{self.Session_ID}]')
         self.scan_results = pd.DataFrame(info)
         self.logger.debug(f'Found {len(self.scan_results)} DICOM files in the directory | [{self.Session_ID}]')
+        self.scan_complete = True
         if self.scan_results is None or self.scan_results.empty:
             self.logger.warning(f'Error scanning {self.scan_path} | [{self.Session_ID}]')
             return 
@@ -1181,9 +1297,10 @@ class DICOMsplit():
                     initial = self.scan_results.loc[(self.scan_results['TriTime'] == i) & (self.scan_results['Slice'] == j), 'PATH'].values[0]
                     # pad j to a 3 digit number
                     j = str(j).zfill(3)
-                    destination = f"{self.tmp_save}dicom/{self.Session_ID}/{i}/{j}.dcm"
+                    destination = f"{self.tmp_save}/dicom/{self.Session_ID}/{i}/{j}.dcm"
                     self.temporary_relocations.append([initial, destination])
             self.dicom_table['SessionID'] = self.Session_ID
+            self.dicom_table.loc[self.dicom_table['Pre_scan'] != 1, 'Post_scan'] = 1
         return 
 
         ## Below is old process, kept for reference
@@ -1361,11 +1478,11 @@ class DICOMorder():
         return unknown_rows.index              
 
     def findPre(self):
-        indx = self.dicom_table[self.dicom_table['Post_scan'] == 1].index
+        post_indx = self.dicom_table[self.dicom_table['Post_scan'] == 1].index
         pre_indx = self.dicom_table[self.dicom_table['Pre_scan'] == 1].index
 
         if len(pre_indx) == 1:
-            indx = np.append(indx, pre_indx)
+            indx = np.append(post_indx, pre_indx)
             self.dicom_table = self.dicom_table.loc[indx]
             return self.dicom_table
         else:

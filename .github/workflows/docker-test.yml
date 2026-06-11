@@ -1,0 +1,24 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main, develop, "**"]
+    paths:
+      - "control_system/dockerfile"
+      - "control_system/docker-compose*.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "control_system/dockerfile"
+      - "control_system/docker-compose*.yml"
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          cd control_system
+          docker build -t mri_preprocessing_test --target base .
