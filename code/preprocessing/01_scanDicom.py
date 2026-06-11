@@ -228,6 +228,8 @@ def _extractDicom_impl(f: str, slice_counts: Dict[str, int] = None) -> Optional[
             'DATE': extract.Date(),
             'DOB': extract.DOB(),
             'Series_desc': extract.Desc(),
+            'Study_desc': extract.StudyDesc(),
+            'Anatomic_region': extract.AnatomicRegion(),
             'Modality': extract.Modality(),
             'Part': extract.Part(),
             'AcqTime': extract.Acq(),
