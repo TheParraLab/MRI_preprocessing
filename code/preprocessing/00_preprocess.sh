@@ -52,7 +52,10 @@ echo "01 Completed"
 
 # Step 02
 if should_run 2; then
-  python /FL_system/code/preprocessing/02_parseDicom.py
+  STEP02_ARGS=()
+  [ -n "$SAVE_DIR" ] && STEP02_ARGS+=("--save_dir" "$SAVE_DIR")
+  [ -n "$SAVE_DIR" ] && STEP02_ARGS+=("--load_table" "$SAVE_DIR/Data_table.csv")
+  python /FL_system/code/preprocessing/02_parseDicom.py "${STEP02_ARGS[@]}"
 else
   echo "Skipping step 02"
 fi

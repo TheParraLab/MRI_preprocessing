@@ -119,9 +119,9 @@ def build_config() -> ParseConfig:
                         help='Run with profiler enabled')
     parser.add_argument('--resume', action='store_true',
                         help='Resume filtering from checkpoint if available')
-    parser.add_argument('--batch-size', type=int, default=10,
+    parser.add_argument('--batch_size', type=int, default=10,
                         help='Number of sessions per batch before saving checkpoint (default: 10)')
-    parser.add_argument('--min-free-gb', type=float, default=50,
+    parser.add_argument('--min_free_gb', type=float, default=50,
                         help='Minimum free disk space in GB to proceed (default: 50)')
     parser.add_argument('--fully_removed', action='store_true',
                         help='Export fully removed sessions')
@@ -907,8 +907,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
         if not split_subsets:
             logger.info('All sessions already split or no data to split')
-            if all_split_results:
-                Data_table = pd.concat([df for df in all_split_results if not df.empty]).reset_index(drop=True)
+            filtered_split = [df for df in all_split_results if not df.empty]
+            if filtered_split:
+                Data_table = pd.concat(filtered_split).reset_index(drop=True)
                 temporary_relocation = list(all_split_redirections)
                 Iden_uniq_after = Data_table['SessionID'].unique()
         else:
@@ -1004,13 +1005,10 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 Data_subsets = [item[1] for item in remaining]
                 order_input_ids = [item[0] for item in remaining]
                 if not Data_subsets:
-                    Data_table = pd.concat(
-                        [df for df in order_results if not df.empty]
-                    ).reset_index(drop=True)
-                    order_removed_df = pd.concat(
-                        [df for df in order_removed if not df.empty],
-                        ignore_index=True,
-                    )
+                    filtered_order = [df for df in order_results if not df.empty]
+                    Data_table = pd.concat(filtered_order).reset_index(drop=True) if filtered_order else pd.DataFrame()
+                    filtered_order_removed = [df for df in order_removed if not df.empty]
+                    order_removed_df = pd.concat(filtered_order_removed, ignore_index=True) if filtered_order_removed else pd.DataFrame()
                     if not order_removed_df.empty:
                         logger.info(
                             f'{len(order_removed_df)} scans removed during '
@@ -1082,7 +1080,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             order_results = [df for df in order_results if df is not None and not df.empty]
             Data_table = pd.concat(order_results).reset_index(drop=True) if order_results else pd.DataFrame()
 
-            order_removed_df = pd.concat([df for df in order_removed if not df.empty], ignore_index=True)
+            order_removed_list = [df for df in order_removed if not df.empty]
+            order_removed_df = pd.concat(order_removed_list, ignore_index=True) if order_removed_list else pd.DataFrame()
             if not order_removed_df.empty:
                 logger.info(f'{len(order_removed_df)} scans removed during ordering for '
                             f'{order_removed_df["SessionID"].nunique()} session(s)')
