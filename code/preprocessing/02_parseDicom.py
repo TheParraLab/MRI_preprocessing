@@ -666,7 +666,7 @@ def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
     if not commands:
         worker_logger.warning('No commands supplied to relocate')
         return
-    commands = [c for c in commands if len(c) >= 2]
+    commands = [tuple(c) for c in commands if isinstance(c, (list, tuple)) and len(c) >= 2]
     if not commands:
         worker_logger.warning('All relocation commands are malformed, skipping')
         return
