@@ -1436,7 +1436,8 @@ class DICOMorder():
         self.timing_param = timing_param
         unknown_rows = self.dicom_table[self.dicom_table[timing_param].astype(str).str.lower() == 'unknown']
         valid_rows_index = self.dicom_table[self.dicom_table[timing_param].astype(str).str.lower() != 'unknown'].index
-        self.logger.debug(f'Found {len(unknown_rows)} rows with unknown {timing_param} values | {self.Session_ID}')
+        n_unknown = len(unknown_rows)
+        self.logger.debug(f'Found {n_unknown} rows with unknown {timing_param} values | {self.Session_ID}')
         self.logger.debug(f'Found {len(valid_rows_index)} rows with known {timing_param} values | {self.Session_ID}')
         if len(valid_rows_index) == 0:
             self.logger.debug(f'No valid {timing_param} values found | {self.Session_ID}')
@@ -1447,33 +1448,27 @@ class DICOMorder():
                 self.logger.error(f'Unable to order scans with {self.timing_param} or {secondary_param}, returning empty table | {self.Session_ID}')
                 self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                 return self.dicom_table
-            elif len(valid_rows_index_2) == len(self.dicom_table):
-                self.logger.debug(f'All rows have valid {secondary_param} values, ordering by {secondary_param} | {self.Session_ID}')
-                # Convert the secondary_param column to integers
-                self.dicom_table[secondary_param] = self.dicom_table[secondary_param].astype(str).str.split('.').str[0]  # Remove decimal part if present
-                self.dicom_table[secondary_param] = self.dicom_table[secondary_param].astype(int)
-                valid_rows = self.dicom_table.sort_values(by=[secondary_param])
-                self.n_post = len(valid_rows)
-                self.dicom_table['Major'] = np.arange(0, len(valid_rows)) # Start at 0 since all scans (including pre) are included
+            else:
+                self.logger.debug(f'Ordering by secondary param {secondary_param}, {len(unknown_rows_2)} unknown rows | {self.Session_ID}')
+                valid_rows_2 = self.dicom_table.loc[valid_rows_index_2].sort_values(by=[secondary_param])
+                self.n_post = len(valid_rows_2)
+                # Convert valid secondary_param values to int for ordering
+                self.dicom_table[secondary_param] = self.dicom_table[secondary_param].astype(str).str.split('.').str[0]
+                self.dicom_table.loc[valid_rows_index_2, secondary_param] = self.dicom_table.loc[valid_rows_index_2, secondary_param].astype(int)
+                self.dicom_table.loc[valid_rows_2.index, 'Major'] = np.linspace(1, len(valid_rows_2), int(len(valid_rows_2)))
+                unknown_idx_2 = unknown_rows_2.index
+                self.dicom_table.loc[unknown_idx_2, 'Major'] = np.zeros(len(unknown_idx_2))
                 return self.dicom_table
-        elif len(valid_rows_index) == len(self.dicom_table) - 1:
-            self.logger.debug(f'All rows have valid {timing_param} values [except for pre], ordering by {timing_param} | {self.Session_ID}')
-
+        else:
+            self.logger.debug(f'Ordering by {timing_param}, {n_unknown} unknown rows (pre scans) | {self.Session_ID}')
             # Convert the timing_param column to integers for valid rows
             self.dicom_table.loc[valid_rows_index, timing_param] = self.dicom_table.loc[valid_rows_index, timing_param].astype(int)
-
             # Sort the valid rows
             valid_rows = self.dicom_table.loc[valid_rows_index].sort_values(by=[timing_param])
             self.n_post = len(valid_rows)
-
             # Add a 'Major' column to the valid rows
             self.dicom_table.loc[valid_rows.index, 'Major'] = np.linspace(1, len(valid_rows), int(len(valid_rows)))
-            self.dicom_table.loc[unknown_rows.index, 'Major'] = np.zeros(len(unknown_rows))
-
-            return self.dicom_table
-        else:
-            self.logger.error(f'Unexpected results for {self.timing_param} values, unable to order scans | {self.Session_ID}')
-            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+            self.dicom_table.loc[unknown_rows.index, 'Major'] = np.zeros(n_unknown)
             return self.dicom_table
     
     def alternate_pre(self):
@@ -1502,10 +1497,10 @@ class DICOMorder():
         return unknown_rows.index              
 
     def findPre(self):
-        post_indx = self.dicom_table[self.dicom_table['Post_scan'] == 1].index
-        pre_indx = self.dicom_table[self.dicom_table['Pre_scan'] == 1].index
+        post_indx = self.dicom_table[self.dicom_table['Post_scan'] == True].index
+        pre_indx = self.dicom_table[self.dicom_table['Pre_scan'] == True].index
 
-        if len(pre_indx) == 1:
+        if len(pre_indx) == 1 or len(pre_indx) == 2:
             indx = np.append(post_indx, pre_indx)
             self.dicom_table = self.dicom_table.loc[indx]
             return self.dicom_table

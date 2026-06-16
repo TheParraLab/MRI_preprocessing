@@ -216,6 +216,23 @@ def _save_filter_checkpoint(
         logger.error(f'Failed to write checkpoint: {e}')
 
 
+def _load_checkpoint_data(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    """Load just the pickle data from checkpoint. Returns (results, removed) or ([], [])."""
+    cp_dir = _checkpoint_path(cfg)
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
+    try:
+        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
+        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        return results, removed
+    except Exception as e:
+        logger.error(f'Failed to load checkpoint data: {e}')
+        return [], []
+
+
 def _load_filter_checkpoint(
     cfg: ParseConfig,
     logger: logging.Logger,
@@ -329,6 +346,23 @@ def _save_split_checkpoint(
         logger.error(f'Failed to write split checkpoint: {e}')
 
 
+def _load_split_checkpoint_data(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    """Load just the pickle data from split checkpoint. Returns (results, redirections) or ([], [])."""
+    cp_dir = _split_checkpoint_path(cfg)
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    redirect_path = os.path.join(cp_dir, 'redirections.pkl')
+    try:
+        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
+        redirections = pickle.load(open(redirect_path, 'rb')) if os.path.exists(redirect_path) else []
+        return results, redirections
+    except Exception as e:
+        logger.error(f'Failed to load split checkpoint data: {e}')
+        return [], []
+
+
 def _load_split_checkpoint(
     cfg: ParseConfig,
     logger: logging.Logger,
@@ -411,6 +445,23 @@ def _save_order_checkpoint(
         logger.info(f'Order checkpoint saved: {len(completed_ids)} sessions done')
     except Exception as e:
         logger.error(f'Failed to write order checkpoint: {e}')
+
+
+def _load_order_checkpoint_data(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    """Load just the pickle data from order checkpoint. Returns (results, removed) or ([], [])."""
+    cp_dir = _order_checkpoint_path(cfg)
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
+    try:
+        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
+        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        return results, removed
+    except Exception as e:
+        logger.error(f'Failed to load order checkpoint data: {e}')
+        return [], []
 
 
 def _load_order_checkpoint(
@@ -550,7 +601,11 @@ def _order_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
     if order.dicom_table.empty:
         worker_logger.error(f'No scans remaining after ordering for {session_id}')
         return pd.DataFrame(columns=data_subset.columns), data_subset.copy()
+    before_pre = order.dicom_table.copy()
     order.findPre()
+    if order.dicom_table.empty:
+        worker_logger.error(f'findPre removed all scans for {session_id}')
+        return pd.DataFrame(columns=data_subset.columns), before_pre
     return order.dicom_table, pd.DataFrame(columns=data_subset.columns)
 
 
@@ -799,9 +854,11 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                         completed_ids.append(sid)
 
                 # Save checkpoint after each batch
+                # Reload existing checkpoint, extend with current batch, save, then clear to cap RAM
+                existing_results, existing_removed = _load_checkpoint_data(cfg, logger)
+                all_results = existing_results + all_results
+                all_removed = existing_removed + all_removed
                 _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
-
-                # Free memory: clear large DataFrame accumulators after checkpoint persisted
                 all_results.clear()
                 all_removed.clear()
 
@@ -953,10 +1010,12 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if sid not in split_completed_ids:
                         split_completed_ids.append(sid)
 
+                # Load existing checkpoint, extend, save, then clear to cap RAM
+                existing_split_results, existing_split_redirections = _load_split_checkpoint_data(cfg, logger)
+                all_split_results = existing_split_results + all_split_results
+                all_split_redirections = existing_split_redirections + all_split_redirections
                 _save_split_checkpoint(cfg, logger, split_completed_ids,
                                        all_split_results, all_split_redirections)
-
-                # Free memory: clear large accumulators after checkpoint persisted
                 all_split_results.clear()
                 all_split_redirections.clear()
 
@@ -1067,12 +1126,18 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 order_removed.extend(new_removed)
                 completed_ids.extend(batch_ids)
 
+                # Load existing checkpoint, extend, save, then clear to cap RAM
+                existing_order_results, existing_order_removed = _load_order_checkpoint_data(cfg, logger)
+                order_results = existing_order_results + order_results
+                order_removed = existing_order_removed + order_removed
+                # Load existing checkpoint, extend, save, then clear to cap RAM
+                existing_order_results, existing_order_removed = _load_order_checkpoint_data(cfg, logger)
+                order_results = existing_order_results + order_results
+                order_removed = existing_order_removed + order_removed
                 _save_order_checkpoint(
                     cfg, logger, completed_ids, order_results,
                     order_removed,
                 )
-
-                # Free memory: clear large accumulators after checkpoint persisted
                 order_results.clear()
                 order_removed.clear()
 
