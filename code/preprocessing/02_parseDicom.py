@@ -666,6 +666,10 @@ def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
     if not commands:
         worker_logger.warning('No commands supplied to relocate')
         return
+    commands = [c for c in commands if len(c) >= 2]
+    if not commands:
+        worker_logger.warning('All relocation commands are malformed, skipping')
+        return
     destinations = list(set(cmd[1] for cmd in commands))
     parent_dirs = list(set(os.path.dirname(d) for d in destinations))
     for dest_dir in parent_dirs:
