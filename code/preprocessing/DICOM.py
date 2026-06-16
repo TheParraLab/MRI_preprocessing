@@ -1473,7 +1473,7 @@ class DICOMorder():
         else:
             self.logger.debug(f'Ordering by {timing_param}, {n_unknown} unknown rows (pre scans) | {self.Session_ID}')
             # Convert the timing_param column to integers for valid rows
-            self.dicom_table.loc[valid_rows_index, timing_param] = self.dicom_table.loc[valid_rows_index, timing_param].astype(int)
+            self.dicom_table.loc[valid_rows_index, timing_param] = self.dicom_table.loc[valid_rows_index, timing_param].astype(float).astype(int)
             # Sort the valid rows
             valid_rows = self.dicom_table.loc[valid_rows_index].sort_values(by=[timing_param])
             self.n_post = len(valid_rows)
