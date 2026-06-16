@@ -8,6 +8,7 @@ import os
 import pandas as pd
 import re
 import shutil
+from collections import defaultdict
 
 # Tags loaded during initialization to avoid parsing megabytes of vendor private blocks.
 # Maps one-to-one to every `self.metadata.<attr>` / `getattr(self.metadata, ...)` access.
