@@ -1199,6 +1199,7 @@ class DICOMsplit():
         self.scan_results = None
         self.tmp_save = tmp_save
         self.scan_complete = False
+        self.removed = defaultdict(list)
 
         self.logger = logger or logging.getLogger(__name__)
         if dicom_table.empty:
@@ -1221,6 +1222,7 @@ class DICOMsplit():
                 f'Cannot initialize split: missing pre/post rows '
                 f'[post={len(post_paths)}, pre={len(pre_slices)}] | [{self.Session_ID}]'
             )
+            self.removed['Split_Missing_PrePost'].append(self.dicom_table.copy())
             self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             self.SCAN = False
             return
@@ -1245,6 +1247,7 @@ class DICOMsplit():
             self.num_post_scans = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].values[0] // self.pre_slices
         else:
             self.logger.warning(f'Unable to make sense of pre and post scans, removing session, further logic required | [{self.Session_ID}]')
+            self.removed['Split_Slice_Mismatch'].append(self.dicom_table.copy())
             self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             self.SCAN = False
 
@@ -1300,11 +1303,13 @@ class DICOMsplit():
         self.scan_results['Slice'] = self.scan_results['PATH'].apply(lambda x: str(x).split('-')[-2])
         self.scan_results['Slice'] = self.scan_results['Slice'].apply(lambda x: int(''.join(filter(str.isdigit, x))) if any(char.isdigit() for char in str(x)) else -1)
         self.temporary_relocations = []
-        # Remove multi-scan entry from data table
+        original_table = self.dicom_table.copy()
         self.dicom_table = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]
         if self.scan_results['Series'].nunique() == self.num_post_scans:
             self.logger.debug(f'Found expected number of post scans {self.num_post_scans} using Series number | [{self.Session_ID}]')
             self.logger.error(f'Additional logic required to sort based on Series number | [{self.Session_ID}]')
+            self.removed['Split_Series_Sort_Failure'].append(original_table)
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
         elif self.scan_results['TriTime'].nunique() == self.num_post_scans:
             self.logger.debug(f'Found expected number of post scans {self.num_post_scans} using Trigger time | [{self.Session_ID}]')
             for i in self.scan_results['TriTime'].unique():
@@ -1312,6 +1317,8 @@ class DICOMsplit():
                 slices.sort()
                 if len(slices) != self.pre_slices:
                     self.logger.warning(f'Unexpected number of slices {len(slices)} found for trigger time {i}, expected {self.pre_slices} | [{self.Session_ID}]')
+                    self.removed['Split_Slice_Count_Mismatch'].append(original_table)
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                     return
                 # Add new row to the dicom table
                 self.dicom_table = pd.concat([self.dicom_table, self.scan_results.loc[(self.scan_results['TriTime'] == i)&(self.scan_results['Slice'] == slices[0])]], ignore_index=True)
@@ -1325,6 +1332,10 @@ class DICOMsplit():
                     self.temporary_relocations.append([initial, destination])
             self.dicom_table['SessionID'] = self.Session_ID
             self.dicom_table.loc[self.dicom_table['Pre_scan'] != 1, 'Post_scan'] = 1
+        else:
+            self.logger.warning(f'Cannot identify scan grouping (Series={self.scan_results["Series"].nunique()}, TriTime={self.scan_results["TriTime"].nunique()}, expected={self.num_post_scans}) | [{self.Session_ID}]')
+            self.removed['Split_Unknown_Grouping'].append(original_table)
+            self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
         return 
 
         ## Below is old process, kept for reference
