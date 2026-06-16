@@ -1201,6 +1201,7 @@ class DICOMsplit():
         self.tmp_save = tmp_save
         self.scan_complete = False
         self.removed = defaultdict(list)
+        self.temporary_relocations = []
 
         self.logger = logger or logging.getLogger(__name__)
         if dicom_table.empty:
@@ -1235,17 +1236,18 @@ class DICOMsplit():
         self.pre_slices = pre_slices.unique()[0]
 
         # Determine if scanning is required
-        if all(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'] == self.pre_slices):
+        post_slices = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices']
+        if all(post_slices == self.pre_slices):
             self.logger.debug(f'Pre and post scans have the same number of slices, no need to split | [{self.Session_ID}]')
             self.SCAN = False
-        elif (len(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()) == 1) and(self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].unique()[0] % self.pre_slices == 0):
-            self.logger.debug(f'Post scans have different number of slices, scanning required | [{self.Session_ID}]')
+        elif (post_slices.nunique() == 1) and (post_slices.values[0] > self.pre_slices) and (post_slices.values[0] % self.pre_slices == 0):
+            self.logger.debug(f'Post scans have inflated slice count ({post_slices.values[0]} vs {self.pre_slices}), scanning required | [{self.Session_ID}]')
             if os.path.exists(f'{self.tmp_save}/directory_scan/{self.Session_ID}.csv'):
                 self.logger.debug(f'Existing scan results found for session, loading from csv | [{self.Session_ID}]')
                 self.scan_complete = True
             self.SCAN = True
             self.logger.debug(f'Set scan path to: {self.scan_path} | [{self.Session_ID}]')
-            self.num_post_scans = self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'NumSlices'].values[0] // self.pre_slices
+            self.num_post_scans = int(post_slices.values[0] // self.pre_slices)
         else:
             self.logger.warning(f'Unable to make sense of pre and post scans, removing session, further logic required | [{self.Session_ID}]')
             self.removed['Split_Slice_Mismatch'].append(self.dicom_table.copy())
