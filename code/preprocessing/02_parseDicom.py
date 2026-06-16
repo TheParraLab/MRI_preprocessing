@@ -1025,7 +1025,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 batch_results = [df for df in batch_results if not df.empty]
                 all_split_results.extend(batch_results)
                 all_split_removed.extend([df for df in batch_removed if df is not None and not df.empty])
-                all_split_redirections.extend(batch_redirects)
+                all_split_redirections.extend([rel for rel in batch_redirects if rel])
 
                 for df in batch_results:
                     for sid in df['SessionID'].unique():
