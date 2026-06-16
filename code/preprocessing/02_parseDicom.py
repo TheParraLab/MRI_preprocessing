@@ -482,6 +482,8 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
     dicom_filter.dicom_table['IS_DISCO'] = dicom_filter.dicom_table['Series_desc'].str.contains(
         disco_pattern, na=False)
 
+    original_data = dicom_filter.dicom_table.copy()
+
     if dicom_filter.dicom_table['IS_DISCO'].sum() > 0:
         dicom_filter.logger.debug(f'DISCO scans detected | {dicom_filter.Session_ID}')
         dicom_filter.disco_table = dicom_filter.dicom_table.loc[dicom_filter.dicom_table['IS_DISCO'] == True]
@@ -494,7 +496,7 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
                 dicom_filter.dicom_table = dicom_filter.disco_table
                 if not dicom_filter.isolate_sequence():
                     dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
-                    dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+                    dicom_filter.removed['Sequence_Failure'].append(original_data.copy())
                     dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
                 else:
                     dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
@@ -507,26 +509,24 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
             dicom_filter.dicom_table = dicom_filter.disco_table
             if not dicom_filter.isolate_sequence():
                 dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
-                dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+                dicom_filter.removed['Sequence_Failure'].append(original_data.copy())
                 dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
             else:
                 dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
         else:
             dicom_filter.logger.error(
                 f'Not enough scans to identify sequence [DISCO or SS] | {dicom_filter.Session_ID}')
-            dicom_filter.removed['Sequence_Failure'] = pd.concat(
-                [dicom_filter.dicom_table, dicom_filter.disco_table])
+            dicom_filter.removed['Sequence_Failure'].append(pd.concat(
+                [dicom_filter.dicom_table, dicom_filter.disco_table]))
             dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
     else:
         dicom_filter.logger.debug(f'No DISCO scans detected | {dicom_filter.Session_ID}')
-        if dicom_filter.isolate_sequence():
-            dicom_filter.logger.debug(
-                f'Sequence isolated using steady state information | {dicom_filter.Session_ID}')
-        else:
+        if not dicom_filter.isolate_sequence():
             dicom_filter.logger.debug(
                 f'Failed to isolate sequence using steady state information | {dicom_filter.Session_ID}')
-            dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+            dicom_filter.removed['Sequence_Failure'].append(original_data.copy())
             dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
+
 
     session_id = data_subset['SessionID'].values[0]
     if len(dicom_filter.dicom_table) == 0:
@@ -629,9 +629,20 @@ def _aggregate_removed(removed_tables: dict, removed_list: list) -> None:
     buffer = defaultdict(list)
     for removed_dict in removed_list:
         for key, value in removed_dict.items():
-            buffer[key].append(value)
+            # Each value is a list of DataFrames from that worker
+            if isinstance(value, list):
+                buffer[key].extend(value)
+            else:
+                buffer[key].append(value)
     for key, df_list in buffer.items():
-        removed_tables[key] = pd.concat([removed_tables[key], pd.concat(df_list, ignore_index=True)], ignore_index=True)
+        # Each entry in removed_tables[key] is itself a list; flatten
+        existing = removed_tables[key]
+        if isinstance(existing, list) and existing and isinstance(existing[0], pd.DataFrame):
+            df_list = existing + df_list
+        elif isinstance(existing, pd.DataFrame) and not existing.empty:
+            df_list = [existing] + df_list
+        if df_list:
+            removed_tables[key] = pd.concat(df_list, ignore_index=True)
 
 
 def _normalize_bool_cols(data_table: pd.DataFrame) -> pd.DataFrame:
