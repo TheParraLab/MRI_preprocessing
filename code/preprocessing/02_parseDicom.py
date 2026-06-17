@@ -119,9 +119,9 @@ def build_config() -> ParseConfig:
                         help='Run with profiler enabled')
     parser.add_argument('--resume', action='store_true',
                         help='Resume filtering from checkpoint if available')
-    parser.add_argument('--batch-size', type=int, default=10,
+    parser.add_argument('--batch_size', type=int, default=10,
                         help='Number of sessions per batch before saving checkpoint (default: 10)')
-    parser.add_argument('--min-free-gb', type=float, default=50,
+    parser.add_argument('--min_free_gb', type=float, default=50,
                         help='Minimum free disk space in GB to proceed (default: 50)')
     parser.add_argument('--fully_removed', action='store_true',
                         help='Export fully removed sessions')
@@ -216,6 +216,23 @@ def _save_filter_checkpoint(
         logger.error(f'Failed to write checkpoint: {e}')
 
 
+def _load_checkpoint_data(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    """Load just the pickle data from checkpoint. Returns (results, removed) or ([], [])."""
+    cp_dir = _checkpoint_path(cfg)
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
+    try:
+        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
+        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        return results, removed
+    except Exception as e:
+        logger.error(f'Failed to load checkpoint data: {e}')
+        return [], []
+
+
 def _load_filter_checkpoint(
     cfg: ParseConfig,
     logger: logging.Logger,
@@ -297,6 +314,7 @@ def _save_split_checkpoint(
     logger: logging.Logger,
     completed_ids: list,
     results: list,
+    removed: list,
     redirections: list,
 ) -> None:
     cp_dir = _split_checkpoint_path(cfg)
@@ -306,9 +324,11 @@ def _save_split_checkpoint(
     meta = {
         'completed_ids': completed_ids,
         'total_results': len(results),
+        'total_removed': len(removed),
         'total_redirections': len(redirections),
     }
     results_path = os.path.join(cp_dir, 'results.pkl.tmp')
+    removed_path = os.path.join(cp_dir, 'removed.pkl.tmp')
     redirect_path = os.path.join(cp_dir, 'redirections.pkl.tmp')
 
     try:
@@ -320,6 +340,10 @@ def _save_split_checkpoint(
             pickle.dump(results, f)
         os.replace(results_path, os.path.join(cp_dir, 'results.pkl'))
 
+        with open(removed_path, 'wb') as f:
+            pickle.dump(removed, f)
+        os.replace(removed_path, os.path.join(cp_dir, 'removed.pkl'))
+
         with open(redirect_path, 'wb') as f:
             pickle.dump(redirections, f)
         os.replace(redirect_path, os.path.join(cp_dir, 'redirections.pkl'))
@@ -329,6 +353,25 @@ def _save_split_checkpoint(
         logger.error(f'Failed to write split checkpoint: {e}')
 
 
+def _load_split_checkpoint_data(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    """Load the pickle data from split checkpoint. Returns (results, removed, redirections) or ([], [], [])."""
+    cp_dir = _split_checkpoint_path(cfg)
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
+    redirect_path = os.path.join(cp_dir, 'redirections.pkl')
+    try:
+        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
+        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        redirections = pickle.load(open(redirect_path, 'rb')) if os.path.exists(redirect_path) else []
+        return results, removed, redirections
+    except Exception as e:
+        logger.error(f'Failed to load split checkpoint data: {e}')
+        return [], [], []
+
+
 def _load_split_checkpoint(
     cfg: ParseConfig,
     logger: logging.Logger,
@@ -336,28 +379,32 @@ def _load_split_checkpoint(
     cp_dir = _split_checkpoint_path(cfg)
     meta_path = os.path.join(cp_dir, 'meta.json')
     results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
     redirect_path = os.path.join(cp_dir, 'redirections.pkl')
 
     if not all(os.path.exists(p) for p in [meta_path, results_path, redirect_path]):
         logger.info('No valid split checkpoint found')
-        return None, None, None
+        return None, None, None, None
 
     try:
         with open(meta_path, 'r') as f:
             meta = json.load(f)
         with open(results_path, 'rb') as f:
             results = pickle.load(f)
+        with open(removed_path, 'rb') as f:
+            removed = pickle.load(f) if os.path.exists(removed_path) else []
         with open(redirect_path, 'rb') as f:
             redirections = pickle.load(f)
 
         logger.info(
             f'Loaded split checkpoint: {meta["total_results"]} results, '
+            f'{meta.get("total_removed", 0)} removed, '
             f'{meta["total_redirections"]} redirections'
         )
-        return meta['completed_ids'], results, redirections
+        return meta['completed_ids'], results, removed, redirections
     except Exception as e:
         logger.error(f'Failed to load split checkpoint: {e}')
-        return None, None, None
+        return None, None, None, None
 
 
 def _remove_split_checkpoint(cfg: ParseConfig, logger: logging.Logger) -> None:
@@ -411,6 +458,23 @@ def _save_order_checkpoint(
         logger.info(f'Order checkpoint saved: {len(completed_ids)} sessions done')
     except Exception as e:
         logger.error(f'Failed to write order checkpoint: {e}')
+
+
+def _load_order_checkpoint_data(
+    cfg: ParseConfig,
+    logger: logging.Logger,
+) -> tuple:
+    """Load just the pickle data from order checkpoint. Returns (results, removed) or ([], [])."""
+    cp_dir = _order_checkpoint_path(cfg)
+    results_path = os.path.join(cp_dir, 'results.pkl')
+    removed_path = os.path.join(cp_dir, 'removed.pkl')
+    try:
+        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
+        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        return results, removed
+    except Exception as e:
+        logger.error(f'Failed to load order checkpoint data: {e}')
+        return [], []
 
 
 def _load_order_checkpoint(
@@ -482,6 +546,8 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
     dicom_filter.dicom_table['IS_DISCO'] = dicom_filter.dicom_table['Series_desc'].str.contains(
         disco_pattern, na=False)
 
+    original_data = dicom_filter.dicom_table.copy()
+
     if dicom_filter.dicom_table['IS_DISCO'].sum() > 0:
         dicom_filter.logger.debug(f'DISCO scans detected | {dicom_filter.Session_ID}')
         dicom_filter.disco_table = dicom_filter.dicom_table.loc[dicom_filter.dicom_table['IS_DISCO'] == True]
@@ -494,7 +560,7 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
                 dicom_filter.dicom_table = dicom_filter.disco_table
                 if not dicom_filter.isolate_sequence():
                     dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
-                    dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+                    dicom_filter.removed['Sequence_Failure'].append(original_data.copy())
                     dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
                 else:
                     dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
@@ -507,26 +573,24 @@ def _filter_worker(data_subset: pd.DataFrame, save_dir: str, computed_flags: lis
             dicom_filter.dicom_table = dicom_filter.disco_table
             if not dicom_filter.isolate_sequence():
                 dicom_filter.logger.debug(f'Failed to isolate sequence using DISCO | {dicom_filter.Session_ID}')
-                dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+                dicom_filter.removed['Sequence_Failure'].append(original_data.copy())
                 dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
             else:
                 dicom_filter.logger.debug(f'Sequence isolated using DISCO | {dicom_filter.Session_ID}')
         else:
             dicom_filter.logger.error(
                 f'Not enough scans to identify sequence [DISCO or SS] | {dicom_filter.Session_ID}')
-            dicom_filter.removed['Sequence_Failure'] = pd.concat(
-                [dicom_filter.dicom_table, dicom_filter.disco_table])
+            dicom_filter.removed['Sequence_Failure'].append(pd.concat(
+                [dicom_filter.dicom_table, dicom_filter.disco_table]))
             dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
     else:
         dicom_filter.logger.debug(f'No DISCO scans detected | {dicom_filter.Session_ID}')
-        if dicom_filter.isolate_sequence():
-            dicom_filter.logger.debug(
-                f'Sequence isolated using steady state information | {dicom_filter.Session_ID}')
-        else:
+        if not dicom_filter.isolate_sequence():
             dicom_filter.logger.debug(
                 f'Failed to isolate sequence using steady state information | {dicom_filter.Session_ID}')
-            dicom_filter.removed['Sequence_Failure'] = dicom_filter.dicom_table.copy()
+            dicom_filter.removed['Sequence_Failure'].append(original_data.copy())
             dicom_filter.dicom_table = pd.DataFrame(columns=dicom_filter.dicom_table.columns)
+
 
     session_id = data_subset['SessionID'].values[0]
     if len(dicom_filter.dicom_table) == 0:
@@ -550,12 +614,21 @@ def _order_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
     if order.dicom_table.empty:
         worker_logger.error(f'No scans remaining after ordering for {session_id}')
         return pd.DataFrame(columns=data_subset.columns), data_subset.copy()
+    before_pre = order.dicom_table.copy()
     order.findPre()
+    if order.dicom_table.empty:
+        worker_logger.error(f'findPre removed all scans for {session_id}')
+        return pd.DataFrame(columns=data_subset.columns), before_pre
     return order.dicom_table, pd.DataFrame(columns=data_subset.columns)
 
 
 def _split_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
-    """Worker for splitting step — called per session subset."""
+    """Worker for splitting step — called per session subset.
+
+    Returns (split_df, removed_df, relocations).  removed_df is non-empty when
+    the split step discards every row for the session so that lost scans appear
+    in the removal log.
+    """
     worker_logger = get_logger('02_parseDicom', log_dir)
     data_subset = data_subset.reset_index(drop=True)
     splitter = DICOMsplit(data_subset, logger=worker_logger)
@@ -565,8 +638,13 @@ def _split_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
         else:
             splitter.scan_all()
         splitter.sort_scans()
-        return splitter.dicom_table, splitter.temporary_relocations
-    return data_subset, []
+    if splitter.dicom_table.empty:
+        removed_df = pd.concat(
+            [df for dfs in splitter.removed.values() for df in dfs],
+            ignore_index=True
+        ) if splitter.removed else data_subset.copy()
+        return pd.DataFrame(columns=data_subset.columns), removed_df, splitter.temporary_relocations
+    return splitter.dicom_table, pd.DataFrame(columns=data_subset.columns), splitter.temporary_relocations
 
 
 def _save_removal_worker(tup: tuple, save_dir: str) -> None:
@@ -587,6 +665,10 @@ def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
     worker_logger.debug(f'First command: {commands[0] if commands else "None"}')
     if not commands:
         worker_logger.warning('No commands supplied to relocate')
+        return
+    commands = [tuple(c) for c in commands if isinstance(c, (list, tuple)) and len(c) >= 2]
+    if not commands:
+        worker_logger.warning('All relocation commands are malformed, skipping')
         return
     destinations = list(set(cmd[1] for cmd in commands))
     parent_dirs = list(set(os.path.dirname(d) for d in destinations))
@@ -629,9 +711,20 @@ def _aggregate_removed(removed_tables: dict, removed_list: list) -> None:
     buffer = defaultdict(list)
     for removed_dict in removed_list:
         for key, value in removed_dict.items():
-            buffer[key].append(value)
+            # Each value is a list of DataFrames from that worker
+            if isinstance(value, list):
+                buffer[key].extend(value)
+            else:
+                buffer[key].append(value)
     for key, df_list in buffer.items():
-        removed_tables[key] = pd.concat([removed_tables[key], pd.concat(df_list, ignore_index=True)], ignore_index=True)
+        # Each entry in removed_tables[key] is itself a list; flatten
+        existing = removed_tables[key]
+        if isinstance(existing, list) and existing and isinstance(existing[0], pd.DataFrame):
+            df_list = existing + df_list
+        elif isinstance(existing, pd.DataFrame) and not existing.empty:
+            df_list = [existing] + df_list
+        if df_list:
+            removed_tables[key] = pd.concat(df_list, ignore_index=True)
 
 
 def _normalize_bool_cols(data_table: pd.DataFrame) -> pd.DataFrame:
@@ -776,7 +869,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 batch_results = [df for df in batch_results if not df.empty]
                 all_results.extend(batch_results)
                 all_removed.extend(batch_removed)
-                temporary_relocation.extend(batch_temp_rels)
+                for rel in batch_temp_rels:
+                    if rel:
+                        temporary_relocation.extend(rel)
 
                 # Track completed session IDs
                 for df in batch_results:
@@ -788,9 +883,11 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                         completed_ids.append(sid)
 
                 # Save checkpoint after each batch
+                # Reload existing checkpoint, extend with current batch, save, then clear to cap RAM
+                existing_results, existing_removed = _load_checkpoint_data(cfg, logger)
+                all_results = existing_results + all_results
+                all_removed = existing_removed + all_removed
                 _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
-
-                # Free memory: clear large DataFrame accumulators after checkpoint persisted
                 all_results.clear()
                 all_removed.clear()
 
@@ -888,9 +985,10 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         split_completed_ids = []
         all_split_results = []
         all_split_redirections = []
+        all_split_removed = []
 
         if cfg.resume:
-            split_completed_ids, all_split_results, all_split_redirections = \
+            split_completed_ids, all_split_results, all_split_removed, all_split_redirections = \
                 _load_split_checkpoint(cfg, logger)
             if split_completed_ids is not None:
                 logger.info(f'Resuming split checkpoint: {len(split_completed_ids)} sessions already split')
@@ -907,8 +1005,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
         if not split_subsets:
             logger.info('All sessions already split or no data to split')
-            if all_split_results:
-                Data_table = pd.concat([df for df in all_split_results if not df.empty]).reset_index(drop=True)
+            filtered_split = [df for df in all_split_results if not df.empty]
+            if filtered_split:
+                Data_table = pd.concat(filtered_split).reset_index(drop=True)
                 temporary_relocation = list(all_split_redirections)
                 Iden_uniq_after = Data_table['SessionID'].unique()
         else:
@@ -924,14 +1023,17 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     f'of {len(split_subsets)} sessions'
                 )
 
-                batch_results, batch_redirects = run_function(
+                batch_results, batch_removed, batch_redirects = run_function(
                     logger, split_fn, batch,
                     Parallel=cfg.parallel, P_type='process',
                 )
 
                 batch_results = [df for df in batch_results if not df.empty]
                 all_split_results.extend(batch_results)
-                all_split_redirections.extend(batch_redirects)
+                all_split_removed.extend([df for df in batch_removed if df is not None and not df.empty])
+                for rel in batch_redirects:
+                    if rel:
+                        all_split_redirections.extend(rel)
 
                 for df in batch_results:
                     for sid in df['SessionID'].unique():
@@ -941,11 +1043,15 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if sid not in split_completed_ids:
                         split_completed_ids.append(sid)
 
+                # Load existing checkpoint, extend, save, then clear to cap RAM
+                existing_split_results, existing_split_removed, existing_split_redirections = _load_split_checkpoint_data(cfg, logger)
+                all_split_results = existing_split_results + all_split_results
+                all_split_removed = existing_split_removed + all_split_removed
+                all_split_redirections = existing_split_redirections + all_split_redirections
                 _save_split_checkpoint(cfg, logger, split_completed_ids,
-                                       all_split_results, all_split_redirections)
-
-                # Free memory: clear large accumulators after checkpoint persisted
+                                       all_split_results, all_split_removed, all_split_redirections)
                 all_split_results.clear()
+                all_split_removed.clear()
                 all_split_redirections.clear()
 
                 # Check disk space threshold
@@ -959,11 +1065,25 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     return
 
             # Final assembly: reload from checkpoint so full state is available again
-            _, all_split_results, all_split_redirections = _load_split_checkpoint(cfg, logger)
+            _, all_split_results, split_removed_final, all_split_redirections = _load_split_checkpoint(cfg, logger)
             results = [df for df in all_split_results if df is not None and not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
             temporary_relocation = list(all_split_redirections)
             Iden_uniq_after = Data_table['SessionID'].unique()
+
+            if split_removed_final:
+                split_removed_dfs = [df for df in split_removed_final if df is not None and not df.empty]
+                if split_removed_dfs:
+                    split_removed_df = pd.concat(split_removed_dfs, ignore_index=True)
+                    logger.info(f'{len(split_removed_df)} scans removed during splitting for '
+                                f'{split_removed_df["SessionID"].nunique()} session(s)')
+                    os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+                    _atomic_write_csv(split_removed_df,
+                                      os.path.join(cfg.save_dir, 'removal_log', 'Removed_Splitting.csv'))
+                else:
+                    logger.info('No scans removed during splitting')
+            else:
+                logger.info('No scans removed during splitting')
 
             _remove_split_checkpoint(cfg, logger)
 
@@ -1004,13 +1124,10 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 Data_subsets = [item[1] for item in remaining]
                 order_input_ids = [item[0] for item in remaining]
                 if not Data_subsets:
-                    Data_table = pd.concat(
-                        [df for df in order_results if not df.empty]
-                    ).reset_index(drop=True)
-                    order_removed_df = pd.concat(
-                        [df for df in order_removed if not df.empty],
-                        ignore_index=True,
-                    )
+                    filtered_order = [df for df in order_results if not df.empty]
+                    Data_table = pd.concat(filtered_order).reset_index(drop=True) if filtered_order else pd.DataFrame()
+                    filtered_order_removed = [df for df in order_removed if not df.empty]
+                    order_removed_df = pd.concat(filtered_order_removed, ignore_index=True) if filtered_order_removed else pd.DataFrame()
                     if not order_removed_df.empty:
                         logger.info(
                             f'{len(order_removed_df)} scans removed during '
@@ -1058,12 +1175,14 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 order_removed.extend(new_removed)
                 completed_ids.extend(batch_ids)
 
+                # Load existing checkpoint, extend, save, then clear to cap RAM
+                existing_order_results, existing_order_removed = _load_order_checkpoint_data(cfg, logger)
+                order_results = existing_order_results + order_results
+                order_removed = existing_order_removed + order_removed
                 _save_order_checkpoint(
                     cfg, logger, completed_ids, order_results,
                     order_removed,
                 )
-
-                # Free memory: clear large accumulators after checkpoint persisted
                 order_results.clear()
                 order_removed.clear()
 
@@ -1082,7 +1201,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             order_results = [df for df in order_results if df is not None and not df.empty]
             Data_table = pd.concat(order_results).reset_index(drop=True) if order_results else pd.DataFrame()
 
-            order_removed_df = pd.concat([df for df in order_removed if not df.empty], ignore_index=True)
+            order_removed_list = [df for df in order_removed if not df.empty]
+            order_removed_df = pd.concat(order_removed_list, ignore_index=True) if order_removed_list else pd.DataFrame()
             if not order_removed_df.empty:
                 logger.info(f'{len(order_removed_df)} scans removed during ordering for '
                             f'{order_removed_df["SessionID"].nunique()} session(s)')
