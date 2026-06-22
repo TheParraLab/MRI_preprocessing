@@ -860,7 +860,7 @@ class DICOMfilter():
             assert action.lower() in ['check', 'apply'], 'Invalid action for post_series_desc()'
 
             series_lower = self.dicom_table['Series_desc'].astype(str).str.lower()
-            contains_post = series_lower.str.contains('post', na=False).astype(int)
+            contains_post = series_lower.str.contains('post', na=False)
 
             if cumulative:
                 mask = self.dicom_table['Post_scan'] == 1
@@ -972,7 +972,7 @@ class DICOMfilter():
         if (not post_success) and (not self.multiple_lat):
             # If post unsuccesfull and single laterality suggested, check pre to identify hidden multiple lateralities
             self.logger.debug(f'Post scan detection failure, unable to isolate sequence, checking if solvable with pre... | {self.Session_ID}')
-            self.dicom_table['Post_scan'] = 0 #reset post scan detection
+            self.dicom_table['Post_scan'] = False #reset post scan detection
             pre_success = self.detect_pre('check')
             if pre_success and self.multiple_lat:
                 # If pre detection succeeded, filter by detected number of slices
