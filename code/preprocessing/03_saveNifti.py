@@ -179,15 +179,18 @@ def run_cmd(command, commands):
                 LOGGER.debug(f'Created directory for {SessionID}')
         except FileExistsError:
             LOGGER.warning(f'Directory for {SessionID} already exists')
+    LOGGER.info(f'Executing: dcm2niix -o {command[2]} -f {command[4]} {command[-1]}')
     try:
         if DEBUG == 0:
             result = subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print(result.stdout.decode())
+        LOGGER.info(f'Completed: {command[4]} from {command[-1]}')
         with disk_space_lock:
             commands.remove(command)
     except subprocess.CalledProcessError as e:
+        LOGGER.error(f'Failed: {command[4]} from {command[-1]}')
         error_message = e.stderr.decode() if e.stderr else 'No error message available'
         LOGGER.error(f'Error converting {command[-1]}: {error_message}')
     #progress_queue.put((None, f'Converting'))
