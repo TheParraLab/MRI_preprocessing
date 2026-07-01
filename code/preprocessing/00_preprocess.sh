@@ -3,11 +3,11 @@
 #
 # Usage:
 #   bash 00_preprocess.sh                          (runs all 6 steps)
-#   bash 00_preprocess.sh --start-step 3            (steps 03-06 only)
-#   bash 00_preprocess.sh --stop-step 4             (steps 01-04 only)
+#   bash 00_preprocess.sh --start_step 3            (steps 03-06 only)
+#   bash 00_preprocess.sh --stop_step 4             (steps 01-04 only)
 #   bash 00_preprocess.sh --steps 1,3,5             (only listed steps)
-#   bash 00_preprocess.sh --scan-dir /path/raw      (override scan path)
-#   bash 00_preprocess.sh --save-dir /path/output   (override save path)
+#   bash 00_preprocess.sh --scan_dir /path/raw      (override scan path)
+#   bash 00_preprocess.sh --save_dir /path/output   (override save path)
 # =============================================================================
 
 set -euo pipefail
@@ -20,10 +20,10 @@ STEPS_FILTER=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --scan-dir)   SCAN_DIR="$2"; shift 2 ;;
-    --save-dir)   SAVE_DIR="$2"; shift 2 ;;
-    --start-step) START_STEP="$2"; shift 2 ;;
-    --stop-step)  STOP_STEP="$2"; shift 2 ;;
+    --scan_dir)   SCAN_DIR="$2"; shift 2 ;;
+    --save_dir)   SAVE_DIR="$2"; shift 2 ;;
+    --start_step) START_STEP="$2"; shift 2 ;;
+    --stop_step)  STOP_STEP="$2"; shift 2 ;;
     --steps)      STEPS_FILTER="$2"; shift 2 ;;
     *)            shift ;;
   esac
@@ -42,8 +42,8 @@ should_run() {
 # Step 01
 if should_run 1; then
   STEP01_ARGS=()
-  [ -n "$SCAN_DIR" ] && STEP01_ARGS+=("--scan-dir" "$SCAN_DIR")
-  [ -n "$SAVE_DIR" ] && STEP01_ARGS+=("--save-dir" "$SAVE_DIR")
+  [ -n "$SCAN_DIR" ] && STEP01_ARGS+=("--scan_dir" "$SCAN_DIR")
+  [ -n "$SAVE_DIR" ] && STEP01_ARGS+=("--save_dir" "$SAVE_DIR")
   python /FL_system/code/preprocessing/01_scanDicom.py "${STEP01_ARGS[@]}"
 else
   echo "Skipping step 01"

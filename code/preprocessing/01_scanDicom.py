@@ -24,10 +24,10 @@ Arguments:
     --profile: Enable profiling with yappi.
     --dir_idx (int): Index of the directory to process (for HPC array jobs).
     --dir_list (str): Path to the list of directories (for HPC array jobs).
-    --sample-pct (float): Percentage of files to sample per directory (0 = full scan).
-    --sample-seed (int): Random seed for sampling.
-    --checkpoint-dir (str): Directory for storing checkpoints.
-    --profile-dir (str): Directory for storing profiling output.
+    --sample_pct (float): Percentage of files to sample per directory (0 = full scan).
+    --sample_seed (int): Random seed for sampling.
+    --checkpoint_dir (str): Directory for storing checkpoints.
+    --profile_dir (str): Directory for storing profiling output.
     --resume: Resume from available checkpoints if present.
 
 Dependencies:
@@ -96,13 +96,13 @@ def build_config() -> ScanConfig:
                         help='Index of the folder to process from dirs_to_process.pkl (for HPC array jobs)')
     parser.add_argument('--dir_list', type=str, default='dirs_to_process.pkl',
                         help='Path to the directory list file (for HPC array jobs)')
-    parser.add_argument('--sample-pct', type=float, default=0.0,
+    parser.add_argument('--sample_pct', type=float, default=0.0,
                         help='Percent of .dcm files to sample per directory (0 = full scan)')
-    parser.add_argument('--sample-seed', type=int, default=None,
+    parser.add_argument('--sample_seed', type=int, default=None,
                         help='Optional random seed for sampling reproducibility')
-    parser.add_argument('--checkpoint-dir', type=str, default=None,
+    parser.add_argument('--checkpoint_dir', type=str, default=None,
                         help='Directory to store checkpoint files (default: <SAVE_DIR>/checkpoints/)')
-    parser.add_argument('--profile-dir', type=str, default=None,
+    parser.add_argument('--profile_dir', type=str, default=None,
                         help='Directory to store profiling output (default: <SAVE_DIR>/profiles/)')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from available checkpoints if present')
