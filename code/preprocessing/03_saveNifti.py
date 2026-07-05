@@ -8,6 +8,7 @@ from multiprocessing import Queue, Manager, cpu_count, Lock
 import threading
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import subprocess
+import time
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
@@ -42,8 +43,8 @@ def check_disk_space(directory: str) -> bool:
     """Check if there is enough disk space available."""
     statvfs = os.statvfs(directory)
     available_space = statvfs.f_frsize * statvfs.f_bavail
-    if available_space < DISK_SPACE_THRESHOLD*2:
-        LOGGER.debug(f'Available space: {available_space}')
+    if available_space < DISK_SPACE_THRESHOLD * 2:
+        LOGGER.warning(f'Disk space low: {available_space / 1e9:.1f} GB available (threshold: {DISK_SPACE_THRESHOLD / 1e9:.1f} GB)')
     return available_space > DISK_SPACE_THRESHOLD
 
 def check_source_files(source_path: str) -> bool:
@@ -91,38 +92,43 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
 
     # Run the target function with a progress bar
     results = []
+    t_start = time.time()
+    items_index = 0
     if Parallel:
+        LOGGER.info(f'Submitting {len(items)} tasks to ProcessPoolExecutor ({cpu_count()-1} workers)')
         with ProcessPoolExecutor(max_workers=cpu_count()-1) as executor:
-            futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-            for future in futures:
+            futures = [(items_index, executor.submit(target, item, *args, **kwargs))
+                       for items_index, item in enumerate(items)]
+            for idx, future in futures:
                 if stop_flag.is_set():
-                    LOGGER.info('stop flag is set, exiting')
+                    LOGGER.info(f'[STOP] Stop flag set after processing {idx+1}/{len(futures)} futures. Cancelling remaining.')
+                    for _, unsubmitted in futures[idx+1:]:
+                        unsubmitted.cancel()
                     break
                 try:
-                    #result = future.result(timeout=600)
-                    result = future.result()
+                    result = future.result(timeout=1800)
                     results.append(result)
+                    if (idx + 1) % 50 == 0 or idx + 1 == len(futures):
+                        elapsed = time.time() - t_start
+                        LOGGER.info(f'[{target_name}] Progress: {idx+1}/{len(futures)} items, {elapsed:.0f}s elapsed')
                 except Exception as e:
-                    LOGGER.error(f'Error in parallel processing: {e}', exc_info = True)
+                    LOGGER.error(f'[ERROR] Future {idx} failed: {e}', exc_info=True)
     else:
-        for item in items:
+        for items_index, item in enumerate(items):
             if stop_flag.is_set():
-                LOGGER.info('stop flag is set, exiting')
+                LOGGER.info(f'[STOP] Stop flag set after processing {items_index+1}/{len(items)} items')
                 break
             try:
                 result = target(item)
                 results.append(result)
+                if (items_index + 1) % 50 == 0 or items_index + 1 == len(items):
+                    elapsed = time.time() - t_start
+                    LOGGER.info(f'[{target_name}] Progress: {items_index+1}/{len(items)} items, {elapsed:.0f}s elapsed')
             except Exception as e:
-                LOGGER.error(f'Error in sequential processing: {e}', exec_info=True)
+                LOGGER.error(f'[ERROR] Sequential item {items_index} failed: {e}', exc_info=True)
 
-    # Close the progress bar
-    #if PROGRESS:
-    #    progress_queue.put(None)
-    #    print('\n')
-    #    updater_thread.join()
-
-    LOGGER.debug(f'Completed {target_name} with progress bar')
-    LOGGER.debug(f'Number of results: {len(results)}')
+    elapsed_total = time.time() - t_start
+    LOGGER.info(f'[{target_name}] Completed in {elapsed_total:.0f}s. {len(results)} results collected')
 
     # Check if results is a list of tuples before returning zip(*results)
     if results and isinstance(results[0], tuple):
@@ -146,32 +152,30 @@ def run_cmd(command, commands):
     output_dir = command[2]
     file_name = command[4]
     input_file = command[-1]
-    input_file = ('/'.join(input_file.split('/')[:-1]))
-    LOGGER.debug(f'Converting {command[-1]} to nifti at {output_dir}{os.sep}{file_name}.nii')
+    input_dir = '/'.join(input_file.split('/')[:-1])
+    LOGGER.info(f'[START] {file_name} | input: {input_file} | output: {output_dir}{os.sep}{file_name}.nii')
 
     if os.path.exists(f'{output_dir}{os.sep}{file_name}.nii'):
-        LOGGER.debug(f'Nifti file already exists for {file_name}')
+        LOGGER.info(f'[SKIP] Nifti file already exists: {file_name}')
         commands.remove(command)
         return
 
     if stop_flag.is_set():
-        LOGGER.info('stop flag is set, exiting')
+        LOGGER.info(f'[ABORT] Stop flag set before starting {file_name}')
         return
 
     with disk_space_lock:
         if not check_disk_space(SAVE_DIR):
             if not stop_flag.is_set():
-                LOGGER.warning('Disk space is running low.  Pausing...')
+                LOGGER.warning(f'[ABORT] Disk space low, setting stop flag before {file_name}')
                 stop_flag.set()
-                LOGGER.warning('Stop flag set')
             return
-        if not check_source_files(input_file):
+        if not check_source_files(input_dir):
             if not stop_flag.is_set():
-                LOGGER.warning(f'No files found in {input_file}')
+                LOGGER.warning(f'[ABORT] No source files in {input_dir}, setting stop flag')
                 stop_flag.set()
-                LOGGER.warning('Stop flag set')
             return
-        
+
     if not os.path.isdir(f'{SAVE_DIR}{SessionID}'):
         try:
             os.mkdir(f'{SAVE_DIR}{SessionID}')
@@ -179,21 +183,29 @@ def run_cmd(command, commands):
                 LOGGER.debug(f'Created directory for {SessionID}')
         except FileExistsError:
             LOGGER.warning(f'Directory for {SessionID} already exists')
-    LOGGER.info(f'Executing: dcm2niix -o {command[2]} -f {command[4]} {command[-1]}')
+
+    LOGGER.info(f'[RUN] Executing dcm2niix for {file_name}')
+    t0 = time.time()
     try:
         if DEBUG == 0:
-            result = subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            result = subprocess.run(command, check=True, timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result = subprocess.run(command, check=True, timeout=600, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print(result.stdout.decode())
-        LOGGER.info(f'Completed: {command[4]} from {command[-1]}')
-        with disk_space_lock:
+        elapsed = time.time() - t0
+        LOGGER.info(f'[DONE] {file_name} completed in {elapsed:.1f}s from {command[-1]}')
+        try:
             commands.remove(command)
+        except ValueError:
+            LOGGER.warning(f'  Command for {file_name} not in commands list (already removed)')
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - t0
+        LOGGER.error(f'[TIMEOUT] {file_name} exceeded 600s after {elapsed:.1f}s. Command: {" ".join(command)}')
     except subprocess.CalledProcessError as e:
-        LOGGER.error(f'Failed: {command[4]} from {command[-1]}')
+        elapsed = time.time() - t0
+        LOGGER.error(f'[FAIL] {file_name} failed after {elapsed:.1f}s')
         error_message = e.stderr.decode() if e.stderr else 'No error message available'
-        LOGGER.error(f'Error converting {command[-1]}: {error_message}')
-    #progress_queue.put((None, f'Converting'))
+        LOGGER.error(f'  Error converting {command[-1]}: {error_message[:500]}')
     
 def makeNifti(Data_subset):
     # Convert all dicom files to nifti files
@@ -216,9 +228,7 @@ def makeNifti(Data_subset):
     return commands
 
 def split_table(ID):
-    #global progress_queue
-    #progress_queue.put((None, f'Splitting {ID}'))
-    return Data_table[Data_table['SessionID'] == ID]
+    return Data_table[Data_table['SessionID'] == ID].reset_index(drop=True)
 
 if __name__ == '__main__':
     LOGGER.info('Starting saveNifti: Step 03')
