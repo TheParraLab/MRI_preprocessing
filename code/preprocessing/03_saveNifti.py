@@ -112,7 +112,7 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
                         elapsed = time.time() - t_start
                         LOGGER.info(f'[{target_name}] Progress: {idx+1}/{len(futures)} items, {elapsed:.0f}s elapsed')
                 except Exception as e:
-                    LOGGER.error(f'[ERROR] Future {idx} failed: {e}', exc_info=True)
+                    LOGGER.error(f'[ERROR] Future {idx} ({target_name} item {idx}) failed: {e}', exc_info=True)
     else:
         for items_index, item in enumerate(items):
             if stop_flag.is_set():
@@ -132,7 +132,9 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
 
     # Check if results is a list of tuples before returning zip(*results)
     if results and isinstance(results[0], tuple):
-        return zip(*results)
+        LOGGER.info(f'[*] Unzipping tuple results for {target_name}')
+        return list(zip(*results))
+    LOGGER.info(f'[*] Returning {len(results)} results for {target_name}')
     return results
 
 #def progress_updater(queue, progress_bar):
@@ -269,15 +271,23 @@ if __name__ == '__main__':
         
 
         # Splitting the datatable into subsets
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: splitting table for {len(Iden_uniq)} sessions')
         Data_subsets = run_with_progress(split_table, Iden_uniq, Parallel=PARALLEL)
         # Building the commands for conversion
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: building dcm2niix commands')
         commands = run_with_progress(makeNifti, Data_subsets, Parallel=PARALLEL)
-        commands = manager.list([item for sublist in commands for item in sublist])
-        LOGGER.info(f'Number of commands: {len(commands)}')
-        print(commands[1])
-    LOGGER.info('Isolating priority commands')
-    commands_priority = manager.list([item for item in commands if 'raw' in item[-1]])
-    commands_redirected = manager.list([item for item in commands if 'raw' not in item[-1]])
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: flattening commands list')
+        flat_commands = [item for sublist in commands for item in sublist]
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Created {len(flat_commands)} commands, transferring to manager.list()...')
+        commands = manager.list(flat_commands)
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Number of commands: {len(commands)}')
+    LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: separating priority (raw) from redirected commands')
+    raw_cmds = [item for item in commands if 'raw' in item[-1]]
+    LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Found {len(raw_cmds)} priority commands')
+    commands_priority = manager.list(raw_cmds)
+    redirected_cmds = [item for item in commands if 'raw' not in item[-1]]
+    LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Found {len(redirected_cmds)} redirected commands')
+    commands_redirected = manager.list(redirected_cmds)
     if len(commands_priority) > 0:
         LOGGER.debug(f'Number of priority commands: {len(commands_priority)}')
         run_with_progress(partial(run_cmd, commands=commands), commands_priority, Parallel=PARALLEL)
