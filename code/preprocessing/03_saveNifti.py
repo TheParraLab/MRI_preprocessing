@@ -95,15 +95,26 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     t_start = time.time()
     items_index = 0
     if Parallel:
-        LOGGER.info(f'Submitting {len(items)} tasks to ProcessPoolExecutor ({cpu_count()-1} workers)')
-        with ProcessPoolExecutor(max_workers=cpu_count()-1) as executor:
-            futures = [(items_index, executor.submit(target, item, *args, **kwargs))
-                       for items_index, item in enumerate(items)]
+        max_workers = cpu_count() - 1
+        LOGGER.info(f'Submitting {len(items)} tasks to ProcessPoolExecutor ({max_workers} workers)')
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for idx, item in enumerate(items):
+                if stop_flag.is_set():
+                    LOGGER.info(f'[STOP] Stop flag set before submitting item {idx+1}/{len(items)}. Cancelling.')
+                    for f in futures:
+                        f.cancel()
+                    break
+                futures.append((idx, executor.submit(target, item, *args, **kwargs)))
+                num_done = (idx + 1) % 50 == 0 or idx + 1 == len(items)
+                if num_done:
+                    elapsed = time.time() - t_start
+                    LOGGER.info(f'[{target_name}] Submitted: {idx+1}/{len(items)} items, {elapsed:.0f}s elapsed')
             for idx, future in futures:
                 if stop_flag.is_set():
                     LOGGER.info(f'[STOP] Stop flag set after processing {idx+1}/{len(futures)} futures. Cancelling remaining.')
-                    for _, unsubmitted in futures[idx+1:]:
-                        unsubmitted.cancel()
+                    for _, f in futures[idx+1:]:
+                        f.cancel()
                     break
                 try:
                     result = future.result(timeout=1800)
