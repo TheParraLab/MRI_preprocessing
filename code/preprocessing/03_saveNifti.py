@@ -7,6 +7,7 @@ import pandas as pd
 from multiprocessing import Queue, Manager, cpu_count, Lock
 import threading
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import signal
 import subprocess
 import time
 from typing import Callable, List, Any
@@ -243,7 +244,12 @@ def makeNifti(Data_subset):
 def split_table(ID):
     return Data_table[Data_table['SessionID'] == ID].reset_index(drop=True)
 
+def handle_keyboard_interrupt(signum, frame):
+    LOGGER.info('[SIGINT] Keyboard interrupt received. Setting stop flag for graceful shutdown...')
+    stop_flag.set()
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT, handle_keyboard_interrupt)
     LOGGER.info('Starting saveNifti: Step 03')
     LOGGER.info(f'LOAD_DIR: {LOAD_DIR}')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
