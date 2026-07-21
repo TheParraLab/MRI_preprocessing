@@ -128,10 +128,18 @@ def align(Dir):
     if len(Fils) < 3:
         LOGGER.error(f'Not enough scans in {Dir}. Found {len(Fils)} scans. Skipping.')
         return 'Not enough scans'
+    session_dir = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}'
+
+    # Check if all files are already processed
+    all_done = all(os.path.exists(f'{session_dir}{os.sep}{os.path.basename(f)}') for f in Fils)
+    if all_done:
+        LOGGER.info(f'All files already exist, skipping: {Dir}')
+        return 'already done'
+
     LOGGER.info(f'Processing {Dir}')
-    if not os.path.exists(f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}'):
-        os.mkdir(f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}')
-        LOGGER.debug(f'Created directory: {SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}')
+    if not os.path.exists(session_dir):
+        os.mkdir(session_dir)
+        LOGGER.debug(f'Created directory: {session_dir}')
     # Coregister all subsequent scans
     LOGGER.debug(f'Utilizing {Fils[1]} as reference for coregistration')
     for ii in Fils[2:]:
@@ -147,10 +155,16 @@ def align(Dir):
         #os.system(f'reg_aladin -ref {Fils[1]} -flo {ii} -aff {dest}_aff.txt')
         #os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
         #os.system(f'rm {dest}_aff.txt')
+        out_file = f'{dest}.nii'
+        if os.path.exists(out_file):
+            LOGGER.info(f'Skipping (already exists): {ii}')
+            continue
         try:
-            subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', ii, '-res', f'{dest}.nii', '-be', '0.1'], check=True)
+            subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', ii, '-res', out_file, '-be', '0.1', '-platf', '1'], check=True)
         except subprocess.CalledProcessError as e:
             LOGGER.error(f'Error during coregistration: {e}')
+            if os.path.exists(out_file):
+                os.remove(out_file)
 
         LOGGER.info(f'Coregistered: {ii}')
     # Coregister the first scan
@@ -159,13 +173,18 @@ def align(Dir):
     #os.system(f'reg_aladin -ref {Fils[1]} -flo {Fils[0]} -aff {dest}_aff.txt')
     #os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
     #os.system(f'rm {dest}_aff.txt')
-    try:
-        LOGGER.debug(f'Running: reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -be 0.1')
-        subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', Fils[0], '-res', f'{dest}.nii', '-be', '0.1'], check=True)
-    except subprocess.CalledProcessError as e:
-        LOGGER.error(f'Error during coregistration: {e}')
-    
-    LOGGER.info(f'Coregistered: {Fils[0]}')
+    out_file = f'{dest}.nii'
+    if os.path.exists(out_file):
+        LOGGER.info(f'Skipping (already exists): {Fils[0]}')
+    else:
+        try:
+            LOGGER.debug(f'Running: reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {out_file} -be 0.1 -platf 1')
+            subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', Fils[0], '-res', out_file, '-be', '0.1', '-platf', '1'], check=True)
+        except subprocess.CalledProcessError as e:
+            LOGGER.error(f'Error during coregistration: {e}')
+            if os.path.exists(out_file):
+                os.remove(out_file)
+        LOGGER.info(f'Coregistered: {Fils[0]}')
 
     # Copy reference to coregistered samples
     subprocess.run(['cp', Fils[1], f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{Fils[1].split(os.sep)[-1]}'], check=True)

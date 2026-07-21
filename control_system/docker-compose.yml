@@ -15,8 +15,3 @@ services:
       - NIFTI_DIRECTORY_PATH
       - NVIDIA_VISIBLE_DEVICES=all
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
