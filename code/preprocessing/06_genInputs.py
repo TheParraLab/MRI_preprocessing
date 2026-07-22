@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import nibabel as nib
 from typing import Callable, List, Any
-from multiprocessing import Queue, Manager, cpu_count
+from multiprocessing import Queue, cpu_count
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
 import subprocess
@@ -13,8 +13,6 @@ import threading
 from toolbox import ProgressBar, get_logger
 # Global variables for progress bar and lock
 Progress = None
-manager = Manager()
-progress_queue = manager.Queue()
 LOGGER = get_logger('06_genInputs', '/FL_system/data/logs/')
 
 LOAD_DIR = '/FL_system/data/coreg/'
@@ -22,7 +20,7 @@ SAVE_DIR = '/FL_system/data/inputs/'
 DEBUG = 0
 TEST = False
 N_TEST = 40
-PARALLAL = True
+PARALLAL = False
 PROGRESS = False
 # This script is for generating the numpy files utilized for model training
 # Performs the calculation of the slope 1 (enhancement) for each scan
@@ -36,8 +34,7 @@ def progress_wrapper(item, target, progress_queue, *args, **kwargs):
 def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
     """Run a function with a progress bar"""
     # Initialize using a manager to allow for shared progress queue
-    manager = Manager()
-    progress_queue = manager.Queue()
+    progress_queue = Queue()
     target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
 
     # Debugging information
@@ -290,4 +287,4 @@ if __name__ == '__main__':
         os.mkdir(SAVE_DIR)
 
 
-    run_with_progress(generate_slopes, session, Parallel=True)
+    run_with_progress(generate_slopes, session, Parallel=False)
