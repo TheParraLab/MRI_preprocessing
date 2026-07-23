@@ -20,7 +20,7 @@ parser.add_argument('--dir_list', type=str, default='list.txt', help='List of di
 parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
 parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
 parser.add_argument('--test', nargs='?', type=int, const=10, help='Run in test mode, limit the number of directories to process')
-parser.add_argument('--test-stop', action='store_true', help='Randomly trip the disk space checker to simulate low disk space')
+parser.add_argument('--test_stop', action='store_true', help='Randomly trip the disk space checker to simulate low disk space')
 args = parser.parse_args()
 # Get script name
 script_name = os.path.basename(__file__).split('.')[0]
