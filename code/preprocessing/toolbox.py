@@ -6,7 +6,7 @@ import queue
 import atexit as _atexit
 import sys
 
-from typing import Callable, List, Any, Optional
+from typing import Callable, List, Any, Optional, Literal
 from functools import partial
 from multiprocessing import cpu_count
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -77,11 +77,10 @@ def _init_child_logger(
     fh.setFormatter(fmt)
     lgr.addHandler(fh)
 
-    # Prevent every log line from double-writing via propagation to root handler
+  # Prevent every log line from double-writing via propagation to root handler
     lgr.propagate = False
 
-    # Give the root logger a handler so bare logging.error/warning calls from
-    # deep inside worker functions or library code also reach the log file.
+    # Give the root logger a handler for bare logging calls from library code.
     root = logging.getLogger()
     if not root.handlers:
         root_fh = FileHandlerWithLock(file_path, mode='a')
@@ -282,6 +281,7 @@ def run_function(
     LOGGER: Any,                          # can be a Logger or _LoggerProxy
     target: Callable[..., Any], items: List[Any],
     Parallel: bool = True, P_type: str = 'thread', N_CPUS: int = 0, N_THREADS: int = 0,
+    P_role: Literal['io', 'compute'] | None = None,
     stop_flag: Optional[object] = None, *args: Any, **kwargs: Any,
 ) -> List[Any]:
     """Run a function over *items* in parallel or sequentially.
@@ -295,11 +295,14 @@ def run_function(
         items (List[Any]): Items to feed into *target* one by one.
         Parallel (bool): Whether to dispatch in parallel at all (False → serial loop).
         P_type (str): ``'thread'``, ``'process'`` or ``'hybrid'``.  Anything else falls back to serial.
-            Hybrid mode spawns ProcessPoolExecutor workers -- each managing its own 
+            Hyper threading mode spawns ProcessPoolExecutor workers -- each managing its own 
             ThreadPoolExecutor of size *N_THREADS* for concurrent I/O within process-scoped network address space isolation.
         N_CPUS (int): Suggested worker count; 0 means "best auto-guess".
-        N_THREADS (int): Thread pool size per-hybrid-worker or max workers when P_type == 'thread';
+        N_THREADS (int): Thread pool size per-hyper-worker or max workers when P_type == 'thread';
             0 uses default (2 * N_CPUS).
+        P_role (str | None): ``'io'`` for I/O-bound workloads, ``'compute'`` for CPU-bound.
+            I/O-bound: caps workers at min(8, cpu_count()-1) or half the available cores on larger machines.
+            Compute-bound: uses full core capacity.  None falls back to legacy behavior.
 
     Returns:
         List[Any]: Results in the same order as *items*.  If every result is a tuple,
@@ -313,6 +316,11 @@ def run_function(
 
     N_CPUS = _effective_cpus(N_CPUS)
 
+    def _effective_workers(count: int, role: str | None = None) -> int:
+        if role == 'io':
+            return min(8, max(2, count // 2))
+        return count
+
     LOGGER.debug(f'Running {target_name} {" in parallel" if Parallel else "serially"}')
     LOGGER.debug(f'Number of items: {len(items)}')
 
@@ -320,8 +328,9 @@ def run_function(
     try:
         # ───────── process mode ─────────
         if Parallel and P_type == 'process':
-            max_workers = min(32, 2 * N_CPUS)
-            LOGGER.debug(f'Using {P_type} workers={max_workers}')
+            effective = _effective_workers(N_CPUS, role=P_role)
+            max_workers = min(32, 2 * effective)
+            LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             init_args = (LOGGER.name, LOGGER._log_level,
                          LOGGER._file_path, LOGGER._formatter_str)
 
@@ -356,8 +365,9 @@ def run_function(
 
         # ───────── thread mode ────────────────
         elif Parallel and P_type == 'thread':
-            max_workers = min(32, 2 * N_CPUS)
-            LOGGER.debug(f'Using {P_type} workers={max_workers}')
+            effective = _effective_workers(N_CPUS, role=P_role)
+            max_workers = min(32, 2 * effective)
+            LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_map = {executor.submit(target, item, *args, **kwargs): i
                               for i, item in enumerate(items)}

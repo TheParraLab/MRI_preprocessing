@@ -5,11 +5,19 @@ import fcntl
 import pickle
 import json
 import random
+import signal
 import numpy as np
 import nibabel as nib
-from multiprocessing import Manager, cpu_count, Lock
+from multiprocessing import cpu_count, Manager
 # Custom Imports
 from toolbox import run_function, get_logger
+manager = Manager()
+stop_flag = manager.Event()
+
+
+def _check_stop():
+    if stop_flag.is_set():
+        raise KeyboardInterrupt('Shutdown requested')
 
 # Define command line arguments
 parser = argparse.ArgumentParser(description='Convert Nifti files to RAS orientation')
@@ -29,10 +37,6 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Global variables for progress bar
 #Progress = None
-manager = Manager()
-disk_space_lock = Lock()
-stop_flag = manager.Event()
-#progress_queue = manager.Queue()
 
 # Other global variables
 LOAD_DIR = args.scan_dir #'/FL_system/data/nifti/'
@@ -162,6 +166,7 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     # This function converts all nifti files in the input directory to RAS orientation
     # It saves the RAS files in the output directory
 
+    _check_stop()
     if check_flag(script_name, logging_dir):
         LOGGER.warning(f'Flag {script_name} is set, exiting...')
         return
@@ -209,8 +214,8 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
                 LOGGER.error(f'{dir} | No FS found in 00 or 00a')
                 return
     for ii in Fils:
-        LOGGER.debug(f'{dir} | Processing: {os.path.join(dir, ii)}')
-        LOGGER.debug(f'{dir} | Checking if {ii} is in {Fils_out}')
+        _check_stop()
+        LOGGER.debug(f'{dir} | Checking if {ii} is in {Fils_out}...')
 
         if ii in Fils_out:
             LOGGER.warning(f'{dir} | {ii} | Already processed, skipping')
@@ -259,7 +264,16 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     update_progress(progress_name, dir.split(os.sep)[-1], dir=logging_dir)
     return 'completed'
 
+
+def handle_keyboard_interrupt(signum, frame):
+    LOGGER.info('[SIGINT] Keyboard interrupt received. Setting stop flag...')
+    stop_flag.set()
+    raise KeyboardInterrupt('Interrupted')
+
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT, handle_keyboard_interrupt)
+    signal.signal(signal.SIGTERM, handle_keyboard_interrupt)
     LOGGER.info('Starting saveRAS: Step 04')
     LOGGER.info(f'LOAD_DIR: {LOAD_DIR}')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
@@ -282,25 +296,31 @@ if __name__ == '__main__':
         Dirs = glob.glob(f'{LOAD_DIR}*')
         if TEST:
             Dirs = Dirs[:N_TEST]
-        run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', stop_flag=stop_flag)
+        try:
+            run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', P_role='io', stop_flag=stop_flag)
+        except KeyboardInterrupt:
+            LOGGER.info('Interrupted. Progress files and completed directories are safe to resume.')
+            compile_progress(script_name, dir=logging_dir)
+            raise
     else:
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
-        # Save to temporary directory
         with open(args.dir_list, 'rb') as f:
             Dirs = pickle.load(f)
         Dir = Dirs[args.dir_idx]
-        # Make Dir list if not
         if type(Dir) == str:
             LOGGER.debug(f'Converting Dir to list: {Dir}')
             Dir = [Dir]
         LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
-        run_function(LOGGER, RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', stop_flag=stop_flag)
-    
-    if args.dir_idx == len(Dirs) - 1:
-        LOGGER.info('This is the last job in the array, compiling progress file')
-        # Compile progress file
-        compile_progress(script_name, dir=logging_dir)
+        try:
+            run_function(LOGGER, RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', P_role='io', stop_flag=stop_flag)
+        except KeyboardInterrupt:
+            LOGGER.info('Interrupted. Progress files and completed directories are safe to resume.')
+            compile_progress(script_name, dir=logging_dir)
+            raise
 
+    if args.dir_idx is None or args.dir_idx == len(Dirs) - 1:
+        LOGGER.info('Compiling progress file')
+        compile_progress(script_name, dir=logging_dir)
 
     LOGGER.info('Completed saveRAS: Step 04')
     LOGGER.info('All files saved to RAS directory')
