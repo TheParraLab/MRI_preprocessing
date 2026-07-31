@@ -1472,6 +1472,7 @@ class DICOMorder():
                 self.dicom_table.loc[valid_rows_2.index, 'Major'] = np.linspace(1, len(valid_rows_2), int(len(valid_rows_2)))
                 unknown_idx_2 = unknown_rows_2.index
                 self.dicom_table.loc[unknown_idx_2, 'Major'] = np.zeros(len(unknown_idx_2))
+                self._force_pre_major()
                 return self.dicom_table
         else:
             self.logger.debug(f'Ordering by {timing_param}, {n_unknown} unknown rows (pre scans) | {self.Session_ID}')
@@ -1483,8 +1484,31 @@ class DICOMorder():
             # Add a 'Major' column to the valid rows
             self.dicom_table.loc[valid_rows.index, 'Major'] = np.linspace(1, len(valid_rows), int(len(valid_rows)))
             self.dicom_table.loc[unknown_rows.index, 'Major'] = np.zeros(n_unknown)
-            return self.dicom_table
-    
+            self._force_pre_major()
+        return self.dicom_table
+
+    def _force_pre_major(self):
+        """Any row flagged as Pre_scan must have Major=0 regardless of TriTime.
+
+        DICOMfilter.isolate_sequence() runs before this and has already set
+        Pre_scan=True on the true baseline scan(s).  The prior ordering logic
+        assigned Major values purely from TriTime (Unknown → 0, numeric → ≥1),
+        which means a pre-scan that happened to carry a real TriggerTime wound
+        up at Major ≥ 1 and never became 00.nii.  This method corrects those
+        misassignments by forcing every Pre_scan row back to Major=0.
+
+        Only applied when the Pre_scan column is still present on the table
+        (it may have been dropped in earlier filter stages)."""
+        if 'Pre_scan' not in self.dicom_table.columns:
+            return
+        mask = self.dicom_table['Pre_scan'] == True
+        before = self.dicom_table.loc[mask, 'Major'].tolist()
+        self.dicom_table.loc[mask, 'Major'] = 0.0
+        if before and all(m != 0.0 for m in before):
+            self.logger.info(
+                f'Pre-scan Major corrected from {before} → 0 | {self.Session_ID}'
+            )
+
     def alternate_pre(self):
         if self.debug > 0:
             print(f'Attemting to solve for pre scan for {self.dicom_table["SessionID"].unique()}')
