@@ -1,40 +1,47 @@
 import os
+import queue
 import argparse
-import pydicom as pyd
 import glob
 import pickle
-import numpy as np
-import pandas as pd
-import nibabel as nib
-from typing import Callable, List, Any
-from multiprocessing import Queue, Manager, cpu_count
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from functools import partial
 import subprocess
 import threading
+import signal
 
+from multiprocessing import Manager, cpu_count
 from toolbox import ProgressBar, get_logger, run_function
+
 BASE_PATH = '/FL_system'
-#BASE_PATH = '/home/nleotta000/Projects/'
-# Global variables for progress bar and lock
-Progress = None
-manager = Manager()
-progress_queue = manager.Queue()
 
 # Define command line arguments
-parser = argparse.ArgumentParser(description='Align scans to the first post scan')
-parser.add_argument('--load_dir', type=str, default=f'{BASE_PATH}/data/RAS/', help='Directory to load scans from')
-parser.add_argument('--save_dir', type=str, default=f'{BASE_PATH}/data/coreg/', help='Directory to save aligned scans')
-parser.add_argument('--multi', '-m', action='store_true', help='Use multiprocessing')
-parser.add_argument('--dir_idx', type=int, help='Index of the folder to process from dirs_to_process.txt')
-parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt', help='Path to the directory list file')
-parser.add_argument('--prune', '-p', action='store_true', help='Enable the deletion of the original scans once aligned')
+parser = argparse.ArgumentParser(
+    description='Align scans to the first post scan')
+parser.add_argument(
+    '--load_dir', type=str, default=f'{BASE_PATH}/data/RAS/',
+    help='Directory to load scans from')
+parser.add_argument(
+    '--save_dir', type=str, default=f'{BASE_PATH}/data/coreg/',
+    help='Directory to save aligned scans')
+parser.add_argument(
+    '--multi', '-m', action='store_true', help='Use multiprocessing')
+parser.add_argument(
+    '--dir_idx', type=int,
+    help='Index of the folder to process from dirs_to_process.txt')
+parser.add_argument(
+    '--dir_list', type=str, default='dirs_to_process.txt',
+    help='Path to the directory list file')
+parser.add_argument(
+    '--prune', '-p', action='store_true',
+    help='Enable the deletion of the original scans once aligned')
 args = parser.parse_args()
 
 LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
+
 # Log niftyreg version
 try:
-    result = subprocess.run(['reg_f3d', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+    result = subprocess.run(
+        ['reg_f3d', '--version'],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, check=True)
     LOGGER.info(f'NiftyReg version: {result.stdout.strip()}')
 except subprocess.CalledProcessError as e:
     LOGGER.error(f'Error checking NiftyReg version: {e}')
@@ -42,233 +49,199 @@ except subprocess.CalledProcessError as e:
 # Define necessary directories
 LOAD_DIR = args.load_dir
 SAVE_DIR = args.save_dir
-DEBUG = 0
 TEST = False
 N_TEST = 40
-PARALLAL = args.multi
+PARALLEL = args.multi
 PROGRESS = False
 PRUNE = args.prune
 
-#### Preprocessing | Step 5: Align Scans ####
-# This script aims to coregister all session-specific scans to the 01_01 scan
-# 
-# This 
-def progress_wrapper(item, target, progress_queue, *args, **kwargs):
-    result = target(item, *args, **kwargs)
-    progress_queue.put((None, f'Processing'))
-    return result
+# Global progress bar reference (set lazily)
+_progress_bar = None
 
-def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
-    """Run a function with a progress bar"""
-    # Initialize using a manager to allow for shared progress queue
-    manager = Manager()
-    progress_queue = manager.Queue()
-    target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
 
-    # Debugging information
-    LOGGER.debug(f'Running {target_name} with progress bar')
-    LOGGER.debug(f'Number of items: {len(items)}')
-    LOGGER.debug(f'Parallel: {Parallel}')
+def align(session_dir: str, save_dir: str):
+    """Coregister all scans in *session_dir* to the 01_01 reference scan.
 
-    # Initialize progress bar
-    if PROGRESS:
-        Progress = ProgressBar(len(items))
-        updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
-        updater_thread.start()
-    
-    # Pass the progress queue to the target function
-    target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
+    Suggested as module-level so that ProcessPoolExecutor can pickle it
+    and ship it to child processes via the ``spawn`` start method."""
+    assert isinstance(session_dir, str)
+    LOGGER.info(session_dir.split(os.sep)[-1])
+    if session_dir.endswith(os.sep):
+        LOGGER.warning('Directory has trailing slash. Removing it.')
+        session_dir = session_dir[:-1]
 
-    # Run the target function with a progress bar
-    if Parallel:
-        num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", cpu_count()//2))
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-            results = [future.result() for future in futures]
-    else:
-        results = [target(item) for item in items]
+    src_files = glob.glob(f'{session_dir}/*_RAS.nii')
+    src_files.sort()
+    if len(src_files) < 3:
+        LOGGER.error(
+            f'Not enough scans in {session_dir}. '
+            f'Found {len(src_files)} scans. Skipping.')
+        return 'Not enough scans'
 
-    # Close the progress bar
-    if PROGRESS:
-        progress_queue.put(None)
-        print('\n')
-        updater_thread.join()
+    out_dir = os.path.join(save_dir, session_dir.split(os.sep)[-1])
 
-    LOGGER.debug(f'Completed {target_name} with progress bar')
-    LOGGER.debug(f'Number of results: {len(results)}')
+    # Skip if every output already exists
+    if all(os.path.exists(os.path.join(out_dir, os.path.basename(f)))
+           for f in src_files):
+        LOGGER.info(f'All files already exist, skipping: {session_dir}')
+        return 'already done'
 
-    # Check if results is a list of tuples before returning zip(*results)
-    if results and isinstance(results[0], tuple):
-        return zip(*results)
-    return results
+    LOGGER.info(f'Processing {session_dir}')
+    if not os.path.exists(out_dir):
+        os.mkdir(out_dir)
+        LOGGER.debug(f'Created directory: {out_dir}')
 
-def progress_updater(queue, progress_bar):
+    reference = src_files[1]
+    LOGGER.debug(f'Using {reference} as reference for coregistration')
+
+    # Coregister all scans except the reference
+    for f in src_files[:1] + src_files[2:]:
+        dest = os.path.join(out_dir, os.path.basename(f)).replace('.nii', '')
+        out_file = f'{dest}.nii'
+        if os.path.exists(out_file):
+            LOGGER.info(f'Skipping (already exists): {os.path.basename(f)}')
+            continue
+        try:
+            subprocess.run(
+                ['reg_f3d', '-ref', reference, '-flo', f, '-res', out_file,
+                 '-be', '0.1', '-platf', '1'],
+                check=True)
+            LOGGER.info(f'Coregistered: {os.path.basename(f)}')
+        except subprocess.CalledProcessError as e:
+            LOGGER.error(
+                f'Error during coregistration of {os.path.basename(f)}: {e}')
+            if os.path.exists(out_file):
+                os.remove(out_file)
+
+    # Copy reference scan into output directory unchanged
+    reference_dst = os.path.join(out_dir, os.path.basename(reference))
+    if not os.path.exists(reference_dst):
+        subprocess.run(['cp', reference, reference_dst], check=True)
+        LOGGER.info(f'Copied reference: {os.path.basename(reference)}')
+
+    return 'completed'
+
+
+def _progress_updater(queue, progress):
+    """Daemon thread that pulls markers from *queue* and updates progress bar."""
     while True:
         item = queue.get()
         if item is None:
             break
-        index, status = item
-        progress_bar.update(index, status)
-
-        queue.task_done()
-
-def align(Dir):
-    # This function coregisters all scans in the input directory to the 01_01 scan
-    # It saves the coregistered scans in the output directory
-
-    # Make sure Dir is a string
-    assert isinstance(Dir, str), f'Dir should be a string, but got {type(Dir)}'
-    LOGGER.info(Dir[-1])
-    if Dir[-1] == os.sep:
-        LOGGER.warning(f'Directory {Dir} has a trailing slash. Removing it.')
-        Dir = Dir[:-1]
-    
-    Fils = glob.glob(f'{Dir}/*_RAS.nii')
-    Fils.sort()
-    if len(Fils) < 3:
-        LOGGER.error(f'Not enough scans in {Dir}. Found {len(Fils)} scans. Skipping.')
-        return 'Not enough scans'
-    session_dir = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}'
-
-    # Check if all files are already processed
-    all_done = all(os.path.exists(f'{session_dir}{os.sep}{os.path.basename(f)}') for f in Fils)
-    if all_done:
-        LOGGER.info(f'All files already exist, skipping: {Dir}')
-        return 'already done'
-
-    LOGGER.info(f'Processing {Dir}')
-    if not os.path.exists(session_dir):
-        os.mkdir(session_dir)
-        LOGGER.debug(f'Created directory: {session_dir}')
-    # Coregister all subsequent scans
-    LOGGER.debug(f'Utilizing {Fils[1]} as reference for coregistration')
-    for ii in Fils[2:]:
-        # Perform coregistration to 01_01
-        LOGGER.info(f'Current DIRECTORY: {Dir}')
-        LOGGER.info(f'Current ID: {Dir.split(os.sep)[-1]}')
-        LOGGER.info(f'Current seperator: {os.sep}')
-        LOGGER.info(f'Split Directory: {Dir.split(os.sep)}')
-        dest = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{ii.split(os.sep)[-1]}'
-        dest = dest.replace('.nii','')
-        LOGGER.info(f'Coregistering scan to save to {dest}')
-        aff_save = (os.sep).join(dest.split(os.sep)[:-1])
-        #os.system(f'reg_aladin -ref {Fils[1]} -flo {ii} -aff {dest}_aff.txt')
-        #os.system(f'reg_f3d -ref {Fils[1]} -flo {ii} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
-        #os.system(f'rm {dest}_aff.txt')
-        out_file = f'{dest}.nii'
-        if os.path.exists(out_file):
-            LOGGER.info(f'Skipping (already exists): {ii}')
-            continue
         try:
-            subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', ii, '-res', out_file, '-be', '0.1', '-platf', '1'], check=True)
-        except subprocess.CalledProcessError as e:
-            LOGGER.error(f'Error during coregistration: {e}')
-            if os.path.exists(out_file):
-                os.remove(out_file)
+            progress.update(item[0], item[1])
+        except Exception:
+            pass
+        finally:
+            queue.task_done()
 
-        LOGGER.info(f'Coregistered: {ii}')
-    # Coregister the first scan
-    dest = f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{Fils[0].split(os.sep)[-1]}'
-    dest = dest.replace('.nii','')
-    #os.system(f'reg_aladin -ref {Fils[1]} -flo {Fils[0]} -aff {dest}_aff.txt')
-    #os.system(f'reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {dest}.nii -aff {dest}_aff.txt -be 0.1')
-    #os.system(f'rm {dest}_aff.txt')
-    out_file = f'{dest}.nii'
-    if os.path.exists(out_file):
-        LOGGER.info(f'Skipping (already exists): {Fils[0]}')
-    else:
-        try:
-            LOGGER.debug(f'Running: reg_f3d -ref {Fils[1]} -flo {Fils[0]} -res {out_file} -be 0.1 -platf 1')
-            subprocess.run(['reg_f3d', '-ref', Fils[1], '-flo', Fils[0], '-res', out_file, '-be', '0.1', '-platf', '1'], check=True)
-        except subprocess.CalledProcessError as e:
-            LOGGER.error(f'Error during coregistration: {e}')
-            if os.path.exists(out_file):
-                os.remove(out_file)
-        LOGGER.info(f'Coregistered: {Fils[0]}')
 
-    # Copy reference to coregistered samples
-    subprocess.run(['cp', Fils[1], f'{SAVE_DIR}{os.sep}{Dir.split(os.sep)[-1]}{os.sep}{Fils[1].split(os.sep)[-1]}'], check=True)
-    LOGGER.info(f'Copied: {Fils[1]}')
+def run_with_progress(target, items, parallel=True, P_type='process',
+                      P_role='compute', save_dir=SAVE_DIR):
+    """Run *target* over *items* with an optional progress bar.
 
-    return 'completed'
+    Wraps ``run_function`` to inject a per-item marker into a shared queue
+    that a background thread feeds to a ``ProgressBar``."""
+
+    n = len(items)
+    update_queue = None
+    updater_thread = None
+
+    if PROGRESS:
+        global _progress_bar
+        _progress_bar = ProgressBar(n)
+        update_queue = queue.Queue()
+        updater_thread = threading.Thread(
+            target=_progress_updater, args=(update_queue, _progress_bar),
+            daemon=True)
+        updater_thread.start()
+
+    def _wrapper(item):
+        result = target(item, save_dir)
+        if update_queue is not None:
+            update_queue.put((None, 'Processing'))
+        return result
+
+    results = run_function(
+        LOGGER, _wrapper, list(items),
+        Parallel=parallel, P_type=P_type, P_role=P_role)
+
+    if PROGRESS:
+        if update_queue is not None:
+            update_queue.put(None)
+        if updater_thread is not None:
+            updater_thread.join(timeout=5)
+        print()
+
+    if results and isinstance(results[0], tuple):
+        return list(zip(*results))
+    return results
+
 
 if __name__ == '__main__':
+    # ---- Signal handler for graceful shutdown ---------------
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
     LOGGER.info('Starting alignScans: Step 05')
     LOGGER.info(f'LOAD_DIR: {LOAD_DIR}')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
-    LOGGER.info(f'PARALLAL: {PARALLAL}')
+    LOGGER.info(f'PARALLEL: {PARALLEL}')
     if TEST:
         LOGGER.info(f'Running in test mode: {TEST}')
         LOGGER.info(f'Number of test sessions: {N_TEST}')
     if PRUNE:
         LOGGER.warning(f'Pruning enabled: {PRUNE}')
-    
+
     if not os.path.exists(SAVE_DIR):
         try:
             os.mkdir(SAVE_DIR)
             LOGGER.info(f'Created directory: {SAVE_DIR}')
         except Exception as e:
             LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
-    
-    # If not running on an HPC
+
+    # ---- Determine list of directories ---------------------
     if args.dir_idx is None:
-        Dirs = glob.glob(f'{LOAD_DIR}*')
+        dirs = sorted(glob.glob(f'{LOAD_DIR}*'))
         if TEST:
-            Dirs = Dirs[:N_TEST]
-        LOGGER.info(f'Processing {len(Dirs)} directories')
-        run_with_progress(align, Dirs, Parallel=PARALLAL)
-        #run_function(align, Dirs, Parallel=PARALLAL, P_type = 'Process')
+            dirs = dirs[:N_TEST]
+        LOGGER.info(f'Processing {len(dirs)} directories')
     else:
-        # if running on an HPC
-        assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
+        assert os.path.exists(args.dir_list), (
+            f'Directory list file {args.dir_list} does not exist')
         with open(args.dir_list, 'rb') as f:
-            Dirs = pickle.load(f)
-        Dir = Dirs[args.dir_idx]
-        # Make Dir list if not
-        if type(Dir) == str:
-            LOGGER.debug(f'Converting Dir to list: {Dir}')
-            Dir = [Dir]
-        LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
-        run_with_progress(align, Dir, Parallel=PARALLAL)
-        #run_function(align, Dir, Parallel=PARALLAL, P_type = 'Process') 
-        Dirs = Dir
-    
+            all_dirs = pickle.load(f)
+        dir_single = all_dirs[args.dir_idx]
+        if isinstance(dir_single, str):
+            LOGGER.debug(f'Converting Dir to list: {dir_single}')
+            dir_single = [dir_single]
+        LOGGER.info(
+            f'Processing index {args.dir_idx} of {len(all_dirs)}: '
+            f'{dir_single}')
+        dirs = dir_single
+
+    # ---- Run coregistration --------------------------------
+    try:
+        run_with_progress(align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR)
+    except KeyboardInterrupt:
+        LOGGER.info('Interrupted. Completed directories are safe to resume.')
+        raise
+
+    # ---- Prune original scans if requested -----------------
     if PRUNE:
-        LOGGER.info(f'Pruning original scans')
-        for ii in Dirs:
-            if os.path.exists(ii):
+        LOGGER.info('Pruning original scans')
+        for d in dirs:
+            p = os.path.join(LOAD_DIR, d) if not os.path.isabs(d) else d
+            if os.path.exists(p):
                 try:
-                    os.system(f'rm -rf {ii}')
-                    LOGGER.info(f'Deleted: {ii}')
+                    subprocess.run(['rm', '-rf', p], check=True)
+                    LOGGER.info(f'Deleted: {p}')
                 except Exception as e:
-                    LOGGER.error(f'Error deleting directory {ii}: {e}')
+                    LOGGER.error(f'Error deleting directory {p}: {e}')
             else:
-                LOGGER.warning(f'Directory {ii} does not exist. Skipping deletion.')
-    
+                LOGGER.warning(
+                    f'Directory {p} does not exist. Skipping deletion.')
+
     LOGGER.info('Completed alignScans: Step 05')
     LOGGER.info('All files saved to coreg directory')
     LOGGER.info('Exiting alignScans: Step 05')
-
-    #if args.dir_idx is not None:
-    #    with open(args.dir_list, 'rb') as f:
-    #        Dirs = pickle.load(f)
-    #    Dirs = [x.strip() for x in Dirs]
-    #    if args.dir_idx >= len(Dirs):
-    #        LOGGER.error(f'Directory index {args.dir_idx} is out of range. Please provide a valid index.')
-    #        exit()
-    #    else:
-    #        Dir = [Dirs[args.dir_idx]]
-    #    if not os.path.exists(SAVE_DIR):
-    #        os.mkdir(SAVE_DIR)
-    #        LOGGER.warning(f'Created directory: {SAVE_DIR}')
-    #    LOGGER.info(f'Processing single directory: {Dir}')
-    #    align(Dir[0])
-    #    exit()
-
-    # Load the data
-    #Dirs = glob.glob(f'{BASE_PATH}/data/RAS/*')
-    #if TEST:
-    #    Dirs = Dirs[:N_TEST]
-    
-    # Run the coregistration
-    #run_with_progress(align, Dirs, Parallel=PARALLAL)
