@@ -119,8 +119,8 @@ def build_config() -> ParseConfig:
                         help='Run with profiler enabled')
     parser.add_argument('--resume', action='store_true',
                         help='Resume filtering from checkpoint if available')
-    parser.add_argument('--batch_size', type=int, default=10,
-                        help='Number of sessions per batch before saving checkpoint (default: 10)')
+    parser.add_argument('--batch_size', type=int, default=250,
+                        help='Sessions per batch before checkpoint. ')
     parser.add_argument('--min_free_gb', type=float, default=50,
                         help='Minimum free disk space in GB to proceed (default: 50)')
     parser.add_argument('--fully_removed', action='store_true',
