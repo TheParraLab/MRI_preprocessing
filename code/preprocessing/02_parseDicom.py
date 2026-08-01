@@ -882,17 +882,13 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if sid not in completed_ids:
                         completed_ids.append(sid)
 
-                # Save checkpoint after each batch
-                # Reload existing checkpoint, extend with current batch, save, then clear to cap RAM
-                existing_results, existing_removed = _load_checkpoint_data(cfg, logger)
-                all_results = existing_results + all_results
-                all_removed = existing_removed + all_removed
-                _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
-                all_results.clear()
-                all_removed.clear()
-
-                # Check disk space threshold
+                # Check disk space threshold — checkpoint only under pressure
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    logger.info('Disk pressure detected, saving checkpoint before exit')
+                    existing_results, existing_removed = _load_checkpoint_data(cfg, logger)
+                    all_results = existing_results + all_results
+                    all_removed = existing_removed + all_removed
+                    _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
                     total, used, free = shutil.disk_usage(cfg.save_dir)
                     logger.warning(
                         f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
@@ -901,9 +897,21 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            # Final assembly: reload from checkpoint to reconstruct full state (in-memory
-            # lists were cleared post-batch to cap RAM)
-            _, all_results, all_removed = _load_filter_checkpoint(cfg, logger)
+                # Optional mid-run checkpoint every N batches (not per-batch) to avoid
+                # O(n²) pickle churn.  Only checkpoint if we've accumulated enough work.
+                if (batch_start // batch_size + 1) % 10 == 0:
+                    existing_results, existing_removed = _load_checkpoint_data(cfg, logger)
+                    all_results = existing_results + all_results
+                    all_removed = existing_removed + all_removed
+                    _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
+                    all_results.clear()
+                    all_removed.clear()
+
+            # Final assembly — use whatever is still in memory plus whatever was
+            # paged to disk during pressure checkpoints.
+            remaining_results, remaining_removed = _load_checkpoint_data(cfg, logger)
+            all_results = remaining_results + all_results
+            all_removed = remaining_removed + all_removed
             results = [df for df in all_results if df is not None and not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
 
@@ -1043,19 +1051,15 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if sid not in split_completed_ids:
                         split_completed_ids.append(sid)
 
-                # Load existing checkpoint, extend, save, then clear to cap RAM
-                existing_split_results, existing_split_removed, existing_split_redirections = _load_split_checkpoint_data(cfg, logger)
-                all_split_results = existing_split_results + all_split_results
-                all_split_removed = existing_split_removed + all_split_removed
-                all_split_redirections = existing_split_redirections + all_split_redirections
-                _save_split_checkpoint(cfg, logger, split_completed_ids,
-                                       all_split_results, all_split_removed, all_split_redirections)
-                all_split_results.clear()
-                all_split_removed.clear()
-                all_split_redirections.clear()
-
-                # Check disk space threshold
+               # Check disk space threshold — checkpoint only under pressure
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    logger.info('Disk pressure detected, saving split checkpoint before exit')
+                    existing_results, existing_removed, existing_redir = _load_split_checkpoint_data(cfg, logger)
+                    all_split_results = existing_results + all_split_results
+                    all_split_removed = existing_removed + all_split_removed
+                    all_split_redirections = existing_redir + all_split_redirections
+                    _save_split_checkpoint(cfg, logger, split_completed_ids,
+                                           all_split_results, all_split_removed, all_split_redirections)
                     total, used, free = shutil.disk_usage(cfg.save_dir)
                     logger.warning(
                         f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
@@ -1064,8 +1068,24 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            # Final assembly: reload from checkpoint so full state is available again
-            _, all_split_results, split_removed_final, all_split_redirections = _load_split_checkpoint(cfg, logger)
+                # Mid-run checkpoint every 10 batches to avoid O(n²) pickle churn
+                bs = cfg.filter_batch_size
+                if (batch_start // bs + 1) % 10 == 0:
+                    existing_results, existing_removed, existing_redir = _load_split_checkpoint_data(cfg, logger)
+                    all_split_results = existing_results + all_split_results
+                    all_split_removed = existing_removed + all_split_removed
+                    all_split_redirections = existing_redir + all_split_redirections
+                    _save_split_checkpoint(cfg, logger, split_completed_ids,
+                                           all_split_results, all_split_removed, all_split_redirections)
+                    all_split_results.clear()
+                    all_split_removed.clear()
+                    all_split_redirections.clear()
+
+            # Final assembly — merge in-memory with disk checkpoint if any
+            leftover_results, leftover_removed, leftover_redir = _load_split_checkpoint_data(cfg, logger)
+            all_split_results = leftover_results + all_split_results
+            split_removed_final = leftover_removed + all_split_removed
+            all_split_redirections = leftover_redir + all_split_redirections
             results = [df for df in all_split_results if df is not None and not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
             temporary_relocation = list(all_split_redirections)

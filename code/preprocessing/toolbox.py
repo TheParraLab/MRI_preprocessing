@@ -197,19 +197,36 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     The hot-path from *every* producer thread / process is an expensive-free
     ``queue.put(record)`` call to our :class:`~logging.handlers.QueueHandler`.  A
     single daemon consumer drains the queue and does all file + stream I/O
-    sequentially — meaning zero per-emit lock contention."""
+    sequentially — meaning zero per-emit lock contention.
+
+    Idempotent: if this logger already has live handlers (from _init_child_logger
+    or a previous call), return the existing proxy immediately so workers calling
+    get_logger() on every invocation do NOT spawn new queues or threads."""
 
     if save_dir:
         if save_dir[-1] != '/':
             save_dir += '/'
         os.makedirs(save_dir, exist_ok=True)
 
-    log_level = logging.DEBUG
-    formatter_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    file_path = save_dir + name + '.log'
-
-    # --- underlying Logger (managed by Python's logging system) ---------------
+   # --- underlying Logger (managed by Python's logging system) ---------------
     logger = logging.getLogger(name)
+
+    # file_path must always be defined before either path hits it (original code
+    # had this early; the idempotent guard moved inside and the ref on line 244+
+    # would hit an UnboundLocalError otherwise).
+    file_path = save_dir + name + '.log' if save_dir else ''
+
+    # Idempotent guard — if handlers are already installed (either by a previous
+    # get_logger() call or by _init_child_logger in a spawned worker), return
+    # immediately.  Avoids creating duplicate QueueListener threads per-worker.
+    if logger.handlers:
+        log_level = logging.DEBUG
+        formatter_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        file_path = save_dir + name + '.log' if save_dir else ''
+        logger._log_level = log_level
+        logger._file_path = os.path.abspath(file_path) if file_path else ''
+        logger._formatter_str = formatter_str
+        return _LoggerProxy(logger)
 
     # Stop any existing listener for this name to prevent thread + handler leak.
     old_listener = _listener_registry.pop(name, None)
@@ -220,6 +237,8 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
             pass
 
     logger.handlers.clear()
+    log_level = logging.DEBUG
+    formatter_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     logger.setLevel(log_level)
 
     fmt = logging.Formatter(formatter_str)
