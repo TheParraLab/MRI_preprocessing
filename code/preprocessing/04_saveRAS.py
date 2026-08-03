@@ -266,8 +266,7 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
 
 
 def handle_keyboard_interrupt(signum, frame):
-    LOGGER.info('[SIGINT] Keyboard interrupt received. Setting stop flag...')
-    stop_flag.set()
+    LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will complete, queued ones cancelled...')
     raise KeyboardInterrupt('Interrupted')
 
 

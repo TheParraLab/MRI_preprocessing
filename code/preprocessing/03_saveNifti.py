@@ -111,20 +111,26 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
                 if num_done:
                     elapsed = time.time() - t_start
                     LOGGER.info(f'[{target_name}] Submitted: {idx+1}/{len(items)} items, {elapsed:.0f}s elapsed')
-            for idx, future in futures:
-                if stop_flag.is_set():
-                    LOGGER.info(f'[STOP] Stop flag set after processing {idx+1}/{len(futures)} futures. Cancelling remaining.')
-                    for _, f in futures[idx+1:]:
-                        f.cancel()
-                    break
-                try:
-                    result = future.result(timeout=1800)
-                    results.append(result)
-                    if (idx + 1) % 50 == 0 or idx + 1 == len(futures):
-                        elapsed = time.time() - t_start
-                        LOGGER.info(f'[{target_name}] Progress: {idx+1}/{len(futures)} items, {elapsed:.0f}s elapsed')
-                except Exception as e:
-                    LOGGER.error(f'[ERROR] Future {idx} ({target_name} item {idx}) failed: {e}', exc_info=True)
+            try:
+                for idx, future in futures:
+                    if stop_flag.is_set():
+                        LOGGER.info(f'[STOP] Stop flag set after processing {idx+1}/{len(futures)} futures. Cancelling remaining.')
+                        for _, f in futures[idx+1:]:
+                            f.cancel()
+                        break
+                    try:
+                        result = future.result(timeout=1800)
+                        results.append(result)
+                        if (idx + 1) % 50 == 0 or idx + 1 == len(futures):
+                            elapsed = time.time() - t_start
+                            LOGGER.info(f'[{target_name}] Progress: {idx+1}/{len(futures)} items, {elapsed:.0f}s elapsed')
+                    except Exception as e:
+                        LOGGER.error(f'[ERROR] Future {idx} ({target_name} item {idx}) failed: {e}', exc_info=True)
+            except KeyboardInterrupt:
+                LOGGER.info(f'[INTERRUPT] Letting in-flight workers complete, cancelling queued futures from index {idx+1}/{len(futures)}.')
+                for _, f in futures[idx+1:]:
+                    f.cancel()
+                raise
     else:
         for items_index, item in enumerate(items):
             if stop_flag.is_set():
@@ -245,8 +251,8 @@ def split_table(ID):
     return Data_table[Data_table['SessionID'] == ID].reset_index(drop=True)
 
 def handle_keyboard_interrupt(signum, frame):
-    LOGGER.info('[SIGINT] Keyboard interrupt received. Setting stop flag for graceful shutdown...')
-    stop_flag.set()
+    LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will complete, queued ones cancelled...')
+    raise KeyboardInterrupt('Interrupted')
 
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, handle_keyboard_interrupt)

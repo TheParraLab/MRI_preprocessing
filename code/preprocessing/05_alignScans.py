@@ -36,34 +36,29 @@ args = parser.parse_args()
 
 LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
 
-# Log niftyreg version
-try:
-    result = subprocess.run(
-        ['reg_f3d', '--version'],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, check=True)
-    LOGGER.info(f'NiftyReg version: {result.stdout.strip()}')
-except subprocess.CalledProcessError as e:
-    LOGGER.error(f'Error checking NiftyReg version: {e}')
-
 # Define necessary directories
 LOAD_DIR = args.load_dir
 SAVE_DIR = args.save_dir
-TEST = False
-N_TEST = 40
 PARALLEL = args.multi
 PROGRESS = False
 PRUNE = args.prune
 
-# Global progress bar reference (set lazily)
-_progress_bar = None
+manager = Manager()
+stop_flag = manager.Event()
+
+
+def _check_stop():
+    if stop_flag.is_set():
+        raise KeyboardInterrupt('Shutdown requested')
 
 
 def align(session_dir: str, save_dir: str):
-    """Coregister all scans in *session_dir* to the 01_01 reference scan.
+    """Coregister all scans in *session_dir* to the first post reference scan.
 
-    Suggested as module-level so that ProcessPoolExecutor can pickle it
-    and ship it to child processes via the ``spawn`` start method."""
+    Module-level so that ProcessPoolExecutor can pickle it and ship
+    it to child processes via the ``spawn`` start method."""
+
+    _check_stop()
     assert isinstance(session_dir, str)
     LOGGER.info(session_dir.split(os.sep)[-1])
     if session_dir.endswith(os.sep):
@@ -81,8 +76,10 @@ def align(session_dir: str, save_dir: str):
     out_dir = os.path.join(save_dir, session_dir.split(os.sep)[-1])
 
     # Skip if every output already exists
-    if all(os.path.exists(os.path.join(out_dir, os.path.basename(f)))
-           for f in src_files):
+    if all(
+        os.path.exists(os.path.join(out_dir, os.path.basename(f)))
+        for f in src_files
+    ):
         LOGGER.info(f'All files already exist, skipping: {session_dir}')
         return 'already done'
 
@@ -96,10 +93,12 @@ def align(session_dir: str, save_dir: str):
 
     # Coregister all scans except the reference
     for f in src_files[:1] + src_files[2:]:
+        _check_stop()
         dest = os.path.join(out_dir, os.path.basename(f)).replace('.nii', '')
         out_file = f'{dest}.nii'
         if os.path.exists(out_file):
-            LOGGER.info(f'Skipping (already exists): {os.path.basename(f)}')
+            LOGGER.info(
+                f'Skipping (already exists): {os.path.basename(f)}')
             continue
         try:
             subprocess.run(
@@ -109,7 +108,8 @@ def align(session_dir: str, save_dir: str):
             LOGGER.info(f'Coregistered: {os.path.basename(f)}')
         except subprocess.CalledProcessError as e:
             LOGGER.error(
-                f'Error during coregistration of {os.path.basename(f)}: {e}')
+                f'Error during coregistration of '
+                f'{os.path.basename(f)}: {e}')
             if os.path.exists(out_file):
                 os.remove(out_file)
 
@@ -117,15 +117,17 @@ def align(session_dir: str, save_dir: str):
     reference_dst = os.path.join(out_dir, os.path.basename(reference))
     if not os.path.exists(reference_dst):
         subprocess.run(['cp', reference, reference_dst], check=True)
-        LOGGER.info(f'Copied reference: {os.path.basename(reference)}')
+        LOGGER.info(
+            f'Copied reference: {os.path.basename(reference)}')
 
     return 'completed'
 
 
-def _progress_updater(queue, progress):
-    """Daemon thread that pulls markers from *queue* and updates progress bar."""
+def _progress_updater(update_queue, progress):
+    """Daemon thread that pulls markers from *update_queue* and updates
+    progress bar."""
     while True:
-        item = queue.get()
+        item = update_queue.get()
         if item is None:
             break
         try:
@@ -133,17 +135,19 @@ def _progress_updater(queue, progress):
         except Exception:
             pass
         finally:
-            queue.task_done()
+            update_queue.task_done()
 
 
-def run_with_progress(target, items, parallel=True, P_type='process',
-                      P_role='compute', save_dir=SAVE_DIR):
+def run_with_progress(
+    target, items, parallel=True, P_type='process',
+    P_role='compute', save_dir: str = SAVE_DIR
+):
     """Run *target* over *items* with an optional progress bar.
 
     Wraps ``run_function`` to inject a per-item marker into a shared queue
     that a background thread feeds to a ``ProgressBar``."""
 
-    n = len(items)
+    n = len(list(items))
     update_queue = None
     updater_thread = None
 
@@ -156,15 +160,19 @@ def run_with_progress(target, items, parallel=True, P_type='process',
             daemon=True)
         updater_thread.start()
 
-    def _wrapper(item):
+    # Module-level wrapper so it is picklable for spawn mode.
+    # ``align`` already takes (session_dir, save_dir), so we just need to
+    # inject the progress marker without creating a non-picklable closure.
+    def _align_wrapper(item):
         result = target(item, save_dir)
         if update_queue is not None:
             update_queue.put((None, 'Processing'))
         return result
 
     results = run_function(
-        LOGGER, _wrapper, list(items),
-        Parallel=parallel, P_type=P_type, P_role=P_role)
+        LOGGER, _align_wrapper, list(items),
+        Parallel=parallel, P_type=P_type, P_role=P_role,
+        stop_flag=stop_flag)
 
     if PROGRESS:
         if update_queue is not None:
@@ -179,17 +187,29 @@ def run_with_progress(target, items, parallel=True, P_type='process',
 
 
 if __name__ == '__main__':
-    # ---- Signal handler for graceful shutdown ---------------
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # ---- NiftyReg version check (parent only) ------------------
+    try:
+        _res = subprocess.run(
+            ['reg_f3d', '--version'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, check=True)
+        LOGGER.info(f'NiftyReg version: {_res.stdout.strip()}')
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        LOGGER.error(f'Error checking NiftyReg version: {e}')
+
+    # ---- Signal handler for graceful shutdown -----------------
+    def _sigint_handler(signum, frame):
+        LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will complete, queued ones cancelled...')
+        raise KeyboardInterrupt('Interrupted')
+    signal.signal(signal.SIGINT, _sigint_handler)
+    signal.signal(signal.SIGTERM, _sigint_handler)
 
     LOGGER.info('Starting alignScans: Step 05')
     LOGGER.info(f'LOAD_DIR: {LOAD_DIR}')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
     LOGGER.info(f'PARALLEL: {PARALLEL}')
-    if TEST:
-        LOGGER.info(f'Running in test mode: {TEST}')
-        LOGGER.info(f'Number of test sessions: {N_TEST}')
+    if PARALLEL:
+        LOGGER.info('Running in parallel mode')
     if PRUNE:
         LOGGER.warning(f'Pruning enabled: {PRUNE}')
 
@@ -200,11 +220,9 @@ if __name__ == '__main__':
         except Exception as e:
             LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
 
-    # ---- Determine list of directories ---------------------
+    # ---- Determine list of directories ------------------------
     if args.dir_idx is None:
         dirs = sorted(glob.glob(f'{LOAD_DIR}*'))
-        if TEST:
-            dirs = dirs[:N_TEST]
         LOGGER.info(f'Processing {len(dirs)} directories')
     else:
         assert os.path.exists(args.dir_list), (
@@ -216,22 +234,22 @@ if __name__ == '__main__':
             LOGGER.debug(f'Converting Dir to list: {dir_single}')
             dir_single = [dir_single]
         LOGGER.info(
-            f'Processing index {args.dir_idx} of {len(all_dirs)}: '
-            f'{dir_single}')
+            f'Processing index {args.dir_idx} of '
+            f'{len(all_dirs)}: {dir_single}')
         dirs = dir_single
 
-    # ---- Run coregistration --------------------------------
+    # ---- Run coregistration ----------------------------------
     try:
         run_with_progress(align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR)
     except KeyboardInterrupt:
         LOGGER.info('Interrupted. Completed directories are safe to resume.')
         raise
 
-    # ---- Prune original scans if requested -----------------
+    # ---- Prune original scans if requested --------------------
     if PRUNE:
         LOGGER.info('Pruning original scans')
         for d in dirs:
-            p = os.path.join(LOAD_DIR, d) if not os.path.isabs(d) else d
+            p = d if os.path.isabs(d) else os.path.join(LOAD_DIR, d)
             if os.path.exists(p):
                 try:
                     subprocess.run(['rm', '-rf', p], check=True)

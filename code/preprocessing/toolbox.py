@@ -370,10 +370,10 @@ def run_function(
                         ordered[idx] = result
                         LOGGER.debug(f'Future {idx} completed successfully')
                     except KeyboardInterrupt:
-                        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
-                        if stop_flag and getattr(stop_flag, 'set', None):
-                            stop_flag.set()
-                        executor.shutdown(wait=False, cancel_futures=True)
+                        LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                        for remaining_fut in list(future_map.keys()):
+                            remaining_fut.cancel()
+                        executor.shutdown(wait=True, cancel_futures=True)
                         raise
                     except Exception as e:
                         LOGGER.error(
@@ -402,10 +402,10 @@ def run_function(
                         ordered[idx] = result
                         LOGGER.debug(f'Future {idx} completed successfully')
                     except KeyboardInterrupt:
-                        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
-                        if stop_flag and getattr(stop_flag, 'set', None):
-                            stop_flag.set()
-                        executor.shutdown(wait=False, cancel_futures=True)
+                        LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                        for remaining_fut in list(future_map.keys()):
+                            remaining_fut.cancel()
+                        executor.shutdown(wait=True, cancel_futures=True)
                         raise
                     except Exception as e:
                         LOGGER.error(f'Error parallel processing item {idx}: {e}', exc_info=True)
@@ -457,11 +457,14 @@ def run_function(
                         if not isinstance(ordered_list, list):
                             ordered_list = list(ordered_list)
                         for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
-                                          ordered_list):
+                                           ordered_list):
                             if k < len(results):
                                 results[k] = val
                     except KeyboardInterrupt:
-                        pexecutor.shutdown(wait=False, cancel_futures=True)
+                        LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                        for remaining_fut in list(future_to_chunk.keys()):
+                            remaining_fut.cancel()
+                        pexecutor.shutdown(wait=True, cancel_futures=True)
                         raise
 
                 results = list(results)
@@ -479,9 +482,8 @@ def run_function(
                     LOGGER.exception(f'Error at index {i}')
 
     except KeyboardInterrupt:
-        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
-        if stop_flag and getattr(stop_flag, 'set', None):
-            stop_flag.set()
+        LOGGER.info('KeyboardInterrupt received. In-flight workers completed, queued cancelled. Returning collected results.')
+        raise
     finally:
         LOGGER.debug(f'Completed {target_name} {" in parallel" if Parallel else "serially"}')
         LOGGER.debug(f'Number of results: {len(results)}')
