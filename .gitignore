@@ -25,3 +25,12 @@ reset_02.sh
 
 # Singularity images (large, site-specific)
 *.sif
+
+# Test/inspection artifacts
+*.pdf
+.pytest_cache/
+pytest_cache/
+
+# Tool output directories
+tools/**/scan_results/*
+tools/**/comparison_findings/*
