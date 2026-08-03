@@ -360,25 +360,26 @@ def run_function(
                               for i, item in enumerate(items)}
                 ordered: List[Optional[Any]] = [None] * len(future_map)
 
-                for fut in as_completed(future_map):
-                    idx = future_map.pop(fut)
-                    if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
-                        LOGGER.info('Stopping parallel processing (stop flag).')
-                        break
-                    try:
-                        result = fut.result()         # fast path for already-completed work
-                        ordered[idx] = result
-                        LOGGER.debug(f'Future {idx} completed successfully')
-                    except KeyboardInterrupt:
-                        LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                        for remaining_fut in list(future_map.keys()):
-                            remaining_fut.cancel()
-                        executor.shutdown(wait=True, cancel_futures=True)
-                        raise
-                    except Exception as e:
-                        LOGGER.error(
-                            f'Error parallel processing item {idx}: {e}', exc_info=True)
-                        ordered[idx] = None
+                try:
+                    for fut in as_completed(future_map):
+                        idx = future_map.pop(fut)
+                        if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
+                            LOGGER.info('Stopping parallel processing (stop flag).')
+                            break
+                        try:
+                            result = fut.result()         # fast path for already-completed work
+                            ordered[idx] = result
+                            LOGGER.debug(f'Future {idx} completed successfully')
+                        except Exception as e:
+                            LOGGER.error(
+                                f'Error parallel processing item {idx}: {e}', exc_info=True)
+                            ordered[idx] = None
+                except KeyboardInterrupt:
+                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                    for remaining_fut in list(future_map.keys()):
+                        remaining_fut.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
 
                 results = list(ordered)
 
@@ -392,24 +393,25 @@ def run_function(
                               for i, item in enumerate(items)}
                 ordered = [None] * len(future_map)
 
-                for fut in as_completed(future_map):
-                    idx = future_map.pop(fut)
-                    if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
-                        LOGGER.info('Stopping parallel processing (stop flag).')
-                        break
-                    try:
-                        result = fut.result()
-                        ordered[idx] = result
-                        LOGGER.debug(f'Future {idx} completed successfully')
-                    except KeyboardInterrupt:
-                        LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                        for remaining_fut in list(future_map.keys()):
-                            remaining_fut.cancel()
-                        executor.shutdown(wait=True, cancel_futures=True)
-                        raise
-                    except Exception as e:
-                        LOGGER.error(f'Error parallel processing item {idx}: {e}', exc_info=True)
-                        ordered[idx] = None
+                try:
+                    for fut in as_completed(future_map):
+                        idx = future_map.pop(fut)
+                        if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
+                            LOGGER.info('Stopping parallel processing (stop flag).')
+                            break
+                        try:
+                            result = fut.result()
+                            ordered[idx] = result
+                            LOGGER.debug(f'Future {idx} completed successfully')
+                        except Exception as e:
+                            LOGGER.error(f'Error parallel processing item {idx}: {e}', exc_info=True)
+                            ordered[idx] = None
+                except KeyboardInterrupt:
+                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                    for remaining_fut in list(future_map.keys()):
+                        remaining_fut.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
 
                 results = list(ordered)
 
@@ -450,22 +452,26 @@ def run_function(
                     for start, chunk in workers
                 }
 
-                for fut in as_completed(future_to_chunk):
-                    idx_range = future_to_chunk.pop(fut)
-                    try:
-                        global_start, ordered_list = fut.result()
-                        if not isinstance(ordered_list, list):
-                            ordered_list = list(ordered_list)
-                        for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
-                                           ordered_list):
-                            if k < len(results):
-                                results[k] = val
-                    except KeyboardInterrupt:
-                        LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                        for remaining_fut in list(future_to_chunk.keys()):
-                            remaining_fut.cancel()
-                        pexecutor.shutdown(wait=True, cancel_futures=True)
-                        raise
+                try:
+                    for fut in as_completed(future_to_chunk):
+                        idx_range = future_to_chunk.pop(fut)
+                        try:
+                            global_start, ordered_list = fut.result()
+                            if not isinstance(ordered_list, list):
+                                ordered_list = list(ordered_list)
+                            for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
+                                               ordered_list):
+                                if k < len(results):
+                                    results[k] = val
+                        except Exception as e:
+                            root = logging.getLogger()
+                            root.error(f'Hybrid worker error at chunk {idx_range}: {e}', exc_info=True)
+                except KeyboardInterrupt:
+                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                    for remaining_fut in list(future_to_chunk.keys()):
+                        remaining_fut.cancel()
+                    pexecutor.shutdown(wait=True, cancel_futures=True)
+                    raise
 
                 results = list(results)
 
