@@ -1,4 +1,5 @@
 import os
+import re
 import glob
 import argparse
 import fcntl
@@ -196,6 +197,13 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     Fils_out = [os.path.split(ii)[-1] for ii in Fils_out]
     Fils_out = [ii.replace('_RAS.nii', '.nii') for ii in Fils_out]
     LOGGER.debug(f'{dir} | Found {len(Fils_out)} files in {save_path}')
+
+    no_pre_scan = not any(re.match(r'00\d*\.\w+', f) for f in Fils)
+    if no_pre_scan:
+        LOGGER.warning(f'{dir} | Pre-scan 00.nii missing, decrementing all file numbers by 1')
+    else:
+        no_pre_scan = False
+
     for ii in Fils:
         LOGGER.debug(f'{dir} | Processing: {os.path.join(dir, ii)}')
         if ii.endswith('00a.nii'):
@@ -213,11 +221,22 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
             else:
                 LOGGER.error(f'{dir} | No FS found in 00 or 00a')
                 return
+
+    def _shift(niiname):
+        if not no_pre_scan:
+            return niiname
+        m = re.match(r'(\d+)(\.\w+)', niiname)
+        if m:
+            nr = f'{int(m.group(1)) - 1:02d}{m.group(2)}'
+            LOGGER.warning(f'{dir} | Renaming {niiname} → {nr} to compensate for missing pre-scan')
+        return nr
+
     for ii in Fils:
         _check_stop()
-        LOGGER.debug(f'{dir} | Checking if {ii} is in {Fils_out}...')
+        shifted = _shift(ii)
+        LOGGER.debug(f'{dir} | Checking if {shifted} is in {Fils_out}...')
 
-        if ii in Fils_out:
+        if shifted in Fils_out:
             LOGGER.warning(f'{dir} | {ii} | Already processed, skipping')
             continue
         LOGGER.debug(f'{dir} | {ii} | Not processed, converting to RAS')
@@ -251,12 +270,12 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     
         # Create a new Nifti1Image with the RAS data and updated affine
         ras_img = nib.Nifti1Image(ras_data, ras_affine)
-        #save_path = ii.replace('/data/nifti', '/data/RAS')
-        if ii.endswith('00a.nii'):
-            ii = ii.replace('00a.nii', '00.nii')
-        ii = ii.replace('.nii', '_RAS.nii')
-        nib.save(ras_img,os.path.join(save_path,ii))
-        LOGGER.debug(f'{dir} | Saving: {os.path.join(save_path,ii)}')
+        out_name = shifted if no_pre_scan else ii
+        if out_name.endswith('00a.nii'):
+            out_name = out_name.replace('00a.nii', '00.nii')
+        out_name = out_name.replace('.nii', '_RAS.nii')
+        nib.save(ras_img,os.path.join(save_path,out_name))
+        LOGGER.debug(f'{dir} | Saving: {os.path.join(save_path,out_name)}')
     if args.dir_idx is not None:
         progress_name = f'{script_name}_{args.dir_idx}'
     else:
