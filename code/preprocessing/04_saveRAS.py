@@ -21,8 +21,8 @@ def _check_stop():
 
 # Define command line arguments
 parser = argparse.ArgumentParser(description='Convert Nifti files to RAS orientation')
-parser.add_argument('--scan_dir', type=str, required=False, help='Directory containing scans to process')
-parser.add_argument('--save_dir', type=str, required=True, help='Directory to save the output')
+parser.add_argument('--scan_dir', type=str, default='/FL_system/data/nifti/', help='Directory containing scans to process')
+parser.add_argument('--save_dir', type=str, default='/FL_system/data/RAS/', help='Directory to save the output')
 parser.add_argument('--dir_idx', type=int, required=False, help='Index of the directory to process')
 parser.add_argument('--dir_list', type=str, default='list.txt', help='List of directories to process')
 parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
@@ -294,7 +294,7 @@ if __name__ == '__main__':
     if args.dir_idx is None:
         Dirs = glob.glob(f'{LOAD_DIR}*')
         if TEST:
-            Dirs = Dirs[:N_TEST]
+            Dirs = random.sample(Dirs, min(N_TEST, len(Dirs)))
         try:
             run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', P_role='io', stop_flag=stop_flag)
         except KeyboardInterrupt:

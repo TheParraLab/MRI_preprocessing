@@ -1,5 +1,6 @@
 import os
 import queue
+import random
 import argparse
 import glob
 import pickle
@@ -32,6 +33,9 @@ parser.add_argument(
 parser.add_argument(
     '--prune', '-p', action='store_true',
     help='Enable the deletion of the original scans once aligned')
+parser.add_argument(
+    '--test', nargs='?', type=int, const=10,
+    help='Run in test mode, randomly sample N directories to process (default: 10)')
 args = parser.parse_args()
 
 LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
@@ -40,6 +44,8 @@ LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
 LOAD_DIR = args.load_dir
 SAVE_DIR = args.save_dir
 PARALLEL = args.multi
+TEST = args.test is not None
+N_TEST = args.test if TEST else 10
 PROGRESS = False
 PRUNE = args.prune
 
@@ -223,6 +229,8 @@ if __name__ == '__main__':
     # ---- Determine list of directories ------------------------
     if args.dir_idx is None:
         dirs = sorted(glob.glob(f'{LOAD_DIR}*'))
+        if TEST:
+            dirs = random.sample(dirs, min(N_TEST, len(dirs)))
         LOGGER.info(f'Processing {len(dirs)} directories')
     else:
         assert os.path.exists(args.dir_list), (

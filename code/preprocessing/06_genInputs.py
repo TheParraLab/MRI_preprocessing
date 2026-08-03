@@ -1,4 +1,6 @@
 import os
+import random
+import argparse
 import pydicom as pyd
 import glob
 import numpy as np
@@ -15,12 +17,20 @@ from toolbox import ProgressBar, get_logger
 Progress = None
 LOGGER = get_logger('06_genInputs', '/FL_system/data/logs/')
 
-LOAD_DIR = '/FL_system/data/coreg/'
-SAVE_DIR = '/FL_system/data/inputs/'
+# argparse configuration
+parser = argparse.ArgumentParser(description='Generate model inputs from coregistered scans')
+parser.add_argument('--load_dir', type=str, default='/FL_system/data/coreg/', help='Directory to load scans from')
+parser.add_argument('--save_dir', type=str, default='/FL_system/data/inputs/', help='Directory to save model inputs')
+parser.add_argument('--test', nargs='?', type=int, const=40, help='Run in test mode, randomly sample N sessions (default: 40)')
+parser.add_argument('--parallel', action='store_true', help='Enable multiprocessing')
+args = parser.parse_args()
+
+LOAD_DIR = args.load_dir
+SAVE_DIR = args.save_dir
 DEBUG = 0
-TEST = False
-N_TEST = 40
-PARALLAL = False
+TEST = args.test is not None
+N_TEST = args.test if TEST else 40
+PARALLEL = args.parallel
 PROGRESS = False
 # This script is for generating the numpy files utilized for model training
 # Performs the calculation of the slope 1 (enhancement) for each scan
@@ -268,8 +278,8 @@ if __name__ == '__main__':
     session = np.unique(Data_table['SessionID'])
     Dirs = os.listdir(f'{LOAD_DIR}/')
     if TEST:
-        session = session[:N_TEST]
-        Dirs = Dirs[:N_TEST]
+        session = random.sample(list(session), min(N_TEST, len(session)))
+        Dirs = random.sample(Dirs, min(N_TEST, len(Dirs)))
     session = Dirs
     N = len(Dirs)
     k = 0
