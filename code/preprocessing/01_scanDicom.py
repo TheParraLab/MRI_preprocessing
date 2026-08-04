@@ -149,7 +149,12 @@ def _ensure_checkpoint_dir(cfg: ScanConfig) -> str:
         cfg.checkpoint_dir = os.path.join(cfg.save_dir, 'checkpoints/')
     try:
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
-    except Exception:
+    except Exception as e:
+        logger = logging.getLogger('01_scanDicom')
+        logger.error(
+            f'Could not create checkpoint directory {cfg.checkpoint_dir}: {e}. '
+            f'Dumping checkpoints into save_dir — output will be polluted with .pkl files.'
+        )
         cfg.checkpoint_dir = cfg.save_dir
     return cfg.checkpoint_dir
 
