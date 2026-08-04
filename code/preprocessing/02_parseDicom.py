@@ -1079,7 +1079,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if sid not in split_completed_ids:
                         split_completed_ids.append(sid)
 
-               # Check disk space threshold — checkpoint only under pressure
+                # Check disk space threshold — checkpoint only under pressure
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
                     logger.info('Disk pressure detected, saving split checkpoint before exit')
                     existing_results, existing_removed, existing_redir = _load_split_checkpoint_data(cfg, logger)

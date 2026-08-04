@@ -663,6 +663,110 @@ class DICOMfilter():
         # This is usually the mode of all scans available, but some scans are concatenated across the entire sequence
         n_slices = df['NumSlices'].unique()
 
+    def _normalize_desc_for_fs(self, s: pd.Series) -> pd.Series:
+        """Collapse whitespace/underscores and case for vendor-agnostic matching.
+
+        'Axial  T1  Fat Sat   Post' → 'axial t1 fat sat post'
+        """
+        return s.astype(str).str.lower().str.replace(r'[\s_]+', ' ', regex=True)
+    def detect_fs(self):
+        """Derive a boolean ``FatSaturated`` column from ``Series_desc``.
+
+        Two-pass approach:
+            1. **Pre-normalization pass** (on raw description): detects Siemens-style
+               ``_W`` / ``_F`` suffixes which would be lost if underscores are removed.
+            2. **Post-normalization pass** (lowercase, whitespace/underscores collapsed):
+               matches vendor-neutral positive/negative tokens using word-boundary and
+               negative-lookahead groups to suppress substring false positives:
+
+                * FS inside FSPGR, OFFSET, TRANSVERSE → ignored
+                * SAT inside SATURATION / SATURATED   → ignored
+                * ``WE`` excluded (too generic; appears in unrelated contexts)
+
+            3. Negation tokens co-appearing on the same row are logged but do NOT override
+               a positive match — a Dixon water series may read "SPAIR NON-FS fat" and we
+               want to keep it as a positive. A *standalone* negation with no counter-token
+               will force ``FatSaturated = False``.
+
+        ----------
+        Positive indicators
+            Generic:   FS, FATSAT, FAT_SAT, FAT SAT, SPAIR, SPIR, CHESS, STIR, PROSET
+            GE:        VIBRANT, IDEAL, SPECIAL  (FSPGR excluded by \\b on FS above)
+            Siemens:   VIBE, FL3D, TIRM, _W/_F suffix (Dixon water image), DIXON
+            Philips:   THRIVE, eTHRIVE, mDixon, SPAIR
+
+        ----------
+        Negative indicators
+            NON FS, NOFS, NO FAT SAT, NNFS, WOFS, T1 ONLY, WITHOUT FS/FAT.
+            These have highest precedence only when NOT paired with a positive token.
+
+        Side effect: sets ``self.dicom_table['FatSaturated']`` as bool | NaN.
+        """
+        raw_desc = self.dicom_table['Series_desc'].astype(str)
+
+        # --- Pre-normalization: Siemens _W / _F suffixes ---------------
+        siemens_wf = raw_desc.str.contains(
+            r'(?i)[^a-zA-Z]?_[WF]\b',   # e.g. "DIXON_F", "LAVA_W"
+        )
+
+        # --- Normalized copy for word-boundary matching -----------------
+        desc_n = self._normalize_desc_for_fs(self.dicom_table['Series_desc'])
+
+        # Positive pattern (post-normalization) -------------------------
+        has_pos = desc_n.str.contains(
+            r'''(?x)
+               \b(?:
+                  # Generic fat suppression technique names
+                   fat\s*sat  |  fatsat  |  spair  |  spir  |  chess  |  stir  |  proset
+                  # Word-boundary FS (excludes FSPGR, OFFSET, TRANSVERSE…)
+               |  \bfs\b
+                  # Bounded SAT (negative look-ahead strips SATURATION / SATURATED)
+               |  \bsat\b(?!\s*(?:ation|urated))
+                  # GE-specific (VIBRANT, IDEAL, SPECIAL)
+               |  \b(?:vibran(?:t)?|ideal(?:\w*)?|special)\w*
+                  # Siemens sequence families (VIBE, FL3D, TIRM)
+               |  \b(?:vibe|fl3d|tirm)\w*
+                       # Dixon variants: mDixon, DIXON, eTHRIVE / THRIVE
+               |  \b(?:m?dixon|ethriv|thriv)\w*
+               )
+            ''',
+            regex=True, na=False,
+        )
+
+        # Negative pattern (post-normalization) -------------------------
+        has_neg = desc_n.str.contains(
+            r'''(?x)
+               \b(?:
+                  non\s*(?:fs|fat.?sat)\s*         |  no\s*(?:fs|fat\s*sat)\s*
+               |  nnfs                              |  wofs\s*
+                  |  t1\s+only
+               )
+            ''',
+            regex=True, na=False,
+        )
+
+        effective_pos = has_pos | siemens_wf.values
+
+        # Conflict resolution: negation always wins.
+        # Rationale: "NON FS" explicitly states lack of suppression — the radiologist flagged it.
+        # Even if FS also appears as a substring inside the same description (e.g.  "T1 NON FS post"),
+        # the explicit cancellation is the stronger signal.
+        fs_col = np.empty(len(self.dicom_table), dtype=object)
+        fs_col[effective_pos  & ~has_neg.values]     = True    # pos only → True
+        fs_col[effective_pos  &  has_neg.values]      = False   # conflict → negation wins  
+        fs_col[~effective_pos & ~has_neg.values]      = np.nan  # neither → unknown
+        fs_col[~effective_pos &  has_neg.values]      = False   # neg only → False
+        self.dicom_table['FatSaturated'] = fs_col
+
+        ser = pd.Series(self.dicom_table['FatSaturated'])
+        n_true   = int(ser.isin([True]).sum())
+        n_false  = int(ser.isin([False]).sum())
+        n_unk    = int(ser.isna().sum())
+        self.logger.debug(
+            f'[FS] pos={n_true}  neg={n_false}  unk={n_unk} | {self.Session_ID}'
+        )
+
+
     def detect_pre(self, action: str = 'check'):
         '''
         Attempt to differentiate pre and post scans through various techniques
