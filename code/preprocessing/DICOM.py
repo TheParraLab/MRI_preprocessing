@@ -1478,6 +1478,20 @@ class DICOMorder():
             self.logger.debug(f'Ordering by {timing_param}, {n_unknown} unknown rows (pre scans) | {self.Session_ID}')
             # Convert the timing_param column to integers for valid rows
             self.dicom_table.loc[valid_rows_index, timing_param] = self.dicom_table.loc[valid_rows_index, timing_param].astype(float).astype(int)
+            # Check if all valid TriTime values are identical — no inherent ordering
+            valid_timing_values = self.dicom_table.loc[valid_rows_index, timing_param].unique()
+            if len(valid_timing_values) == 1:
+                self.logger.warning(
+                    f'All valid {timing_param} values are identical ({valid_timing_values[0]}), '
+                    f'falling back to {secondary_param} for ordering | {self.Session_ID}'
+                )
+                # Sort by secondary param instead
+                valid_rows = self.dicom_table.loc[valid_rows_index].sort_values(by=[secondary_param])
+                self.n_post = len(valid_rows)
+                self.dicom_table.loc[valid_rows.index, 'Major'] = np.linspace(1, len(valid_rows), int(len(valid_rows)))
+                self.dicom_table.loc[unknown_rows.index, 'Major'] = np.zeros(n_unknown)
+                self._force_pre_major()
+                return self.dicom_table
             # Sort the valid rows
             valid_rows = self.dicom_table.loc[valid_rows_index].sort_values(by=[timing_param])
             self.n_post = len(valid_rows)
