@@ -136,7 +136,12 @@ def generate_slopes(SessionID):
     # Check trigger time is not unkown for any of the scans
     Times = [Data['TriTime'].iloc[ii] for ii in sorting] #Loading Times in ms
     Scan_Duration = [Data['ScanDur'].iloc[ii] for ii in sorting] #Loading Scan Duration in us
-    if 'Unknown' in Times[1:]:
+    post_tritimes = Times[1:]
+    tri_all_unknown = 'Unknown' in post_tritimes
+    tri_all_identical = all(
+        t == post_tritimes[0] for t in post_tritimes
+    ) and all(t != 'Unknown' for t in post_tritimes) and len(post_tritimes) > 1
+    if tri_all_unknown:
         LOGGER.error(f'{SessionID} | Trigger time is unknown for the post scan, cannot calculate slopes')
         return
     else:
@@ -164,6 +169,27 @@ def generate_slopes(SessionID):
             except Exception as e:
                 LOGGER.error(f'{SessionID} | Error loading times')
                 LOGGER.error(f'{SessionID} | {e}')
+                return
+        
+        # Fallback: if post-scan trigger times are all identical, estimate from AcqTime
+        if tri_all_identical:
+            LOGGER.warning(
+                f'{SessionID} | Post-scan trigger times are all identical ({Times[1]}s), '
+                f'estimating relative times from AcqTime differences'
+            )
+            try:
+                AcqTime = [Data['AcqTime'].iloc[ii] for ii in sorting]
+                AcqTime_sec = [
+                    int(t.split(':')[0])*3600 + int(t.split(':')[1])*60 + int(t.split(':')[2])
+                    for t in AcqTime
+                ]
+                first_post_acq = AcqTime_sec[1]
+                Times[1:] = [float(AcqTime_sec[i] - first_post_acq) for i in range(1, len(Times))]
+                LOGGER.warning(
+                    f'{SessionID} | Estimated post-scan times: {Times}'
+                )
+            except Exception as e:
+                LOGGER.error(f'{SessionID} | Failed to estimate post-scan times from AcqTime: {e}')
                 return
             
     LOGGER.debug(f'{SessionID} | Times | {Times}')
@@ -213,9 +239,12 @@ def generate_slopes(SessionID):
     LOGGER.debug(f'{SessionID} | Starting slope 1 calculation')
     Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1).astype(np.float32)
     Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1).astype(np.float32)
+    denom1 = np.sum(np.square((T[:,:,:,0:2] - Tmean)), axis=3)
     slope1 = np.divide(
         np.sum((T[:,:,:,0:2] - Tmean) * (D[:,:,:,0:2] - Dmean), axis=3),
-        np.sum(np.square((T[:,:,:,0:2] - Tmean)), axis=3)
+        denom1,
+        out=np.zeros_like(denom1, dtype=np.float32),
+        where=denom1 != 0
     ).astype(np.float32)
     slope1 = slope1 / p95
 
@@ -234,9 +263,12 @@ def generate_slopes(SessionID):
     LOGGER.debug(f'{SessionID} | Starting slope 2 calculation')
     Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,1:], axis=3), axis=-1), len(Times)-1, axis=-1).astype(np.float32)
     Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,1:], axis=3), axis=-1), len(Times)-1, axis=-1).astype(np.float32)
+    denom2 = np.sum(np.square((T[:,:,:,1:] - Tmean)), axis=3)
     slope2 = np.divide(
         np.sum((T[:,:,:,1:] - Tmean) * (D[:,:,:,1:] - Dmean), axis=3),
-        np.sum(np.square((T[:,:,:,1:] - Tmean)), axis=3)
+        denom2,
+        out=np.zeros_like(denom2, dtype=np.float32),
+        where=denom2 != 0
     ).astype(np.float32)
     slope2 = slope2 / p95
 
