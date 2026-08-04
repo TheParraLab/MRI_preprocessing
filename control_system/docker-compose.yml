@@ -13,7 +13,7 @@ services:
       - ${COREG_DIRECTORY_PATH}:/FL_system/data/coreg
       - ${INPUTS_DIRECTORY_PATH}:/FL_system/data/inputs
       - ${DEPLOY_LOG_DIR}:/FL_system/deploy_logs
-     environment:
+    environment:
       - COMPOSE_PROJECT_NAME
       - CONTAINER_NAME
       - PROJECT_DIRECTORY_PATH
