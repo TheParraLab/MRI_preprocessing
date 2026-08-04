@@ -40,6 +40,9 @@ Dependencies:
 # Standard imports
 from dataclasses import dataclass
 import os
+import re
+import sys
+import fcntl
 import time
 import argparse
 import subprocess
@@ -49,7 +52,6 @@ from functools import partial
 from typing import List, Dict, Any, Optional
 import logging
 
-# Third-party imports
 import pydicom as pyd
 import pandas as pd
 
@@ -702,28 +704,81 @@ if __name__ == '__main__':
         # Run main for this specific directory
         main(cfg, logger, out_name=f'Data_table_{cfg.dir_idx}.csv')
 
+        # Sentinel: every job writes a done-marker after its work completes.
+        sentinel_base = os.path.join(tmp_save_dir, '.done')
+        sentinel_path = f'{sentinel_base}.{cfg.dir_idx}'
+        marker_lock = f'{sentinel_base}.lock'
+        if not os.path.exists(sentinel_path):
+            with open(sentinel_path, 'w') as f:
+                f.write(time.strftime('%Y-%m-%dT%H:%M:%S'))
+            logger.info(f'HPC sentinel {cfg.dir_idx} written')
+
         # If this is the last job in the array, compile all results
         if cfg.dir_idx == len(dirs) - 1:
             logger.info('Last script, compiling results')
-            tables = []
-            while len(tables) < len(dirs):
-                logger.info('Waiting for all tables to be compiled')
-                time.sleep(5)
-                tables = [t for t in os.listdir(tmp_save_dir) if t.endswith('.csv')]
 
-            logger.info('All tables present, compiling...')
-            tables_to_concat = [pd.read_csv(os.path.join(tmp_save_dir, t)) for t in tables]
-            combined = pd.concat(tables_to_concat, ignore_index=True)
+            all_markers = all(
+                os.path.exists(f'{sentinel_base}.{i}') for i in range(len(dirs))
+            )
+            max_wait = len(dirs) * 60
+            waited = 0
+
+            while not all_markers and waited < max_wait:
+                logger.info(
+                    f'Waiting for HPC workers ({waited}s of {max_wait}s max)')
+                time.sleep(5)
+                waited += 5
+                all_markers = all(
+                    os.path.exists(f'{sentinel_base}.{i}') for i in range(len(dirs))
+                )
+
+            if not all_markers:
+                logger.error(
+                    f'HPC compile timeout after {max_wait}s -- not all workers '
+                    f'completed. Skipping compile for dir_idx={cfg.dir_idx}')
+                # Finalize profiler if needed and exit gracefully
+                if cfg.profile:
+                    yappi.stop()
+                    profile_output_path = os.path.join(_ensure_profile_dir(cfg), 'step01_profile.yappi')
+                    yappi.get_func_stats().save(profile_output_path, type='pstat')
+                sys.exit(0)
+
+            # File-lock so only one job runs the compile step
+            try:
+                lock_fd = open(marker_lock, 'w')
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except Exception as e:
+                logger.error(f'Failed to acquire compile lock: {e}')
+                if cfg.profile:
+                    yappi.stop()
+                    profile_output_path = os.path.join(_ensure_profile_dir(cfg), 'step01_profile.yappi')
+                    yappi.get_func_stats().save(profile_output_path, type='pstat')
+                return
+
+            tables = [t for t in os.listdir(tmp_save_dir) if t.endswith('.csv')]
+            logger.info(f'All workers done, compiling {len(tables)} tables')
+            tables_to_concat = []
+            for t in tables:
+                try:
+                    tables_to_concat.append(pd.read_csv(os.path.join(tmp_save_dir, t)))
+                except pd.errors.EmptyDataError:
+                    logger.warning(f'{t} is empty, skipping')
+                except Exception as e:
+                    logger.error(f'Error compiling {t}: {e}')
+                    break
+            combined = pd.concat(tables_to_concat, ignore_index=True) if tables_to_concat else pd.DataFrame()
 
             final_save_dir = os.path.dirname(tmp_save_dir)
             combined.to_csv(os.path.join(final_save_dir, 'Data_table.csv'), index=False)
             logger.info(f'Compiled results saved to {os.path.join(final_save_dir, "Data_table.csv")}')
-
             try:
                 subprocess.run(['rm', '-r', tmp_save_dir], check=True)
                 logger.info(f'Deleted temporary directory {tmp_save_dir}')
             except Exception as e:
                 logger.error(f'Error deleting temporary directory {tmp_save_dir}: {e}')
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
 
     # Finalize the profiler if enabled
     if cfg.profile:

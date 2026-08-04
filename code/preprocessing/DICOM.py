@@ -145,28 +145,40 @@ class DICOMextract:
     def Modality(self) -> str:
         """Attempts to extract the modality of the scan"""
         try:
-            # DIAGNOSTIC LOG: Validate RepetitionTime attribute existence and value
             rep_time_raw = getattr(self.metadata, 'RepetitionTime', None)
             if self.debug > 0:
                 logging.debug(f'[DIAGNOSTIC Modality] RepetitionTime raw value = {rep_time_raw} (type={type(rep_time_raw).__name__}) | File: {getattr(self.metadata, "filepath", "N/A")}')
-            
-            # Handle case where RepetitionTime exists but is a pydicom DataElement (not raw value)
-            if rep_time_raw is not None and not isinstance(rep_time_raw, (int, float)):
-                rep_time = float(rep_time_raw) if rep_time_raw is not None else None
-            else:
-                rep_time = rep_time_raw
-            
-            if rep_time is None:
-                logging.warning(f'[DIAGNOSTIC Modality] RepetitionTime is None, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
+
+            if rep_time_raw is None:
+                if self.debug > 0:
+                    logging.warning(f'[DIAGNOSTIC Modality] RepetitionTime is None, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
                 return self.UNKNOWN
-            
-            if rep_time >= 780:
+
+            # Normalize to a float in milliseconds regardless of pydicom VR / scanner quirks
+            try:
+                rep_time_ms = float(rep_time_raw)
+            except ValueError:
+                if self.debug > 0:
+                    logging.warning(f'[DIAGNOSTIC Modality] Could not convert TR to numeric, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
+                return self.UNKNOWN
+
+            # If the value looks like microseconds (>1e6), convert down
+            if rep_time_ms > 10**6:
+                rep_time_ms = rep_time_ms / 1000
+            # If it still looks suspiciously large for TR in ms (e.g. raw seconds stored as int)
+            elif rep_time_ms < 50:
+                rep_time_ms = rep_time_ms * 1000
+
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC Modality] Normalized TR = {rep_time_ms:.2f} ms | File: {getattr(self.metadata, "filepath", "N/A")}')
+
+            if rep_time_ms >= 780:
                 modality = 'T2'
             else:
                 modality = 'T1'
-            
+
             if self.debug > 0:
-                logging.debug(f'[DIAGNOSTIC Modality] Final modality = {modality} (rep_time={rep_time}) | File: {getattr(self.metadata, "filepath", "N/A")}')
+                logging.debug(f'[DIAGNOSTIC Modality] Final modality = {modality} (rep_time={rep_time_ms}) | File: {getattr(self.metadata, "filepath", "N/A")}')
             return modality
         except Exception as e:
             self.log_error('Unable to read RepetitionTime', e)

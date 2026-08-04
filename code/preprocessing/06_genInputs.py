@@ -179,10 +179,14 @@ def generate_slopes(SessionID):
             )
             try:
                 AcqTime = [Data['AcqTime'].iloc[ii] for ii in sorting]
-                AcqTime_sec = [
-                    int(t.split(':')[0])*3600 + int(t.split(':')[1])*60 + int(t.split(':')[2])
-                    for t in AcqTime
-                ]
+                AcqTime_sec = []
+                for t in AcqTime:
+                    if isinstance(t, str) and ':' in t:
+                        parts = t.split(':')
+                        AcqTime_sec.append(int(parts[0])*3600 + int(parts[1])*60 + int(parts[2]))
+                    else:
+                        s = str(int(t)).zfill(6)
+                        AcqTime_sec.append(int(s[:2])*3600 + int(s[2:4])*60 + int(s[4:]))
                 first_post_acq = AcqTime_sec[1]
                 Times[1:] = [float(AcqTime_sec[i] - first_post_acq) for i in range(1, len(Times))]
                 LOGGER.warning(
