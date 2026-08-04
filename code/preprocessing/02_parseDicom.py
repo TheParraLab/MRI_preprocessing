@@ -807,8 +807,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             logger.info(f'{cfg.out_name} already exists -- overwriting (--force)')
         else:
             logger.warning(f'{cfg.out_name} already exists')
-            if sys.stdin.isatty() == False:
-                logger.warning('Running in non-interactive mode, skipping prompt and exiting to avoid overwrite')
+            if not sys.stdin.isatty():
+                logger.warning('Non-interactive environment detected, skipping prompt')
                 logger.warning('To force overwrite, use the --force flag.')
                 return
             try:
@@ -1374,15 +1374,15 @@ if __name__ == '__main__':
                                     pd.read_csv(os.path.join(save_dir_worker, table))
                                 )
                             except pd.errors.EmptyDataError:
-                                logger.error(f'{table} is empty, skipping')
+                                logger.warning(f'{table} is empty, skipping')
                                 continue
                             except Exception as e:
                                 logger.error(f'Error compiling {table}: {e}')
-                                break
+                                continue
+
                         combined = (
                             pd.concat(frames, ignore_index=True)
-                            if frames
-                            else pd.DataFrame()
+                            if frames else pd.DataFrame()
                         )
 
                         final_dir = os.path.dirname(save_dir_worker.rstrip('/'))
