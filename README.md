@@ -13,6 +13,7 @@ A modular pipeline for automated MRI DICOM preprocessing. Converts raw DICOM MRI
   - [Running Preprocessing Steps](#running-preprocessing-steps)
 - [Preprocessing Workflow](#preprocessing-workflow)
 - [Testing](#testing)
+- [TODO / Roadmap](#todo--roadmap)
 
 ## Key Features
 
@@ -80,15 +81,20 @@ MRI_preprocessing/
 
 ### Starting the Container
 
+1. Copy `.env.example` to `.env` and fill in all required paths:
+
+```bash
+cp .env.example .env
+# Edit .env with your deployment paths
+```
+
+2. Run the startup script:
+
 ```bash
 bash start_control.sh
 ```
 
-You will be prompted for:
-1. The path to your raw DICOM data directory
-2. The path for NIfTI output
-
-The container mounts your host directories into `/FL_system/data/raw/` and `/FL_system/data/nifti/` inside the container.
+The script auto-detects Docker, Singularity/Apptainer, or Conda and starts accordingly. Each run creates a timestamped deployment log in `deployments/`.
 
 ### Direct Container Access
 
@@ -151,3 +157,14 @@ pytest test/test_synthetic_known_result.py -v
 ```
 
 Test coverage for `01_scanDicom.py` is comprehensive (89 tests). See `test/TESTS.md` for the full test suite documentation.
+
+## TODO / Roadmap
+
+### HIGH PRIORITY
+
+- **Self-contained Docker image with code baked in** — Currently the container only contains runtime dependencies (`PyTorch`, `numpy`, etc.) and the Python scripts are mounted from the host via volumes. For a truly deployable pipeline, the code should be copied into the image at build time so that the version of the pipeline matches the image tag.
+- **Per-deployment script logging** — Currently all preprocessing steps write `.log` files into a shared `<save_dir>/logs/` directory. Refactor `toolbox.get_logger()` to read an optional `LOG_DIR` environment variable, defaulting to `/FL_system/deploy_logs/$DEPLOYMENT_ID`, so that each deployment run produces its own isolated log set rather than overwriting a shared location.
+
+### MEDIUM PRIORITY
+
+- **Update HPC Singularity path** — The current workflow expects users to manually build Singularity images from `.def` files (which is broken on modern clusters). Move toward pushing the Docker image to an internal registry and allowing Apptainer/Singularity to pull directly from there.
