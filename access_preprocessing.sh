@@ -1,23 +1,34 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "MRI Preprocessing - Direct CLI Access"
-echo "======================================"
-echo ""
-echo "This script provides direct access to the preprocessing container"
-echo "without starting the webserver component."
-echo ""
+script_directory=$(dirname "$(readlink -f "$0")")
+ENV_FILE="${script_directory}/.env"
 
-# Check if the control container is running
-if ! docker ps --format "table {{.Names}}" | grep -q "^control$"; then
-    echo "Error: The control container is not running."
-    echo "Please start the system first with: bash start_control.sh"
-    exit 1
+if [ ! -f "$ENV_FILE" ]; then
+  echo "ERROR: .env file not found at ${ENV_FILE}"
+  exit 1
 fi
 
-echo "Accessing the control container..."
-echo "You are now in the preprocessing environment."
+while IFS='=' read -r key value || [ -n "$key" ]; do
+  [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+  export "${key}=${value}"
+done < "$ENV_FILE"
+
+container="${CONTAINER_NAME:-control}"
+project="${COMPOSE_PROJECT_NAME:-MRI_preprocessing}"
+
+echo "MRI Preprocessing - Direct CLI Access (${container})"
+echo "====================================================="
+echo ""
+
+if ! docker container ls --project="${project}" --format "{{.Names}}" | grep -q "^${container}$"; then
+  echo "Error: Container ${container} in project ${project} is not running."
+  echo "Start it first with: bash start_control.sh"
+  exit 1
+fi
+
+echo "Accessing container: ${container}"
 echo "Navigate to /FL_system/code/preprocessing/ to run preprocessing scripts."
 echo ""
 
-# Execute interactive bash session in the container
-docker exec -it control bash
+docker exec -it "${container}" bash
