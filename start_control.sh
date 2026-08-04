@@ -159,7 +159,7 @@ RUNTIME=$(detect_runtime) || {
   echo "  https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html"
   echo ""
   echo "Then run: conda env create -f environment.yml"
-  echo "         conda activate mri_preproc"
+  echo "         conda activate ${CONDA_ENV_NAME:-mri_preproc}"
   echo "         ./run_pipeline_conda.sh"
   exit 1
 }
