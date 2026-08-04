@@ -1,3 +1,12 @@
+"""
+Move session directories listed in a plain-text file from one base path to another.
+
+Reads session IDs (one per line) from a text file and moves each
+corresponding directory from the source to the destination.
+
+Usage:
+  python move_sessions.py <sessions.txt> <source_dir> <dest_dir> [--dry-run]
+"""
 import os
 import sys
 import shutil

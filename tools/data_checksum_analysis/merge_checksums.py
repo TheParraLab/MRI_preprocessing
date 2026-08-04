@@ -1,3 +1,13 @@
+"""
+Merge two checksum scan result JSON files into a single comparison file.
+
+Builds a per-file index from both scans and classifies every file as
+identical, modified, primary_only, or secondary_only. Writes a merged
+JSON with statistics and per-session file listings.
+
+Usage:
+  python merge_checksums.py <scan1.json> <scan2.json> [-o OUTPUT.json]
+"""
 import json
 import os
 from argparse import ArgumentParser

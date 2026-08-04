@@ -1,3 +1,12 @@
+"""
+Remove session directories listed in a plain-text file from a target directory.
+
+Reads session IDs (one per line) from a text file and deletes each
+corresponding directory from the target path.
+
+Usage:
+  python remove_sessions.py <sessions.txt> <target_dir> [--dry-run]
+"""
 import os
 import sys
 import shutil
