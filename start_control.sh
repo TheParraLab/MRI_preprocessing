@@ -45,6 +45,7 @@ done < "$ENV_FILE"
 
 # ── Validate required paths ─────────────────────────────────────
 required_vars=(
+  COMPOSE_PROJECT_NAME
   PROJECT_DIRECTORY_PATH
   DATA_DIRECTORY_PATH
   NIFTI_DIRECTORY_PATH
@@ -89,8 +90,11 @@ cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
   }
 }
 MANIFEST
-export DEPLOY_LOG_DIR
 
+# Snapshot the .env used for this deployment (so deployments are self-contained)
+cp "$ENV_FILE" "${DEPLOY_LOG_DIR}/.env.snapshot"
+
+export DEPLOY_LOG_DIR
 echo "Deployment log: ${DEPLOY_LOG_DIR}"
 echo ""
 
@@ -177,7 +181,7 @@ case "$RUNTIME" in
 
     # Add deployment log volume to pass through compose env
     export DEPLOY_LOG_DIR
-    ${COMPOSE_CMD} -f "${COMPOSE_FILE}" up --build
+    ${COMPOSE_CMD} -p "${COMPOSE_PROJECT_NAME}" -f "${COMPOSE_FILE}" up --build
     ;;
 
   singularity|apptainer)

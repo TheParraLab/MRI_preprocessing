@@ -37,3 +37,6 @@ tools/**/comparison_findings/*
 
 # Environment file containing deployment-specific paths / secrets
 .env
+
+# Deployment logs (generated per run)
+deployments/
