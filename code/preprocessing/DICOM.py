@@ -1464,11 +1464,20 @@ class DICOMorder():
                 return self.dicom_table
             else:
                 self.logger.debug(f'Ordering by secondary param {secondary_param}, {len(unknown_rows_2)} unknown rows | {self.Session_ID}')
+                # Coerce secondary param to numeric; move any that fail back to unknown
+                coerced_2 = pd.to_numeric(
+                    self.dicom_table.loc[valid_rows_index_2, secondary_param], errors='coerce'
+                )
+                bad_mask = coerced_2.isna()
+                if bad_mask.any():
+                    newly_unknown = valid_rows_index_2[bad_mask]
+                    unknown_rows_2 = pd.concat([unknown_rows_2, self.dicom_table.loc[newly_unknown]])
+                    valid_rows_index_2 = valid_rows_index_2[~bad_mask]
+                    self.dicom_table.loc[valid_rows_index_2, secondary_param] = coerced_2[~bad_mask]
+                else:
+                    self.dicom_table.loc[valid_rows_index_2, secondary_param] = coerced_2
                 valid_rows_2 = self.dicom_table.loc[valid_rows_index_2].sort_values(by=[secondary_param])
                 self.n_post = len(valid_rows_2)
-                # Convert valid secondary_param values to int for ordering
-                self.dicom_table[secondary_param] = self.dicom_table[secondary_param].astype(str).str.split('.').str[0]
-                self.dicom_table.loc[valid_rows_index_2, secondary_param] = self.dicom_table.loc[valid_rows_index_2, secondary_param].astype(int)
                 self.dicom_table.loc[valid_rows_2.index, 'Major'] = np.linspace(1, len(valid_rows_2), int(len(valid_rows_2)))
                 unknown_idx_2 = unknown_rows_2.index
                 self.dicom_table.loc[unknown_idx_2, 'Major'] = np.zeros(len(unknown_idx_2))
@@ -1476,8 +1485,19 @@ class DICOMorder():
                 return self.dicom_table
         else:
             self.logger.debug(f'Ordering by {timing_param}, {n_unknown} unknown rows (pre scans) | {self.Session_ID}')
-            # Convert the timing_param column to integers for valid rows
-            self.dicom_table.loc[valid_rows_index, timing_param] = self.dicom_table.loc[valid_rows_index, timing_param].astype(float).astype(int)
+            # Coerce to numeric; move any that become NaN back to unknown
+            coerced = pd.to_numeric(
+                self.dicom_table.loc[valid_rows_index, timing_param], errors='coerce'
+            )
+            bad_mask = coerced.isna()
+            if bad_mask.any():
+                newly_unknown = valid_rows_index[bad_mask]
+                unknown_rows = pd.concat([unknown_rows, self.dicom_table.loc[newly_unknown]])
+                valid_rows_index = valid_rows_index[~bad_mask]
+                n_unknown = len(unknown_rows)
+                self.dicom_table.loc[valid_rows_index, timing_param] = coerced[~bad_mask].astype(int)
+            else:
+                self.dicom_table.loc[valid_rows_index, timing_param] = coerced.astype(int)
             # Check if all valid TriTime values are identical — no inherent ordering
             valid_timing_values = self.dicom_table.loc[valid_rows_index, timing_param].unique()
             if len(valid_timing_values) == 1:
@@ -1517,36 +1537,12 @@ class DICOMorder():
             return
         mask = self.dicom_table['Pre_scan'] == True
         before = self.dicom_table.loc[mask, 'Major'].tolist()
+        corrected = [m for m in before if m != 0.0]
         self.dicom_table.loc[mask, 'Major'] = 0.0
-        if before and all(m != 0.0 for m in before):
+        if corrected:
             self.logger.info(
-                f'Pre-scan Major corrected from {before} → 0 | {self.Session_ID}'
+                f'Pre-scan Major corrected: {corrected} → 0 | {self.Session_ID}'
             )
-
-    def alternate_pre(self):
-        if self.debug > 0:
-            print(f'Attemting to solve for pre scan for {self.dicom_table["SessionID"].unique()}')
-        # Find the scans with unknown timing parameters
-        unknown_rows = self.dicom_table[self.dicom_table[self.timing_param].astype(str).str.lower() == 'unknown']
-        # if there is only one unknown value, assume it is a pre scan
-        if len(unknown_rows) == 1:
-            if self.debug > 0:
-                print(f'Found a single unknown value for {self.dicom_table["SessionID"].unique()}')
-                print(f'Assuming this is a pre scan')
-        elif len(unknown_rows) == 2:
-            print(f'Found two unknown values for {self.dicom_table["SessionID"].unique()}')
-            print(f'Analyzing to see if either row includes "FS" in the description')
-            for i in range(len(unknown_rows)):
-                if 'FS' not in unknown_rows['Series_desc'].iloc[i]:
-                    if self.debug > 0:
-                        print(f'Found a FS scan for {self.dicom_table["SessionID"].unique()}')
-                        print(f'Assuming this is a pre scan')
-                    # remove the other row
-                    unknown_rows = unknown_rows.drop(unknown_rows.index[i])
-                    break
-            # check if one of the unknown values is a FS scan
-        # return index of unknown row
-        return unknown_rows.index              
 
     def findPre(self):
         post_indx = self.dicom_table[self.dicom_table['Post_scan'] == True].index
@@ -1562,36 +1558,3 @@ class DICOMorder():
             self.logger.warning(f'Pre scan should be found, possible error in earlier processing steps | {self.Session_ID}')
             self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             return self.dicom_table
-
-        # series_numbers = self.dicom_table['Series'][self.dicom_table['Major'] > 0].astype(int)
-        # if len(series_numbers) == 0:
-        #     if self.debug > 0:
-        #         print(f'No series_numbers found for {self.dicom_table["SessionID"].unique()}')
-        #     #clear dicom table
-        #     self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
-        #     return self.dicom_table
-        # indx = self.dicom_table[self.dicom_table['Major'] > 0].index
-
-        # # sort series numbers
-        # series_numbers = series_numbers.sort_values()
-        # pre_value = series_numbers.iloc[0] - 1
-
-        # pre_indx = self.dicom_table[self.dicom_table['Series'] == pre_value].index
-        # if len(pre_indx) == 1:
-        #     indx = np.append(indx, pre_indx)
-        #     self.dicom_table = self.dicom_table.loc[indx]
-        #     return self.dicom_table
-        # elif len(pre_indx) == 0:
-        #     print(f'No pre scan found for {self.dicom_table["SessionID"].unique()}')
-        #     print(f'Attempting alternate pre scan detection')
-        #     pre_indx = self.alternate_pre()
-        
-        # if len(pre_indx) == 1:
-        #     indx = np.append(indx, pre_indx)
-        #     self.dicom_table = self.dicom_table.loc[indx]
-        #     return self.dicom_table
-        # else:
-        #     print('Alternative pre scan detection failed')
-        #     print('No pre scan found')
-        #     print('Returning empty dicom table')
-        #     self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)

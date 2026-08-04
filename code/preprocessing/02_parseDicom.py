@@ -225,8 +225,16 @@ def _load_checkpoint_data(
     results_path = os.path.join(cp_dir, 'results.pkl')
     removed_path = os.path.join(cp_dir, 'removed.pkl')
     try:
-        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
-        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        if os.path.exists(results_path):
+            with open(results_path, 'rb') as f:
+                results = pickle.load(f)
+        else:
+            results = []
+        if os.path.exists(removed_path):
+            with open(removed_path, 'rb') as f:
+                removed = pickle.load(f)
+        else:
+            removed = []
         return results, removed
     except Exception as e:
         logger.error(f'Failed to load checkpoint data: {e}')
@@ -363,9 +371,21 @@ def _load_split_checkpoint_data(
     removed_path = os.path.join(cp_dir, 'removed.pkl')
     redirect_path = os.path.join(cp_dir, 'redirections.pkl')
     try:
-        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
-        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
-        redirections = pickle.load(open(redirect_path, 'rb')) if os.path.exists(redirect_path) else []
+        if os.path.exists(results_path):
+            with open(results_path, 'rb') as f:
+                results = pickle.load(f)
+        else:
+            results = []
+        if os.path.exists(removed_path):
+            with open(removed_path, 'rb') as f:
+                removed = pickle.load(f)
+        else:
+            removed = []
+        if os.path.exists(redirect_path):
+            with open(redirect_path, 'rb') as f:
+                redirections = pickle.load(f)
+        else:
+            redirections = []
         return results, removed, redirections
     except Exception as e:
         logger.error(f'Failed to load split checkpoint data: {e}')
@@ -469,8 +489,16 @@ def _load_order_checkpoint_data(
     results_path = os.path.join(cp_dir, 'results.pkl')
     removed_path = os.path.join(cp_dir, 'removed.pkl')
     try:
-        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
-        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        if os.path.exists(results_path):
+            with open(results_path, 'rb') as f:
+                results = pickle.load(f)
+        else:
+            results = []
+        if os.path.exists(removed_path):
+            with open(removed_path, 'rb') as f:
+                removed = pickle.load(f)
+        else:
+            removed = []
         return results, removed
     except Exception as e:
         logger.error(f'Failed to load order checkpoint data: {e}')
@@ -1379,5 +1407,3 @@ if __name__ == '__main__':
             logger.info(f'Writing profile results to {profile_path}')
             yappi.get_func_stats().save(profile_path, type='pstat')
             logger.info(f'Profile results saved to {profile_path}')
-
-    sys.exit(0)
