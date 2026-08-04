@@ -34,3 +34,6 @@ pytest_cache/
 # Tool output directories
 tools/**/scan_results/*
 tools/**/comparison_findings/*
+
+# Environment file containing deployment-specific paths / secrets
+.env

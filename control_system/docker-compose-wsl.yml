@@ -8,9 +8,11 @@ services:
     volumes:
       - ${PROJECT_DIRECTORY_PATH}:/FL_system
       - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
+      - ${DEPLOY_LOG_DIR}:/FL_system/deploy_logs
     environment:
       - PROJECT_DIRECTORY_PATH
       - DATA_DIRECTORY_PATH
+      - DEPLOY_LOG_DIR
       - NVIDIA_VISIBLE_DEVICES=all
     restart: unless-stopped
     deploy:

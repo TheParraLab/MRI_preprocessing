@@ -8,25 +8,91 @@
 #   2. Singularity/Apptainer (HPC) → singularity exec --bind ...
 #   3. Conda/Mamba (bare HPC, no containers) → run natively
 #
+# Requires a .env file at the project root with deployment paths.
+#   See .env.example for reference and required variables.
 # =============================================================================
 
 set -euo pipefail
-
-# ── Prompt the user for paths ─────────────────────────────────────
-echo "Please enter the raw data path:"
-read -r data_directory_path
-
-echo "Please enter the NIfTI output path:"
-read -r nifti_directory_path
 
 # ── Determine the script's directory ─────────────────────────────
 script_directory=$(dirname "$(readlink -f "$0")")
 project_directory_path=$(realpath "$script_directory")
 
-# ── Export environment variables ────────────────────────────────
-export PROJECT_DIRECTORY_PATH="${project_directory_path}"
-export DATA_DIRECTORY_PATH="${data_directory_path}"
-export NIFTI_DIRECTORY_PATH="${nifti_directory_path}"
+# ── Load or create .env ─────────────────────────────────────────
+ENV_FILE="${project_directory_path}/.env"
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "No .env file found at ${ENV_FILE}."
+  if [ -f "${project_directory_path}/.env.example" ]; then
+    echo "Copying .env.example → .env — please review paths before re-running."
+    cp "${project_directory_path}/.env.example" "$ENV_FILE"
+  else
+    echo "ERROR: Neither .env nor .env.example found."
+    exit 1
+  fi
+  echo ""
+  echo "Edit ${ENV_FILE} with your deployment paths, then run:"
+  echo "  bash start_control.sh"
+  exit 0
+fi
+
+# Source variables (each line must be KEY=VALUE with no surrounding whitespace)
+while IFS='=' read -r key value || [ -n "$key" ]; do
+  # Skip comments and blank lines
+  [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+  export "${key}=${value}"
+done < "$ENV_FILE"
+
+# ── Validate required paths ─────────────────────────────────────
+required_vars=(
+  PROJECT_DIRECTORY_PATH
+  DATA_DIRECTORY_PATH
+  NIFTI_DIRECTORY_PATH
+  RAS_DIRECTORY_PATH
+  COREG_DIRECTORY_PATH
+  INPUTS_DIRECTORY_PATH
+)
+
+missing_deps=()
+for var in "${required_vars[@]}"; do
+  if [ -z "${!var:-}" ]; then
+    missing_deps+=("$var")
+  fi
+done
+
+if [ ${#missing_deps[@]} -gt 0 ]; then
+  echo "ERROR: Missing required variables in .env:"
+  for var in "${missing_deps[@]}"; do
+    echo "  - ${var}"
+  done
+  exit 1
+fi
+
+# ── Create timestamped deployment log directory ─────────────────
+DEPLOYMENT_ID=$(date +%Y%m%d_%H%M%S)
+DEPLOY_LOG_DIR="${project_directory_path}/deployments/${DEPLOYMENT_ID}"
+mkdir -p "$DEPLOY_LOG_DIR"
+
+# Write a minimal manifest so deployments can be audited later
+cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
+{
+  "deployment_id": "${DEPLOYMENT_ID}",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "runtime_env_file": "${ENV_FILE}",
+  "paths": {
+    "project": "${PROJECT_DIRECTORY_PATH}",
+    "raw_data": "${DATA_DIRECTORY_PATH}",
+    "nifti": "${NIFTI_DIRECTORY_PATH}",
+    "ras": "${RAS_DIRECTORY_PATH}",
+    "coreg": "${COREG_DIRECTORY_PATH}",
+    "inputs": "${INPUTS_DIRECTORY_PATH}"
+  }
+}
+MANIFEST
+export DEPLOY_LOG_DIR
+
+echo "Deployment log: ${DEPLOY_LOG_DIR}"
+echo ""
 
 # ── Detect WSL platform ────────────────────────────────────────
 WSL=false
@@ -102,12 +168,16 @@ case "$RUNTIME" in
     COMPOSE_CMD=$(command -v docker compose &>/dev/null && echo "docker compose" || echo "docker-compose")
 
     if [ "$WSL" = true ]; then
-      echo "Using Docker (WSL): docker-compose-wsl.yml"
-      ${COMPOSE_CMD} -f ./control_system/docker-compose-wsl.yml up --build
+      COMPOSE_FILE="./control_system/docker-compose-wsl.yml"
+      echo "Using Docker (WSL): ${COMPOSE_FILE}"
     else
-      echo "Using Docker: docker-compose.yml"
-      ${COMPOSE_CMD} -f ./control_system/docker-compose.yml up --build
+      COMPOSE_FILE="./control_system/docker-compose.yml"
+      echo "Using Docker: ${COMPOSE_FILE}"
     fi
+
+    # Add deployment log volume to pass through compose env
+    export DEPLOY_LOG_DIR
+    ${COMPOSE_CMD} -f "${COMPOSE_FILE}" up --build
     ;;
 
   singularity|apptainer)
@@ -117,25 +187,30 @@ case "$RUNTIME" in
       echo ""
       echo "ERROR: Singularity image not found at $SIF_IMAGE"
       echo ""
-      echo "To deploy on HPC sites, build or copy a .sif image:"
+      echo "To deploy on HPC sites, pull from an existing Docker/OCI image:"
       echo ""
-      echo "  Option A — Build locally (requires root):"
-      echo "    sudo ${RUNTIME} build mri_preprocessing.sif control_system/mri_preprocessing.singularity.def"
-      echo ""
-      echo "  Option B — Pull from an existing Docker/OCI image:"
-      echo "    ${RUNTIME} pull mri_preprocessing.sif docker://<your-image>:tag"
+      echo "  ${RUNTIME} pull mri_preprocessing.sif docker://<your-image>:tag"
       echo ""
       echo "Then copy the .sif file to control_system/ on your HPC site."
       echo ""
       exit 1
     fi
 
-    RAW_BIND="${DATA_DIRECTORY_PATH}:/FL_system/data/raw"
-    PROJECT_BIND="${PROJECT_DIRECTORY_PATH}:/FL_system"
+    Binds=(
+      "${PROJECT_DIRECTORY_PATH}:/FL_system"
+      "${DATA_DIRECTORY_PATH}:/FL_system/data/raw"
+      "${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti"
+      "${RAS_DIRECTORY_PATH}:/FL_system/data/RAS"
+      "${COREG_DIRECTORY_PATH}:/FL_system/data/coreg"
+      "${INPUTS_DIRECTORY_PATH}:/FL_system/data/inputs"
+      "${DEPLOY_LOG_DIR}:/FL_system/logs/deployments/${DEPLOYMENT_ID}"
+    )
+
+    bind_str=$(IFS=','; echo "${Binds[*]}")
 
     echo "Using ${RUNTIME} with image: $SIF_IMAGE"
-    echo "Binding raw data : $DATA_DIRECTORY_PATH → /FL\_system/data/raw"
-    echo "Binding project : $PROJECT_DIRECTORY_PATH → /FL\_system"
+    echo "Binding:"
+    for b in "${Binds[@]}"; do echo "  ${b}"; done
     echo ""
     echo "Once the prompt appears, run your pipeline scripts inside the container:"
     echo "  python code/preprocessing/01_scanDicom.py --scan-dir /FL_system/data/raw --save-dir /FL_system/data"
@@ -143,7 +218,7 @@ case "$RUNTIME" in
     echo ""
 
     ${RUNTIME} exec \
-      --bind "$RAW_BIND,$PROJECT_BIND" \
+      --bind "$bind_str" \
       -e DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH" \
       -e NIFTI_DIRECTORY_PATH="$NIFTI_DIRECTORY_PATH" \
       -e PROJECT_DIRECTORY_PATH="$PROJECT_DIRECTORY_PATH" \
