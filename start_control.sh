@@ -227,7 +227,7 @@ case "$RUNTIME" in
 
   conda|mamba)
     ENV_YML="${script_directory}/environment.yml"
-    ENV_NAME="mri_preproc"
+    ENV_NAME="${CONDA_ENV_NAME:-mri_preproc}"
 
     if [[ -n "${CONDA_DEFAULT_ENV:-}" && "${CONDA_DEFAULT_ENV}" == "${ENV_NAME}" ]]; then
       echo "Conda env ${ENV_NAME} already active."
