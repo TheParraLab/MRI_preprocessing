@@ -154,7 +154,7 @@ def run_cmd(command, disk_space_lock, stop_flag, completed_commands):
 
     if os.path.exists(f'{output_dir}{os.sep}{file_name}.nii'):
         LOGGER.info(f'[SKIP] Nifti file already exists: {file_name}')
-        completed_commands.add(tuple(command))
+        completed_commands.append(tuple(command))
         return
 
     if stop_flag.is_set():
@@ -191,7 +191,7 @@ def run_cmd(command, disk_space_lock, stop_flag, completed_commands):
             LOGGER.debug(result.stdout.decode())
         elapsed = time.time() - t0
         LOGGER.info(f'[DONE] {file_name} completed in {elapsed:.1f}s from {command[-1]}')
-        completed_commands.add(tuple(command))
+        completed_commands.append(tuple(command))
     except subprocess.TimeoutExpired:
         elapsed = time.time() - t0
         LOGGER.error(f'[TIMEOUT] {file_name} exceeded 600s after {elapsed:.1f}s. Command: {" ".join(command)}')
@@ -233,7 +233,7 @@ if __name__ == '__main__':
     manager = Manager()
     disk_space_lock = Lock()
     stop_flag = manager.Event()
-    completed_commands = manager.Set()
+    completed_commands = manager.list()
 
     signal.signal(signal.SIGINT, handle_keyboard_interrupt)
     LOGGER.info('Starting saveNifti: Step 03')
