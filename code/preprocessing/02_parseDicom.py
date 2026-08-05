@@ -1273,7 +1273,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             if not order_removed_df.empty:
                 logger.info(f'{len(order_removed_df)} scans removed during ordering for '
                             f'{order_removed_df["SessionID"].nunique()} session(s)')
-                  os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
+                os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
                 _atomic_write_csv(order_removed_df,
                                   os.path.join(LOG_DIR, 'removal_log', 'Removed_Ordering.csv'))
             else:
