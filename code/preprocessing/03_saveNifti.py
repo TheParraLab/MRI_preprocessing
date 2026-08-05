@@ -9,6 +9,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import signal
 import subprocess
+import argparse
 import time
 from typing import Callable, List, Any
 from functools import partial
@@ -26,11 +27,14 @@ LOGGER = get_logger('03_saveNifti', '/FL_system/data/logs/')
 # Define necessary directories
 LOAD_DIR = '/FL_system/data/' # Location to load the constructed Data_table_timing.csv ['/FL_system/data/']
 SAVE_DIR = '/FL_system/data/nifti/' # Location to save the nifti files ['/FL_system/data/nifti/']
+parser = argparse.ArgumentParser(description='Convert DICOM files to NIfTI format')
+parser.add_argument('--multi', '-m', action='store_true', help='Use multiprocessing')
+args = parser.parse_args()
+
 DEBUG = 0
 TEST = False
-#PROGRESS = False
 N_TEST = 200
-PARALLEL = True
+PARALLEL = args.multi
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
 stop_flag = manager.Event()
 
