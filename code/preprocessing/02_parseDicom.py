@@ -1138,7 +1138,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     split_removed_df = pd.concat(split_removed_dfs, ignore_index=True)
                     logger.info(f'{len(split_removed_df)} scans removed during splitting for '
                                 f'{split_removed_df["SessionID"].nunique()} session(s)')
-                   os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
+                    os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
                     _atomic_write_csv(split_removed_df,
                                        os.path.join(LOG_DIR, 'removal_log', 'Removed_Splitting.csv'))
                 else:
@@ -1195,7 +1195,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                             f'ordering for '
                             f'{order_removed_df["SessionID"].nunique()} '
                             f'session(s)')
-                         os.makedirs(
+                        os.makedirs(
                             os.path.join(LOG_DIR, 'removal_log'),
                             exist_ok=True,
                         )
