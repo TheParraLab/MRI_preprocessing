@@ -35,7 +35,7 @@ N_TEST = 200
 PARALLEL = args.multi
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
 stop_flag = manager.Event()
-completed_commands = manager.set()
+completed_commands = manager.Set()
 
 #### Preprocessing | Step 3: Save Nifti Files ####
 # This script is for generating the nifti files for the selected scans
