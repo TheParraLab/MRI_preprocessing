@@ -21,21 +21,20 @@ parser.add_argument('--multi', '-m', action='store_true', help='Use multiprocess
 parser.add_argument('--test', action='store_true', help='Run in test mode with first 200 sessions')
 args = parser.parse_args()
 
-# Global variables
-manager = Manager()
-disk_space_lock = Lock()
 LOGGER = get_logger('03_saveNifti', '/FL_system/data/logs/')
 
-# Define necessary directories
-LOAD_DIR = '/FL_system/data/' # Location to load the constructed Data_table_timing.csv ['/FL_system/data/']
-SAVE_DIR = '/FL_system/data/nifti/' # Location to save the nifti files ['/FL_system/data/nifti/']
+LOAD_DIR = '/FL_system/data/'
+SAVE_DIR = '/FL_system/data/nifti/'
 DEBUG = 0
 TEST = args.test
 N_TEST = 200
 PARALLEL = args.multi
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
-stop_flag = manager.Event()
-completed_commands = manager.Set()
+
+manager = None
+disk_space_lock = None
+completed_commands = None
+stop_flag = None
 
 #### Preprocessing | Step 3: Save Nifti Files ####
 # This script is for generating the nifti files for the selected scans
@@ -145,7 +144,7 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     return results
 
 
-def run_cmd(command):
+def run_cmd(command, disk_space_lock, stop_flag, completed_commands):
     SessionID = command[2].split(os.sep)[-1]
     output_dir = command[2]
     file_name = command[4]
@@ -231,6 +230,11 @@ def handle_keyboard_interrupt(signum, frame):
 
 
 if __name__ == '__main__':
+    manager = Manager()
+    disk_space_lock = Lock()
+    stop_flag = manager.Event()
+    completed_commands = manager.Set()
+
     signal.signal(signal.SIGINT, handle_keyboard_interrupt)
     LOGGER.info('Starting saveNifti: Step 03')
     LOGGER.info(f'LOAD_DIR: {LOAD_DIR}')
@@ -302,10 +306,10 @@ if __name__ == '__main__':
             LOGGER.info('Checkpoint file removed')
 
     if commands_priority:
-        run_with_progress(run_cmd, commands_priority, Parallel=PARALLEL)
+        run_with_progress(run_cmd, commands_priority, Parallel=PARALLEL, disk_space_lock=disk_space_lock, stop_flag=stop_flag, completed_commands=completed_commands)
 
         if not stop_flag.is_set() and commands_redirected:
-            run_with_progress(run_cmd, commands_redirected, Parallel=PARALLEL)
+            run_with_progress(run_cmd, commands_redirected, Parallel=PARALLEL, disk_space_lock=disk_space_lock, stop_flag=stop_flag, completed_commands=completed_commands)
 
         if not stop_flag.is_set():
             cleanup()
@@ -313,7 +317,7 @@ if __name__ == '__main__':
             save_checkpoint()
 
     elif commands_redirected:
-        run_with_progress(run_cmd, commands_redirected, Parallel=PARALLEL)
+        run_with_progress(run_cmd, commands_redirected, Parallel=PARALLEL, disk_space_lock=disk_space_lock, stop_flag=stop_flag, completed_commands=completed_commands)
 
         if not stop_flag.is_set():
             cleanup()
