@@ -468,7 +468,17 @@ class DICOMfilter():
         self.logger.debug(f'Removed {len(self.removed["Implants"])} scans with implants | {self.Session_ID}')
         self.dicom_table = self.dicom_table.drop(to_remove)
         return self.dicom_table
-    
+
+    def removeNonFSScans(self):
+        """Detects fat saturation, then removes rows that are explicitly non-fat-saturated."""
+        self.detect_fs()
+        mask = self.dicom_table['FatSaturated'] == False
+        self.removed['Non_FS'].append(self.dicom_table.loc[mask])
+        n_removed = int(mask.sum())
+        self.dicom_table = self.dicom_table.loc[~mask].reset_index(drop=True)
+        self.logger.debug(f'Removed {n_removed} non-fat-saturated scans | {self.Session_ID}')
+        return self.dicom_table
+
     def majorSide(self):
         """Determines the major side of the breast"""
         mode_series = self.dicom_table['Lat'].mode()
@@ -1069,6 +1079,7 @@ class DICOMfilter():
               maintainability and testability.
         """
         # SHOULD THIS FUNCTION FLOW DEPEND ON SESSION PROTOCOL [16-328, 19-093, 20-425]
+        self.removeNonFSScans()
         self.print_table(columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series'])
 
         ### Fixing laterality from series description
