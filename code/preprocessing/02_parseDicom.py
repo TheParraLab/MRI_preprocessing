@@ -682,7 +682,7 @@ def _save_removal_worker(tup: tuple, save_dir: str, log_dir: str) -> None:
     """Worker for saving removal logs — called per category."""
     worker_logger = get_logger('02_parseDicom', log_dir)
     key, item = tup
-    out_path = os.path.join(save_dir, 'removal_log', f'Removed_{key}.csv')
+    out_path = os.path.join(log_dir, 'removal_log', f'Removed_{key}.csv')
     try:
         item.to_csv(out_path, index=False)
     except Exception as e:
@@ -990,7 +990,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         logger.info(f'Saving filtered data to {filter_path}')
         _atomic_write_csv(Data_table, filter_path)
 
-        os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+        os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
         save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir, log_dir=LOG_DIR)
         run_function(logger, save_fn, list(removed_tables.items()),
                     Parallel=cfg.parallel, P_type='process')
@@ -1004,7 +1004,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             ]
             if fully_removed_list:
                 fully_removed = pd.concat(fully_removed_list, ignore_index=True)
-                fully_path = os.path.join(cfg.save_dir, 'removal_log', 'Removed_fully.csv')
+                fully_path = os.path.join(LOG_DIR, 'removal_log', 'Removed_fully.csv')
                 fully_removed.to_csv(fully_path, index=False)
                 logger.info(f'Saved fully removed sessions to {fully_path}')
         else:
@@ -1138,9 +1138,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     split_removed_df = pd.concat(split_removed_dfs, ignore_index=True)
                     logger.info(f'{len(split_removed_df)} scans removed during splitting for '
                                 f'{split_removed_df["SessionID"].nunique()} session(s)')
-                    os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+                   os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
                     _atomic_write_csv(split_removed_df,
-                                      os.path.join(cfg.save_dir, 'removal_log', 'Removed_Splitting.csv'))
+                                       os.path.join(LOG_DIR, 'removal_log', 'Removed_Splitting.csv'))
                 else:
                     logger.info('No scans removed during splitting')
             else:
@@ -1195,14 +1195,14 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                             f'ordering for '
                             f'{order_removed_df["SessionID"].nunique()} '
                             f'session(s)')
-                        os.makedirs(
-                            os.path.join(cfg.save_dir, 'removal_log'),
+                         os.makedirs(
+                            os.path.join(LOG_DIR, 'removal_log'),
                             exist_ok=True,
                         )
                         _atomic_write_csv(
                             order_removed_df,
                             os.path.join(
-                                cfg.save_dir,
+                                LOG_DIR,
                                 'removal_log',
                                 'Removed_Ordering.csv',
                             ),
@@ -1269,9 +1269,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             if not order_removed_df.empty:
                 logger.info(f'{len(order_removed_df)} scans removed during ordering for '
                             f'{order_removed_df["SessionID"].nunique()} session(s)')
-                os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+                  os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
                 _atomic_write_csv(order_removed_df,
-                                  os.path.join(cfg.save_dir, 'removal_log', 'Removed_Ordering.csv'))
+                                  os.path.join(LOG_DIR, 'removal_log', 'Removed_Ordering.csv'))
             else:
                 logger.info('No scans removed during ordering')
 
