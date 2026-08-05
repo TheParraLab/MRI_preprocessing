@@ -681,8 +681,8 @@ def _save_removal_worker(tup: tuple, save_dir: str) -> None:
     out_path = os.path.join(save_dir, 'removal_log', f'Removed_{key}.csv')
     try:
         item.to_csv(out_path, index=False)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.error(f'Failed to write removal log {out_path}: {e}')
 
 
 def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
@@ -795,9 +795,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
     total, used, free = shutil.disk_usage(cfg.save_dir)
     free_gb = free / (1024**3)
-    if free_gb < 20:
+    if free_gb < cfg.min_free_gb:
         logger.error(f'Insufficient disk space: {free_gb:.1f} GB remaining in {cfg.save_dir}. '
-                      f'Need at least 20 GB. Aborting.')
+                      f'Need at least {cfg.min_free_gb} GB. Aborting.')
         return
 
     # -- Overwrite guard -----------------------------------------------------
@@ -901,13 +901,17 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if rel:
                         temporary_relocation.extend(rel)
 
-                # Track completed session IDs
+                # Track completed session IDs — use a set for O(1) lookups
+                seen = set(completed_ids)
                 for df in batch_results:
                     for sid in df['SessionID'].unique():
-                        completed_ids.append(sid)
+                        if sid not in seen:
+                            seen.add(sid)
+                            completed_ids.append(sid)
                 for subset in batch:
                     sid = subset['SessionID'].values[0]
-                    if sid not in completed_ids:
+                    if sid not in seen:
+                        seen.add(sid)
                         completed_ids.append(sid)
 
                 # Check disk space threshold — checkpoint only under pressure
@@ -1071,12 +1075,17 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if rel:
                         all_split_redirections.extend(rel)
 
+                # Use a set for O(1) lookups
+                seen_split = set(split_completed_ids)
                 for df in batch_results:
                     for sid in df['SessionID'].unique():
-                        split_completed_ids.append(sid)
+                        if sid not in seen_split:
+                            seen_split.add(sid)
+                            split_completed_ids.append(sid)
                 for subset in batch:
                     sid = subset['SessionID'].values[0]
-                    if sid not in split_completed_ids:
+                    if sid not in seen_split:
+                        seen_split.add(sid)
                         split_completed_ids.append(sid)
 
                 # Check disk space threshold — checkpoint only under pressure
@@ -1223,16 +1232,18 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 order_removed.extend(new_removed)
                 completed_ids.extend(batch_ids)
 
-                # Load existing checkpoint, extend, save, then clear to cap RAM
-                existing_order_results, existing_order_removed = _load_order_checkpoint_data(cfg, logger)
-                order_results = existing_order_results + order_results
-                order_removed = existing_order_removed + order_removed
-                _save_order_checkpoint(
-                    cfg, logger, completed_ids, order_results,
-                    order_removed,
-                )
-                order_results.clear()
-                order_removed.clear()
+                # Mid-run checkpoint every 10 batches to avoid O(n²) pickle churn
+                bs = getattr(cfg, 'filter_batch_size', 10)
+                if (start // bs + 1) % 10 == 0:
+                    existing_order_results, existing_order_removed = _load_order_checkpoint_data(cfg, logger)
+                    order_results = existing_order_results + order_results
+                    order_removed = existing_order_removed + order_removed
+                    _save_order_checkpoint(
+                        cfg, logger, completed_ids, order_results,
+                        order_removed,
+                    )
+                    order_results.clear()
+                    order_removed.clear()
 
                 # Check disk space threshold
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
@@ -1363,7 +1374,7 @@ if __name__ == '__main__':
                     try:
                         tables = [
                             t for t in os.listdir(save_dir_worker)
-                            if t.endswith('.csv')
+                            if t.startswith('Data_table_timing_') and t.endswith('.csv')
                         ]
                         logger.info(f'All workers done, compiling {len(tables)} tables')
                         frames = []

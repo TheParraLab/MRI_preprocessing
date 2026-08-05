@@ -302,6 +302,9 @@ class DICOMextract:
             files = sorted(glob.glob(glob_pattern))
             if self.debug > 0:
                 logging.debug(f'[DIAGNOSTIC glob] found {len(files)} files')
+            if not files:
+                self.log_error('No .dcm files found in directory', None)
+                return self.UNKNOWN
             rcsCoordX2 = pyd.dcmread(files[-1], stop_before_pixels=True, specific_tags=(tag.Tag('ImageOrientationPatient'),)).ImageOrientationPatient[0]
             if np.mean([rcsCoordX1, rcsCoordX2]) > 0:
                 return 'left'
@@ -449,8 +452,7 @@ class DICOMfilter():
         """Removes T2 scans from the table"""
         self.removed['T2'].append(self.dicom_table[self.dicom_table['Modality'].isin(['T2', 'Unknown'])])
         self.dicom_table = self.dicom_table[self.dicom_table['Modality'].isin(['T1'])]
-        self.logger.debug(f'Removed {len(self.removed["T2"])} T2 scans | {self.Session_ID}')
-        #self.dicom_table['Remove_T2'] = self.dicom_table['Modality'].apply(lambda x: 1 if x == 'T1' else 0)
+        self.logger.debug(f'Removed {len(self.removed["T2"][-1])} T2 scans | {self.Session_ID}')
         #self.update_valid('Remove_T2')
         return self.dicom_table
     
@@ -465,7 +467,7 @@ class DICOMfilter():
                 logging.error(f'unable to read BreastSize | {e}')
                 to_remove.append(i)
         self.removed['Implants'].append(self.dicom_table.iloc[to_remove])
-        self.logger.debug(f'Removed {len(self.removed["Implants"])} scans with implants | {self.Session_ID}')
+        self.logger.debug(f'Removed {len(self.removed["Implants"][-1])} scans with implants | {self.Session_ID}')
         self.dicom_table = self.dicom_table.drop(to_remove)
         return self.dicom_table
 
@@ -494,7 +496,7 @@ class DICOMfilter():
         """Removes scans from the minor side of the breast"""
         self.removed['Side'].append(self.dicom_table[self.dicom_table['Lat'] != self.SIDE])
         self.dicom_table = self.dicom_table[self.dicom_table['Lat'] == self.SIDE]
-        self.logger.debug(f'Removed {len(self.removed["Side"])} scans from the minor side | {self.Session_ID}')
+        self.logger.debug(f'Removed {len(self.removed["Side"][-1])} scans from the minor side | {self.Session_ID}')
         return self.dicom_table
     
     def majorSlices(self):
@@ -589,7 +591,7 @@ class DICOMfilter():
             #self.dicom_table['Remove_Computed'] = np.where(self.dicom_table['Type'].str.contains(flag.upper(), na=False), 1, 0)
         # Concatenate all removed rows into a single DataFrame
         self.removed['Computed'].append(pd.concat(removed, ignore_index=True))
-        self.logger.debug(f'Removed {len(self.removed["Computed"])} scans with computed descriptions | {self.Session_ID}')
+        self.logger.debug(f'Removed {len(self.removed["Computed"][-1])} scans with computed descriptions | {self.Session_ID}')
         #self.update_valid('Remove_Computed')
         return self.dicom_table
 
@@ -598,17 +600,7 @@ class DICOMfilter():
         desc_matches = self.dicom_table['Series_desc'].fillna('').str.lower().str.contains(desc_pattern, na=False)
         self.removed['Description'].append(self.dicom_table[desc_matches])
         self.dicom_table = self.dicom_table[~desc_matches]
-        self.logger.debug(f'Removed {len(self.removed["Description"])} scans for containing flagged descriptions | {self.Session_ID}')
-        return self.dicom_table
-
-    def removeTimes(self, filter_columns: list):
-        """Removes scans with computed flags"""
-        removed = []
-        for column in filter_columns:
-            self.dicom_table = self.dicom_table[self.dicom_table[column] != 'Unknown']
-            removed.append(self.dicom_table[self.dicom_table[column] == 'Unknown'])
-        self.removed['Times'].append(pd.concat(removed))
-        self.logger.debug(f'Removed {len(self.removed["Times"])} scans with unknown times | {self.Session_ID}')
+        self.logger.debug(f'Removed {len(self.removed["Description"][-1])} scans for containing flagged descriptions | {self.Session_ID}')
         return self.dicom_table
 
     def removeDWI(self):
@@ -1555,8 +1547,8 @@ class DICOMorder():
             return  # Exit the constructor if SessionID is missing
         if self.Session_ID.size > 1:
             print('Multiple Session_IDs found in the table')
-            print('Not currently implemented, please remake with a single Session_ID')
-            return None
+            self.logger.error('Multiple Session_IDs found in the table. Not currently implemented, please filter to a single Session_ID.')
+            return
     
     def order(self, timing_param: str, secondary_param: str) -> pd.DataFrame:
         """
