@@ -24,10 +24,12 @@ from matplotlib import pyplot as plt
 
 def _parse_args():
     p = argparse.ArgumentParser(description='Comprehensive Step 02 diagnostic')
-    p.add_argument(
-        '--base_dir', type=str, default='/logs/',
-        help=('Deployment root directory where CSVs and manifest.json live '
-              '(default: /logs/)'))
+  p.add_argument(
+        '--base_dir', type=str, default='/FL_system/data/',
+        help=('Deployment root directory where CSVs live '
+               '(default: /FL_system/data/)'))
+    p.add_argument('--removal_dir', type=str, default='/deployment/logs/removal_log',
+                    help=('Directory containing removal CSVs (default: /deployment/logs/removal_log)'))
     p.add_argument('--sample', type=int, default=5)
     return p.parse_args()
 
@@ -245,12 +247,12 @@ def _details(df, sids, n):
 
 # ----- orchestrator ---------------------------------------------------------
 
-def build_report(base, sample_n, fig_dir=None):
+def build_report(base, sample_n, fig_dir=None, removal_dir=None):
     raw  = _load(os.path.join(base, 'Data_table.csv'))
     filt = _load(os.path.join(base, 'Data_table_filtered.csv'))
     spl  = _load(os.path.join(base, 'Data_table_split.csv'))
     tim  = _load(os.path.join(base, 'Data_table_timing.csv'))
-    rdir = os.path.join(base, 'removal_log')
+    rdir = removal_dir if removal_dir else os.path.join(base, 'removal_log')
     rem = _removals(rdir) if os.path.isdir(rdir) else {}
 
     # Synthesize SessionID for raw table (step-01 uses ID + DATE columns)
@@ -429,7 +431,7 @@ def main():
     out_dir = os.path.join(os.path.abspath(a.base_dir), 'review', '02')
     os.makedirs(out_dir, exist_ok=True)
 
-    r, _ = build_report(a.base_dir, a.sample, fig_dir=out_dir)
+    r, _ = build_report(a.base_dir, a.sample, fig_dir=out_dir, removal_dir=a.removal_dir)
     _print(r, out_dir)
 
     json_path = os.path.join(out_dir, 'review_02.json')
