@@ -95,46 +95,50 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     # Pass the progress queue to the target function
     #target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
 
-    # Run the target function with a progress bar
     results = []
     t_start = time.time()
     items_index = 0
     if Parallel:
         max_workers = cpu_count() - 1
-        LOGGER.info(f'Submitting {len(items)} tasks to ProcessPoolExecutor ({max_workers} workers)')
+        LOGGER.info(f'Running {len(items)} tasks through ProcessPoolExecutor ({max_workers} workers)')
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for idx, item in enumerate(items):
+            pending = {}
+            next_idx = 0
+
+            while pending or next_idx < len(items):
                 if stop_flag.is_set():
-                    LOGGER.info(f'[STOP] Stop flag set before submitting item {idx+1}/{len(items)}. Cancelling.')
-                    for f in futures:
+                    for f in pending.values():
                         f.cancel()
+                    pending.clear()
                     break
-                futures.append((idx, executor.submit(target, item, *args, **kwargs)))
-                num_done = (idx + 1) % 50 == 0 or idx + 1 == len(items)
-                if num_done:
-                    elapsed = time.time() - t_start
-                    LOGGER.info(f'[{target_name}] Submitted: {idx+1}/{len(items)} items, {elapsed:.0f}s elapsed')
-            try:
-                for idx, future in futures:
-                    if stop_flag.is_set():
-                        LOGGER.info(f'[STOP] Stop flag set after processing {idx+1}/{len(futures)} futures. Cancelling remaining.')
-                        for _, f in futures[idx+1:]:
-                            f.cancel()
-                        break
+
+                # Submit up to max_workers worth of pending tasks
+                while next_idx < len(items) and len(pending) < max_workers:
+                    fut = executor.submit(target, items[next_idx], *args, **kwargs)
+                    pending[fut] = next_idx
+                    next_idx += 1
+
+                if not pending:
+                    break
+
+                time.sleep(0.5)
+
+                # Collect any finished futures
+                done_futs = [f for f in pending if f.done()]
+                for f in done_futs:
+                    idx = pending.pop(f)
                     try:
-                        result = future.result(timeout=1800)
+                        result = f.result(timeout=1800)
                         results.append(result)
-                        if (idx + 1) % 50 == 0 or idx + 1 == len(futures):
+                        results_len = idx + 1
+                        if results_len % 50 == 0 or results_len == len(items):
                             elapsed = time.time() - t_start
-                            LOGGER.info(f'[{target_name}] Progress: {idx+1}/{len(futures)} items, {elapsed:.0f}s elapsed')
+                            LOGGER.info(f'[{target_name}] Progress: {results_len}/{len(items)} ({elapsed:.0f}s)')
                     except Exception as e:
-                        LOGGER.error(f'[ERROR] Future {idx} ({target_name} item {idx}) failed: {e}', exc_info=True)
-            except KeyboardInterrupt:
-                LOGGER.info(f'[INTERRUPT] Letting in-flight workers complete, cancelling queued futures from index {idx+1}/{len(futures)}.')
-                for _, f in futures[idx+1:]:
-                    f.cancel()
-                raise
+                        LOGGER.error(f'[ERROR] Item {idx} failed: {e}', exc_info=True)
+
+            for f in pending.values():
+                f.cancel()
     else:
         for items_index, item in enumerate(items):
             if stop_flag.is_set():
