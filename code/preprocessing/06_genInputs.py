@@ -23,6 +23,10 @@ parser.add_argument('--load_dir', type=str, default='/FL_system/data/coreg/', he
 parser.add_argument('--save_dir', type=str, default='/FL_system/data/inputs/', help='Directory to save model inputs')
 parser.add_argument('--test', nargs='?', type=int, const=40, help='Run in test mode, randomly sample N sessions (default: 40)')
 parser.add_argument('--parallel', action='store_true', help='Enable multiprocessing')
+parser.add_argument(
+    '--ids_file', type=str, default=None,
+    help='CSV/txt file containing one ID per line. If provided, only process sessions whose name appears in this file.'
+)
 args = parser.parse_args()
 
 LOAD_DIR = args.load_dir
@@ -311,8 +315,18 @@ if __name__ == '__main__':
         LOGGER.error('MISSING CRITICAL FILE | "data_table_timing.csv"')
         exit()
      
+    # Load IDs to filter by (if --ids_file provided)
+    ids_to_process = None
+    if args.ids_file is not None:
+        with open(args.ids_file, 'r') as f:
+            ids_to_process = set(line.strip() for line in f if line.strip())
+        LOGGER.info(f'Loaded {len(ids_to_process)} IDs from {args.ids_file}')
+
     session = np.unique(Data_table['SessionID'])
     Dirs = os.listdir(f'{LOAD_DIR}/')
+    if ids_to_process is not None:
+        Dirs = [d for d in Dirs if d in ids_to_process]
+        LOGGER.info(f'Filtered to {len(Dirs)} directories matching IDs')
     if TEST:
         session = random.sample(list(session), min(N_TEST, len(session)))
         Dirs = random.sample(Dirs, min(N_TEST, len(Dirs)))

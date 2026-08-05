@@ -36,6 +36,10 @@ parser.add_argument(
 parser.add_argument(
     '--test', nargs='?', type=int, const=10,
     help='Run in test mode, randomly sample N directories to process (default: 10)')
+parser.add_argument(
+    '--ids_file', type=str, default=None,
+    help='CSV/txt file containing one ID per line. If provided, only process directories whose name appears in this file.'
+)
 args = parser.parse_args()
 
 LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
@@ -226,9 +230,19 @@ if __name__ == '__main__':
         except Exception as e:
             LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
 
+    # Load IDs to filter by (if --ids_file provided)
+    ids_to_process = None
+    if args.ids_file is not None:
+        with open(args.ids_file, 'r') as f:
+            ids_to_process = set(line.strip() for line in f if line.strip())
+        LOGGER.info(f'Loaded {len(ids_to_process)} IDs from {args.ids_file}')
+
     # ---- Determine list of directories ------------------------
     if args.dir_idx is None:
         dirs = sorted(glob.glob(f'{LOAD_DIR}*'))
+        if ids_to_process is not None:
+            dirs = [d for d in dirs if os.path.basename(d) in ids_to_process]
+            LOGGER.info(f'Filtered to {len(dirs)} directories matching IDs')
         if TEST:
             dirs = random.sample(dirs, min(N_TEST, len(dirs)))
         LOGGER.info(f'Processing {len(dirs)} directories')
