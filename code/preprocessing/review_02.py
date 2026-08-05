@@ -24,7 +24,7 @@ from matplotlib import pyplot as plt
 
 def _parse_args():
     p = argparse.ArgumentParser(description='Comprehensive Step 02 diagnostic')
-  p.add_argument(
+    p.add_argument(
         '--base_dir', type=str, default='/FL_system/data/',
         help=('Deployment root directory where CSVs live '
                '(default: /FL_system/data/)'))
