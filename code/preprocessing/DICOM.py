@@ -474,7 +474,7 @@ class DICOMfilter():
     def removeNonFSScans(self):
         """Detects fat saturation, then removes rows that are explicitly non-fat-saturated."""
         self.detect_fs()
-        mask = self.dicom_table['FatSaturated'] == False
+        mask = self.dicom_table['FatSaturated'] != True
         self.removed['Non_FS'].append(self.dicom_table.loc[mask])
         n_removed = int(mask.sum())
         self.dicom_table = self.dicom_table.loc[~mask].reset_index(drop=True)
