@@ -1,40 +1,38 @@
 import os
-import sys
+#import pydicom as pyd
 import glob
 import pickle
 import numpy as np
 import pandas as pd
-from multiprocessing import Manager, cpu_count, Lock
-from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Queue, Manager, cpu_count, Lock
+import threading
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import signal
 import subprocess
 import time
 from typing import Callable, List, Any
-import shutil
 from functools import partial
-import argparse
 # Custom imports
-from toolbox import get_logger
+from toolbox import ProgressBar, get_logger, run_function
+from DICOM import DICOMfilter, DICOMorder
 
-parser = argparse.ArgumentParser(description='Convert DICOM files to NIfTI format')
-parser.add_argument('--multi', '-m', action='store_true', help='Use multiprocessing')
-parser.add_argument('--test', action='store_true', help='Run in test mode with first 200 sessions')
-args = parser.parse_args()
-
+# Global variables for progress bar and lock
+#Progress = None
+manager = Manager()
+disk_space_lock = Lock()
+#progress_queue = manager.Queue()
 LOGGER = get_logger('03_saveNifti', '/FL_system/data/logs/')
 
-LOAD_DIR = '/FL_system/data/'
-SAVE_DIR = '/FL_system/data/nifti/'
+# Define necessary directories
+LOAD_DIR = '/FL_system/data/' # Location to load the constructed Data_table_timing.csv ['/FL_system/data/']
+SAVE_DIR = '/FL_system/data/nifti/' # Location to save the nifti files ['/FL_system/data/nifti/']
 DEBUG = 0
-TEST = args.test
+TEST = False
+#PROGRESS = False
 N_TEST = 200
-PARALLEL = args.multi
+PARALLEL = True
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
-
-manager = None
-disk_space_lock = None
-completed_commands = None
-stop_flag = None
+stop_flag = manager.Event()
 
 #### Preprocessing | Step 3: Save Nifti Files ####
 # This script is for generating the nifti files for the selected scans
@@ -74,12 +72,26 @@ def load_progress(filename):
 
 def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
     """Run a function with a progress bar"""
+    # Initialize using a manager to allow for shared progress queue
+    #manager = Manager()
+    #progress_queue = manager.Queue()
     target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
 
+    # Debugging information
     LOGGER.debug(f'Running {target_name} with progress bar')
     LOGGER.debug(f'Number of items: {len(items)}')
     LOGGER.debug(f'Parallel: {Parallel}')
 
+    # Initialize progress bar
+    #if PROGRESS:
+    #    Progress = ProgressBar(len(items))
+    #    updater_thread = threading.Thread(target=progress_updater, args=(progress_queue, Progress))
+    #    updater_thread.start()
+    
+    # Pass the progress queue to the target function
+    #target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
+
+    # Run the target function with a progress bar
     results = []
     t_start = time.time()
     items_index = 0
@@ -143,8 +155,19 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     LOGGER.info(f'[*] Returning {len(results)} results for {target_name}')
     return results
 
+#def progress_updater(queue, progress_bar):
+#    while not stop_flag.is_set():
+##        try:
+ #           item = queue.get(timeout=1)
+ #           if item is None:
+ #               break
+ #           index, status = item
+ #           progress_bar.update(index, status)
+ #           queue.task_done()
+ #       except:
+ #           continue
 
-def run_cmd(command, disk_space_lock, stop_flag, completed_commands):
+def run_cmd(command, commands):
     SessionID = command[2].split(os.sep)[-1]
     output_dir = command[2]
     file_name = command[4]
@@ -154,7 +177,7 @@ def run_cmd(command, disk_space_lock, stop_flag, completed_commands):
 
     if os.path.exists(f'{output_dir}{os.sep}{file_name}.nii'):
         LOGGER.info(f'[SKIP] Nifti file already exists: {file_name}')
-        completed_commands.append(tuple(command))
+        commands.remove(command)
         return
 
     if stop_flag.is_set():
@@ -185,13 +208,16 @@ def run_cmd(command, disk_space_lock, stop_flag, completed_commands):
     t0 = time.time()
     try:
         if DEBUG == 0:
-            result = subprocess.run(command, check=True, timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            result = subprocess.run(command, check=True, timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             result = subprocess.run(command, check=True, timeout=600, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            LOGGER.debug(result.stdout.decode())
+            print(result.stdout.decode())
         elapsed = time.time() - t0
         LOGGER.info(f'[DONE] {file_name} completed in {elapsed:.1f}s from {command[-1]}')
-        completed_commands.append(tuple(command))
+        try:
+            commands.remove(command)
+        except ValueError:
+            LOGGER.warning(f'  Command for {file_name} not in commands list (already removed)')
     except subprocess.TimeoutExpired:
         elapsed = time.time() - t0
         LOGGER.error(f'[TIMEOUT] {file_name} exceeded 600s after {elapsed:.1f}s. Command: {" ".join(command)}')
@@ -221,106 +247,103 @@ def makeNifti(Data_subset):
         commands.append(['dcm2niix', '-o', f'{SAVE_DIR}{SessionID}', '-f', Descriptor[i], LoadPATH[i]])
     return commands
 
-def split_table(ID, Data_table):
+def split_table(ID):
     return Data_table[Data_table['SessionID'] == ID].reset_index(drop=True)
 
 def handle_keyboard_interrupt(signum, frame):
     LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will complete, queued ones cancelled...')
     raise KeyboardInterrupt('Interrupted')
 
-
 if __name__ == '__main__':
-    manager = Manager()
-    disk_space_lock = Lock()
-    stop_flag = manager.Event()
-    completed_commands = manager.list()
-
     signal.signal(signal.SIGINT, handle_keyboard_interrupt)
     LOGGER.info('Starting saveNifti: Step 03')
     LOGGER.info(f'LOAD_DIR: {LOAD_DIR}')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
     LOGGER.info(f'PARALLEL: {PARALLEL}')
-
-    if not shutil.which('dcm2niix'):
-        LOGGER.error('dcm2niix not found in PATH. Please install dcm2niix before running this script.')
-        exit(1)
-
     if TEST:
-        LOGGER.info(f'Running in test mode with {N_TEST} sessions')
+        LOGGER.info(f'Running in test mode: {TEST}')
+        LOGGER.info(f'Number of test sessions: {N_TEST}')
 
-    completed_commands.clear()
+    #if os.path.exists(SAVE_DIR):
+    #    if len(os.listdir(SAVE_DIR)) > 0:
+    #        LOGGER.error('Nifti directory already exists')
+    #        LOGGER.error('To reprocess data, please remove nifti directory from /FL_system/data/ or remove its contents')
+    #        exit()
+    #    else:
+    #        LOGGER.warning('Nifti directory already exists, but is empty')
+    #else:
+    #    os.mkdir(SAVE_DIR)
+        # Load progress if available
     progress = load_progress('saveNifti_progress.pkl')
-
     if progress:
-        LOGGER.info(f'Resuming from checkpoint. {len(progress)} items remaining')
+        LOGGER.info(f'Progress file found. {len(progress)} items remaining')
         commands = manager.list(progress)
     else:
-        LOGGER.info('No checkpoint found. Starting fresh.')
+        LOGGER.info('No progress file found. Starting from scratch')
         if not os.path.exists(SAVE_DIR):
             os.mkdir(SAVE_DIR)
 
+        # Load the timing information
         Data_table = pd.read_csv(f'{LOAD_DIR}Data_table_timing.csv')
         SessionIDs = Data_table['SessionID']
         Iden_uniq = np.unique(SessionIDs)
 
+        # In testing mode, only process the first N_TEST sessions
         if TEST:
             Iden_uniq = Iden_uniq[:N_TEST]
+        
 
-        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Splitting table for {len(Iden_uniq)} sessions')
-        Data_subsets = []
-        for sid in Iden_uniq:
-            subset = split_table(sid, Data_table)
-            if not subset.empty:
-                Data_subsets.append(subset)
-
-        t_start_phase = time.time()
-        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Building dcm2niix commands')
-        all_commands = []
-        for i, subset in enumerate(Data_subsets):
-            cmds = makeNifti(subset)
-            all_commands.extend(cmds)
-            if (i + 1) % 50 == 0 or i + 1 == len(Data_subsets):
-                elapsed = time.time() - t_start_phase
-                LOGGER.info(f'Built commands for {i+1}/{len(Data_subsets)} sessions ({elapsed:.0f}s)')
-
-        commands = manager.list(all_commands)
-        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Total commands: {len(commands)}')
-
-    LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Separating priority (raw) from redirected commands')
+        # Splitting the datatable into subsets
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: splitting table for {len(Iden_uniq)} sessions')
+        Data_subsets = run_with_progress(split_table, Iden_uniq, Parallel=PARALLEL)
+        # Building the commands for conversion
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: building dcm2niix commands')
+        commands = run_with_progress(makeNifti, Data_subsets, Parallel=PARALLEL)
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: flattening commands list')
+        flat_commands = [item for sublist in commands for item in sublist]
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Created {len(flat_commands)} commands, transferring to manager.list()...')
+        commands = manager.list(flat_commands)
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Number of commands: {len(commands)}')
+    LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: separating priority (raw) from redirected commands')
     raw_cmds = [item for item in commands if 'raw' in item[-1]]
+    LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Found {len(raw_cmds)} priority commands')
     commands_priority = manager.list(raw_cmds)
     redirected_cmds = [item for item in commands if 'raw' not in item[-1]]
+    LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Found {len(redirected_cmds)} redirected commands')
     commands_redirected = manager.list(redirected_cmds)
-    LOGGER.info(f'Priority: {len(commands_priority)}, Redirected: {len(commands_redirected)}')
-
-    progress_path = os.path.join(LOAD_DIR, 'saveNifti_progress.pkl')
-
-    def save_checkpoint():
-        remaining = [c for c in commands if tuple(c) not in completed_commands]
-        save_progress(remaining, 'saveNifti_progress.pkl')
-        LOGGER.info(f'Checkpoint saved with {len(remaining)} remaining items')
-
-    def cleanup():
-        if os.path.exists(progress_path):
-            os.remove(progress_path)
-            LOGGER.info('Checkpoint file removed')
-
-    if commands_priority:
-        run_with_progress(run_cmd, commands_priority, Parallel=PARALLEL, disk_space_lock=disk_space_lock, stop_flag=stop_flag, completed_commands=completed_commands)
-
-        if not stop_flag.is_set() and commands_redirected:
-            run_with_progress(run_cmd, commands_redirected, Parallel=PARALLEL, disk_space_lock=disk_space_lock, stop_flag=stop_flag, completed_commands=completed_commands)
-
+    if len(commands_priority) > 0:
+        LOGGER.debug(f'Number of priority commands: {len(commands_priority)}')
+        run_with_progress(partial(run_cmd, commands=commands), commands_priority, Parallel=PARALLEL)
         if not stop_flag.is_set():
-            cleanup()
+            LOGGER.info('Priority commands complete without stop flag')
+            LOGGER.info('Running non-priority from temporary files')
+            if len(commands_redirected) > 0:
+                LOGGER.debug(f'Number of redirected commands: {len(commands_redirected)}')
+                run_with_progress(partial(run_cmd, commands=commands), commands_redirected, Parallel=PARALLEL)
+                if not stop_flag.is_set():
+                    LOGGER.info('Nifti conversion complete without stop flag')
+                    LOGGER.info('Removing progress file')
+                    if os.path.exists('saveNifti_progress.pkl'):
+                        os.remove('saveNifti_progress.pkl')
+                else:
+                    LOGGER.info('Nifti conversion complete with stop flag')
+                    save_progress(list(commands), 'saveNifti_progress.pkl')
+                    LOGGER.info('checkpoint file saved')
         else:
-            save_checkpoint()
-
-    elif commands_redirected:
-        run_with_progress(run_cmd, commands_redirected, Parallel=PARALLEL, disk_space_lock=disk_space_lock, stop_flag=stop_flag, completed_commands=completed_commands)
-
+            LOGGER.info('Nifti conversion complete with stop flag')
+            save_progress(list(commands), 'saveNifti_progress.pkl')
+            LOGGER.info('checkpoint file saved')
+    elif len(commands_redirected) > 0:
+        LOGGER.debug(f'Number of redirected commands: {len(commands_redirected)}')
+        run_with_progress(partial(run_cmd, commands=commands), commands_redirected, Parallel=PARALLEL)
         if not stop_flag.is_set():
-            cleanup()
+            LOGGER.info('Nifti conversion complete without stop flag')
+            LOGGER.info('Removing progress file')
+            if os.path.exists('saveNifti_progress.pkl'):
+                os.remove('saveNifti_progress.pkl')
         else:
-            save_checkpoint()
+            LOGGER.info('Nifti conversion complete with stop flag')
+            save_progress(list(commands), 'saveNifti_progress.pkl')
+            LOGGER.info('checkpoint file saved')
+    stop_flag.set()
 
