@@ -61,6 +61,9 @@ except ImportError:
 from toolbox import get_logger, run_function
 from DICOM import DICOMfilter, DICOMorder, DICOMsplit
 
+# Centralised log directory — mounted at /deployment/ from the host.
+LOG_DIR = os.path.join('/deployment', 'logs')
+
 
 def _check_disk_space(save_dir: str, threshold_gb: float) -> bool:
     """Return True if free space in save_dir is below threshold.
@@ -148,7 +151,7 @@ def create_logger(cfg: ParseConfig) -> logging.Logger:
     """Create logger instance from config."""
     logger = logging.getLogger('02_parseDicom')
     logger.handlers.clear()
-    return get_logger('02_parseDicom', f'{cfg.save_dir}/logs/')
+    return get_logger('02_parseDicom', LOG_DIR)
 
 # ------ -- --- ----------------------------- ----- ----------------- --- ---
 # Utility helpers
@@ -293,7 +296,7 @@ def _split_checkpoint_path(cfg: ParseConfig) -> str:
 SPLIT_RELOCATION_FILE = 'split_relocations.pkl'
 
 
-def _save_split_relocations(cfg: ParseConfig, relocations: list) -> None:
+def _save_split_relocations(cfg: ParseConfig, relocations: list, logger: logging.Logger) -> None:
     """Persist split relocation list alongside the split CSV so symlinks can
     be recreated on re-run even when the CSV already exists."""
     path = os.path.join(cfg.save_dir, SPLIT_RELOCATION_FILE)
@@ -301,10 +304,10 @@ def _save_split_relocations(cfg: ParseConfig, relocations: list) -> None:
         with open(path, 'wb') as f:
             pickle.dump(relocations, f)
     except Exception as e:
-        logging.getLogger(__name__).error(f'Failed to save split relocations: {e}')
+        logger.error(f'Failed to save split relocations: {e}')
 
 
-def _load_split_relocations(cfg: ParseConfig) -> Optional[list]:
+def _load_split_relocations(cfg: ParseConfig, logger: logging.Logger) -> Optional[list]:
     """Load previously saved split relocation list."""
     path = os.path.join(cfg.save_dir, SPLIT_RELOCATION_FILE)
     if not os.path.exists(path):
@@ -313,7 +316,7 @@ def _load_split_relocations(cfg: ParseConfig) -> Optional[list]:
         with open(path, 'rb') as f:
             return pickle.load(f)
     except Exception as e:
-        logging.getLogger(__name__).error(f'Failed to load split relocations: {e}')
+        logger.error(f'Failed to load split relocations: {e}')
         return None
 
 
@@ -675,14 +678,15 @@ def _split_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
     return splitter.dicom_table, pd.DataFrame(columns=data_subset.columns), splitter.temporary_relocations
 
 
-def _save_removal_worker(tup: tuple, save_dir: str) -> None:
+def _save_removal_worker(tup: tuple, save_dir: str, log_dir: str) -> None:
     """Worker for saving removal logs — called per category."""
+    worker_logger = get_logger('02_parseDicom', log_dir)
     key, item = tup
     out_path = os.path.join(save_dir, 'removal_log', f'Removed_{key}.csv')
     try:
         item.to_csv(out_path, index=False)
     except Exception as e:
-        logging.error(f'Failed to write removal log {out_path}: {e}')
+        worker_logger.error(f'Failed to write removal log {out_path}: {e}')
 
 
 def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
@@ -871,7 +875,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         else:
             logger.info(f'Processing {len(Data_subsets)} session(s)')
 
-            log_dir = os.path.join(cfg.save_dir, 'logs/')
+            log_dir = LOG_DIR
             filter_fn = functools.partial(
                 _filter_worker,
                 save_dir=cfg.save_dir,
@@ -987,7 +991,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         _atomic_write_csv(Data_table, filter_path)
 
         os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
-        save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir)
+        save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir, log_dir=LOG_DIR)
         run_function(logger, save_fn, list(removed_tables.items()),
                     Parallel=cfg.parallel, P_type='process')
 
@@ -1053,7 +1057,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         else:
             logger.info(f'Splitting {len(split_subsets)} session(s)')
 
-            split_fn = functools.partial(_split_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
+            split_fn = functools.partial(_split_worker, log_dir=LOG_DIR)
 
             for batch_start in range(0, len(split_subsets), cfg.filter_batch_size):
                 batch = split_subsets[batch_start:batch_start + cfg.filter_batch_size]
@@ -1150,11 +1154,11 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         logger.debug(f'Temp relocations example [first 3]: {temporary_relocation[:3]}')
 
         _atomic_write_csv(Data_table, split_path)
-        _save_split_relocations(cfg, temporary_relocation)
+        _save_split_relocations(cfg, temporary_relocation, logger)
     else:
         logger.info('Split table found, loading split data')
         Data_table = pd.read_csv(split_path, low_memory=False)
-        temporary_relocation = _load_split_relocations(cfg) or []
+        temporary_relocation = _load_split_relocations(cfg, logger) or []
         if temporary_relocation:
             logger.info(f'Loaded {len(temporary_relocation)} persistent split relocations')
         else:
@@ -1166,7 +1170,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
     if not os.path.exists(out_path):
         logger.info('No ordered table found, starting ordering process')
-        order_fn = functools.partial(_order_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
+        order_fn = functools.partial(_order_worker, log_dir=LOG_DIR)
 
         if cfg.resume:
             completed_ids, order_results, order_removed = _load_order_checkpoint(
@@ -1288,7 +1292,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         _relocate_worker(
             commands=temporary_relocation,
             relocations=temporary_relocation,
-            log_dir=os.path.join(cfg.save_dir, 'logs/'))
+            log_dir=LOG_DIR)
 
     if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
         logger.warning(
