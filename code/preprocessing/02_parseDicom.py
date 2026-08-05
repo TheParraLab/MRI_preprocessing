@@ -104,8 +104,8 @@ class ParseConfig:
 def build_config() -> ParseConfig:
     """Parse CLI arguments and return a ParseConfig instance."""
     parser = argparse.ArgumentParser(description='Parse DICOM data: filter, split, and order scans')
-    parser.add_argument('--multi', '-m', nargs='?', const=max(1, cpu_count()-1), type=int,
-                        help='Run with multiprocessing enabled (default: max-1 CPUs)')
+    parser.add_argument('--multi', '-m', action='store_true',
+                        help='DEPRECATED — ignored. Multiprocessing is currently disabled.')
     parser.add_argument('--save_dir', type=str, default='/FL_system/data/',
                         help='Directory to save the updated tables (default: /FL_system/data/)')
     parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv',
@@ -137,8 +137,8 @@ def build_config() -> ParseConfig:
         dir_idx=args.dir_idx,
         filter_only=args.filter_only,
         force=args.force,
-        parallel=args.multi is not None,
-        n_cpus=args.multi if args.multi is not None else cpu_count() - 1,
+        parallel=False,
+        n_cpus=0,
         profile=args.profile,
         resume=args.resume,
         filter_batch_size=args.batch_size,

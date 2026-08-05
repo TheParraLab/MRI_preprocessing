@@ -160,6 +160,8 @@ Test coverage for `01_scanDicom.py` is comprehensive (89 tests). See `test/TESTS
 
 ## TODO / Roadmap
 
+- **`02_parseDicom.py --multi` hangs after logging futures completed** — When `--multi` is passed, the script stops outputting logs after printing a handful of "Future N completed successfully" lines and remains stuck for hours. Works fine in serial mode (without `--multi`). Root cause suspected to be logger contention (`FileHandlerWithLock` / `_init_child_logger` / `QueueListener`) under `ProcessPoolExecutor`. Multiprocessing has been disabled until this is resolved.
+
 ### HIGH PRIORITY
 
 - **Self-contained Docker image with code baked in** — Currently the container only contains runtime dependencies (`PyTorch`, `numpy`, etc.) and the Python scripts are mounted from the host via volumes. For a truly deployable pipeline, the code should be copied into the image at build time so that the version of the pipeline matches the image tag.
