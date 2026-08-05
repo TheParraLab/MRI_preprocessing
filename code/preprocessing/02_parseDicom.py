@@ -1259,8 +1259,12 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            # Final assembly: reload from checkpoint so full state is available again
-            _, order_results, order_removed = _load_order_checkpoint(cfg, logger)
+            # Final assembly: merge on-disk checkpoint with whatever remains in memory
+            ckpt_ids, ckpt_results, ckpt_removed = _load_order_checkpoint(cfg, logger)
+            if ckpt_results is not None:
+                order_results = ckpt_results + order_results
+            if ckpt_removed is not None:
+                order_removed = ckpt_removed + order_removed
             order_results = [df for df in order_results if df is not None and not df.empty]
             Data_table = pd.concat(order_results).reset_index(drop=True) if order_results else pd.DataFrame()
 
