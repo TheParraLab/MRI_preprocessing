@@ -15,7 +15,10 @@ import threading
 from toolbox import ProgressBar, get_logger
 # Global variables for progress bar and lock
 Progress = None
-LOGGER = get_logger('06_genInputs', '/FL_system/data/logs/')
+# Centralised log directory — mounted at /deployment/ from the host.
+LOG_DIR = os.path.join('/deployment', 'logs')
+
+LOGGER = get_logger('06_genInputs', LOG_DIR)
 
 # argparse configuration
 parser = argparse.ArgumentParser(description='Generate model inputs from coregistered scans')
