@@ -37,14 +37,9 @@ parser.add_argument(
 args = parser.parse_args()
 # Get script name
 script_name = os.path.basename(__file__).split('.')[0]
-# Get current working directory
-script_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Centralised log directory — mounted at /deployment/ from the host.
 LOG_DIR = os.path.join('/deployment', 'logs')
-
-# Global variables for progress bar
-#Progress = None
 
 # Other global variables
 LOAD_DIR = args.scan_dir #'/FL_system/data/nifti/'
@@ -53,7 +48,6 @@ TEST = args.test is not None # If True, the script will run with a limited numbe
 if TEST:
     N_TEST = args.test
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
-PROFILE = args.profile # If True, the script will run with the profiler enabled
 DISK_SPACE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 100 GB
 #PROGRESS = False
 LOGGER = get_logger(script_name, LOG_DIR)
@@ -179,7 +173,6 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
         return
     if not check_source_files(dir):
         LOGGER.warning(f'No source files found in {dir}, saving stop flag and exiting...')
-        #set_flag(script_name, dir=LOG_DIR)
         update_progress(f'04_missing', dir.split(os.sep)[-1], dir=LOG_DIR)
         return
     if not check_disk_space(SAVE_DIR):
@@ -204,15 +197,15 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     no_pre_scan = not any(re.match(r'00\d*\.\w+', f) for f in Fils)
     if no_pre_scan:
         LOGGER.warning(f'{dir} | Pre-scan 00.nii missing, decrementing all file numbers by 1')
-    else:
-        no_pre_scan = False
 
     for ii in Fils:
         LOGGER.debug(f'{dir} | Processing: {os.path.join(dir, ii)}')
         if ii.endswith('00a.nii'):
             LOGGER.debug(f'{dir} | found 00a.nii, attempting to isolate FS sample...')
-            json_00 = json.load(open(f'{dir}/00.json'))
-            json_00a = json.load(open(f'{dir}/00a.json'))
+            with open(f'{dir}/00.json', 'r') as f:
+                json_00 = json.load(f)
+            with open(f'{dir}/00a.json', 'r') as f:
+                json_00a = json.load(f)
             LOGGER.debug(f'{dir} | 00_desc: {json_00["SeriesDescription"]}')
             LOGGER.debug(f'{dir} | 00a_desc: {json_00a["SeriesDescription"]}')  
             if 'FS' in json_00['SeriesDescription']:
@@ -310,9 +303,7 @@ if __name__ == '__main__':
         except Exception as e:
             LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
     
-    #clear_flag('04_saveRAS', dir=LOG_DIR)
-
-    # Load IDs to filter by (if --ids_file provided)
+    # Get IDs to process if file specified
     ids_to_process = None
     if args.ids_file is not None:
         with open(args.ids_file, 'r') as f:
