@@ -183,8 +183,9 @@ case "$RUNTIME" in
       echo "Using Docker: ${COMPOSE_FILE}"
     fi
 
-    # Add deployment log volume to pass through compose env
-    export DEPLOY_LOG_DIR
+    COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}-${DEPLOYMENT_ID}"
+    CONTAINER_NAME="control-${DEPLOYMENT_ID}"
+    export COMPOSE_PROJECT_NAME CONTAINER_NAME DEPLOY_LOG_DIR
     ${COMPOSE_CMD} -p "${COMPOSE_PROJECT_NAME}" -f "${COMPOSE_FILE}" up --build
     ;;
 

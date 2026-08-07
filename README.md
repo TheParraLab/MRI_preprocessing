@@ -48,7 +48,6 @@ MRI_preprocessing/
 ├── code/test/               # Unit and integration tests
 ├── docs/                    # Code reviews and improvement recommendations
 ├── start_control.sh         # Container startup script
-├── access_preprocessing.sh  # Direct CLI access to container
 ├── install.py               # Docker + NVIDIA toolkit installer (Linux)
 ├── mount_kirbyPro.sh        # Machine-specific mount script
 ├── requirements.txt         # Python runtime dependencies
@@ -94,17 +93,17 @@ cp .env.example .env
 bash start_control.sh
 ```
 
-The script auto-detects Docker, Singularity/Apptainer, or Conda and starts accordingly. Each run creates a timestamped deployment log in `deployments/`.
+The script auto-detects Docker, Singularity/Apptainer, or Conda and starts accordingly. Each run creates a timestamped deployment log in `deployments/`. With Docker, each invocation gets a unique container name (`control-<timestamp>`), so **multiple containers can run concurrently**.
 
 ### Direct Container Access
 
-While the container is running:
+Find your container name with `docker ps | grep mri_control-`, then attach:
 
 ```bash
-bash access_preprocessing.sh
+docker exec -it <container_name> bash
 ```
 
-This opens an interactive shell inside the container. Navigate to `/FL_system/code/preprocessing/` to run preprocessing scripts.
+Navigate to `/FL_system/code/preprocessing/` to run preprocessing scripts.
 
 ### Running Preprocessing Steps
 
