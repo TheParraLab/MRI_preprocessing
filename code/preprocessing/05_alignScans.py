@@ -42,7 +42,10 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-LOGGER = get_logger('05_alignScans', f'{BASE_PATH}/data/logs/')
+# Centralised log directory — mounted at /deployment/ from the host.
+LOG_DIR = os.path.join('/deployment', 'logs')
+
+LOGGER = get_logger('05_alignScans', LOG_DIR)
 
 # Define necessary directories
 LOAD_DIR = args.load_dir
