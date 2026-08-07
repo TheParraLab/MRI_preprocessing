@@ -40,6 +40,9 @@ script_name = os.path.basename(__file__).split('.')[0]
 # Get current working directory
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
+# Centralised log directory — mounted at /deployment/ from the host.
+LOG_DIR = os.path.join('/deployment', 'logs')
+
 # Global variables for progress bar
 #Progress = None
 
@@ -53,11 +56,7 @@ PARALLEL = args.multi is not None # If True, the script will run with multiproce
 PROFILE = args.profile # If True, the script will run with the profiler enabled
 DISK_SPACE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 100 GB
 #PROGRESS = False
-print(script_dir)
-print(script_dir.split(os.sep)[:-2])
-logging_dir = f'{f"{os.sep}".join(script_dir.split(os.sep)[:-2])}{os.sep}data{os.sep}logs{os.sep}'
-LOGGER = get_logger(script_name, logging_dir)
-LOGGER.info(f'Initialized logger at {logging_dir}')
+LOGGER = get_logger(script_name, LOG_DIR)
 
 #### Preprocessing | Step 4: Save RAS Nifti Files ####
 # This script is for taking the semi-processed nifti files and saving them into RAS
@@ -172,20 +171,20 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     # It saves the RAS files in the output directory
 
     _check_stop()
-    if check_flag(script_name, logging_dir):
+    if check_flag(script_name, LOG_DIR):
         LOGGER.warning(f'Flag {script_name} is set, exiting...')
         return
-    if check_progress(script_name, dir.split(os.sep)[-1], dir=logging_dir):
+    if check_progress(script_name, dir.split(os.sep)[-1], dir=LOG_DIR):
         LOGGER.warning(f'{dir} is present in progress file, skipping...')
         return
     if not check_source_files(dir):
         LOGGER.warning(f'No source files found in {dir}, saving stop flag and exiting...')
-        #set_flag(script_name, dir=logging_dir)
-        update_progress(f'04_missing', dir.split(os.sep)[-1], dir=logging_dir)
+        #set_flag(script_name, dir=LOG_DIR)
+        update_progress(f'04_missing', dir.split(os.sep)[-1], dir=LOG_DIR)
         return
     if not check_disk_space(SAVE_DIR):
         LOGGER.warning(f'Not enough disk space in {SAVE_DIR}, saving stop flag and exiting...')
-        set_flag(script_name, dir=logging_dir)
+        set_flag(script_name, dir=LOG_DIR)
         return
     
     
@@ -284,7 +283,7 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
         progress_name = f'{script_name}_{args.dir_idx}'
     else:
         progress_name = f'{script_name}'
-    update_progress(progress_name, dir.split(os.sep)[-1], dir=logging_dir)
+    update_progress(progress_name, dir.split(os.sep)[-1], dir=LOG_DIR)
     return 'completed'
 
 
@@ -311,7 +310,7 @@ if __name__ == '__main__':
         except Exception as e:
             LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
     
-    #clear_flag('04_saveRAS', dir=logging_dir)
+    #clear_flag('04_saveRAS', dir=LOG_DIR)
 
     # Load IDs to filter by (if --ids_file provided)
     ids_to_process = None
@@ -332,7 +331,7 @@ if __name__ == '__main__':
             run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', P_role='io', stop_flag=stop_flag)
         except KeyboardInterrupt:
             LOGGER.info('Interrupted. Progress files and completed directories are safe to resume.')
-            compile_progress(script_name, dir=logging_dir)
+            compile_progress(script_name, dir=LOG_DIR)
             raise
     else:
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
@@ -347,12 +346,12 @@ if __name__ == '__main__':
             run_function(LOGGER, RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', P_role='io', stop_flag=stop_flag)
         except KeyboardInterrupt:
             LOGGER.info('Interrupted. Progress files and completed directories are safe to resume.')
-            compile_progress(script_name, dir=logging_dir)
+            compile_progress(script_name, dir=LOG_DIR)
             raise
 
     if args.dir_idx is None or args.dir_idx == len(Dirs) - 1:
         LOGGER.info('Compiling progress file')
-        compile_progress(script_name, dir=logging_dir)
+        compile_progress(script_name, dir=LOG_DIR)
 
     LOGGER.info('Completed saveRAS: Step 04')
     LOGGER.info('All files saved to RAS directory')
