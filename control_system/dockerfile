@@ -1,30 +1,45 @@
 # MRI preprocessing container image
 # Usage:
-#   docker build -t mri_preprocessing -f control_system/dockerfile control_system/
-#   docker run --gpus all -e PROJECT_DIRECTORY_PATH=/path/to/project -e DATA_DIRECTORY_PATH=/path/to/raw \
-#     -it -v ${PROJECT_DIRECTORY_PATH}:/FL_system -v ${DATA_DIRECTORY_PATH}:/FL_system/data/raw \
+#   docker build -t mri_preprocessing:tag -f control_system/dockerfile .
+#   docker run --gpus all \
+#     -v ${DATA_DIRECTORY_PATH}:/FL_system/data/raw \
+#     -v ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti \
+#     -v ${RAS_DIRECTORY_PATH}:/FL_system/data/RAS \
+#     -v ${COREG_DIRECTORY_PATH}:/FL_system/data/coreg \
+#     -v ${INPUTS_DIRECTORY_PATH}:/FL_system/data/inputs \
 #     mri_preprocessing bash
 
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
 
+# System dependencies
 RUN apt-get update && \
-    apt-get install -y python3-pip python3-dev git cmake g++ build-essential && \
+    apt-get install -y python3-pip python3-dev git cmake g++ build-essential dcm2niix && \
     rm -rf /var/lib/apt/lists/* && \
     if [ ! -L /usr/bin/python ] && [ ! -e /usr/bin/python ]; then \
         ln -s /usr/bin/python3 /usr/bin/python; \
     fi
 
-RUN apt-get update && apt-get install -y dcm2niix && rm -rf /var/lib/apt/lists/*
+# Python dependencies
+RUN pip install --no-cache-dir --timeout 120 --retries 5 \
+    pydicom numpy pandas nibabel scipy yappi pytest
 
-# Clone niftyreg at build time (source only, compilation at runtime for GPU access)
-# NiftyReg needs GPU access at build time to compile CUDA code—unavailable in docker build.
+# Clone niftyreg source (compiled at runtime for GPU access)
 RUN git clone --branch v2.0.0 https://github.com/KCL-BMEIS/niftyreg.git /niftyreg-src
 
-RUN pip install --no-cache-dir --timeout 120 --retries 5 pydicom numpy pandas nibabel scipy yappi
+# Bake all project code into the image
+WORKDIR /FL_system
+COPY .gitignore ./
+COPY code/ ./code/
+COPY 04_06_helper.py ./
+COPY requirements.txt ./
+COPY requirements-dev.txt ./
+COPY pytest.ini ./
 
-WORKDIR /FL_system/code/preprocessing
-
-# Install niftyreg with CUDA at container start (requires --gpus or --gpus all for GPU access)
-COPY scripts/install_niftyreg_runtime.sh /usr/local/bin/install_niftyreg_runtime.sh
+# NiftyReg runtime installer
+COPY control_system/scripts/install_niftyreg_runtime.sh /usr/local/bin/install_niftyreg_runtime.sh
 RUN chmod +x /usr/local/bin/install_niftyreg_runtime.sh
+
+COPY control_system/startup.sh /usr/local/bin/startup.sh
+RUN chmod +x /usr/local/bin/startup.sh
+
 CMD ["/usr/local/bin/install_niftyreg_runtime.sh"]

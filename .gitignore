@@ -40,3 +40,5 @@ tools/**/comparison_findings/*
 
 # Deployment logs (generated per run)
 deployments/
+code/tools/data_checksum_analysis/comparison_findings/
+code/tools/data_checksum_analysis/scan_results/

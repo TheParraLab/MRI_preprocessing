@@ -1,0 +1,40 @@
+name: Docker Build & Push
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - "control_system/dockerfile"
+      - "control_system/**"
+      - "code/**"
+      - "requirements*.txt"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set tag from release or branch
+        id: meta
+        run: |
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "MRI_TAG=latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "MRI_TAG=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to Forgejo registry
+        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin "${{ secrets.REGISTRY_URL }}"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag "${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" \
+            --file control_system/dockerfile .
+
+      - name: Push Docker image
+        run: |
+          docker push "${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}"

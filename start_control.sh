@@ -46,13 +46,17 @@ done < "$ENV_FILE"
 # ── Validate required paths ─────────────────────────────────────
 required_vars=(
   COMPOSE_PROJECT_NAME
-  PROJECT_DIRECTORY_PATH
   DATA_DIRECTORY_PATH
   NIFTI_DIRECTORY_PATH
   RAS_DIRECTORY_PATH
   COREG_DIRECTORY_PATH
   INPUTS_DIRECTORY_PATH
 )
+
+optional_reg_vars=(REGISTRY_URL IMAGE_REPOSITORY IMAGE_TAG)
+for var in "${optional_reg_vars[@]}"; do
+  export "${var:-}"
+done
 
 missing_deps=()
 for var in "${required_vars[@]}"; do
@@ -80,8 +84,8 @@ cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
   "deployment_id": "${DEPLOYMENT_ID}",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "runtime_env_file": "${ENV_FILE}",
+  "image": "${REGISTRY_URL:-}:${IMAGE_REPOSITORY:-mri_preprocessing}:${IMAGE_TAG:-latest}",
   "paths": {
-    "project": "${PROJECT_DIRECTORY_PATH}",
     "raw_data": "${DATA_DIRECTORY_PATH}",
     "nifti": "${NIFTI_DIRECTORY_PATH}",
     "ras": "${RAS_DIRECTORY_PATH}",
@@ -186,37 +190,37 @@ case "$RUNTIME" in
 
   singularity|apptainer)
     SIF_IMAGE="./control_system/mri_preprocessing.sif"
+    REGISTRY_REF="${REGISTRY_URL:-}:${IMAGE_REPOSITORY:-mri_preprocessing}:${IMAGE_TAG:-latest}"
 
     if [ ! -f "$SIF_IMAGE" ]; then
-      echo ""
-      echo "ERROR: Singularity image not found at $SIF_IMAGE"
-      echo ""
-      echo "To deploy on HPC sites, pull from an existing Docker/OCI image:"
-      echo ""
-      echo "  ${RUNTIME} pull mri_preprocessing.sif docker://<your-image>:tag"
-      echo ""
-      echo "Then copy the .sif file to control_system/ on your HPC site."
-      echo ""
-      exit 1
+      echo "No local .sif found. Pulling from registry: ${REGISTRY_REF}"
+      "${RUNTIME}" pull "$SIF_IMAGE" "docker://${REGISTRY_REF}" || {
+        echo ""
+        echo "ERROR: Failed to pull image from ${REGISTRY_REF}"
+        echo "Check that the registry URL is correct and accessible."
+        exit 1
+      }
+      echo "Image cached at ${SIF_IMAGE}"
     fi
 
     Binds=(
-      "${PROJECT_DIRECTORY_PATH}:/FL_system"
       "${DATA_DIRECTORY_PATH}:/FL_system/data/raw"
       "${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti"
       "${RAS_DIRECTORY_PATH}:/FL_system/data/RAS"
       "${COREG_DIRECTORY_PATH}:/FL_system/data/coreg"
       "${INPUTS_DIRECTORY_PATH}:/FL_system/data/inputs"
-      "${DEPLOY_LOG_DIR}:/FL_system/logs/deployments/${DEPLOYMENT_ID}"
+      "${DEPLOY_LOG_DIR}:/deployment/"
     )
 
     bind_str=$(IFS=','; echo "${Binds[*]}")
 
     echo "Using ${RUNTIME} with image: $SIF_IMAGE"
-    echo "Binding:"
+    echo "Registry reference: ${REGISTRY_REF}"
+    echo "Bindings:"
     for b in "${Binds[@]}"; do echo "  ${b}"; done
     echo ""
-    echo "Once the prompt appears, run your pipeline scripts inside the container:"
+    echo "Pipeline scripts are baked into the image."
+    echo "Once the prompt appears, run:"
     echo "  python code/preprocessing/01_scanDicom.py --scan-dir /FL_system/data/raw --save-dir /FL_system/data"
     echo "  bash code/preprocessing/00_preprocess.sh              (runs all steps)"
     echo ""
@@ -225,7 +229,6 @@ case "$RUNTIME" in
       --bind "$bind_str" \
       -e DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH" \
       -e NIFTI_DIRECTORY_PATH="$NIFTI_DIRECTORY_PATH" \
-      -e PROJECT_DIRECTORY_PATH="$PROJECT_DIRECTORY_PATH" \
       "$SIF_IMAGE" bash
     ;;
 

@@ -30,12 +30,12 @@ jobs:
 
       - name: Run unit tests (01_scanDicom)
         run: |
-          python -m pytest test/test_scanDicom_unit.py -v
+          python -m pytest code/test/test_scanDicom_unit.py -v
 
       - name: Run full tests (01_scanDicom + 02_parseDicom)
         run: |
-          python -m pytest test/test_scanDicom_full.py -v
+          python -m pytest code/test/test_scanDicom_full.py -v
 
       - name: Run synthetic known-result tests (01 + 02 deterministic verification)
         run: |
-          python -m pytest test/test_synthetic_known_result.py -v
+          python -m pytest code/test/test_synthetic_known_result.py -v

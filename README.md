@@ -45,7 +45,7 @@ MRI_preprocessing/
 │   ├── docker-compose-wsl.yml  # WSL compose file
 │   ├── startup.sh           # Container entrypoint
 │   └── README.md            # Container documentation
-├── test/                    # Unit and integration tests
+├── code/test/               # Unit and integration tests
 ├── docs/                    # Code reviews and improvement recommendations
 ├── start_control.sh         # Container startup script
 ├── access_preprocessing.sh  # Direct CLI access to container
@@ -144,19 +144,19 @@ Intermediate outputs:
 
 ```bash
 # Run all tests
-pytest test/ -v
+pytest -v
 
 # Run unit tests only (fastest)
-pytest test/test_scanDicom_unit.py -v
+pytest code/test/test_scanDicom_unit.py -v
 
 # Run comprehensive tests
-pytest test/test_scanDicom_full.py -v
+pytest code/test/test_scanDicom_full.py -v
 
 # Run deterministic known-result tests
-pytest test/test_synthetic_known_result.py -v
+pytest code/test/test_synthetic_known_result.py -v
 ```
 
-Test coverage for `01_scanDicom.py` is comprehensive (89 tests). See `test/TESTS.md` for the full test suite documentation.
+Test coverage for `01_scanDicom.py` is comprehensive (89 tests). See `code/test/TESTS.md` for the full test suite documentation.
 
 ## TODO / Roadmap
 

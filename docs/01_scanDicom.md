@@ -97,9 +97,9 @@ If `<save_dir>/checkpoints/` cannot be created (e.g., permission issue on shared
 
 | Suite | Tests | Scope |
 |-------|-------|-------|
-| `test/test_scanDicom_unit.py` | 6 | Path resolution, config parsing, logger creation, checkpoint I/O |
-| `test/test_scanDicom_full.py` (Groups A–B) | 26 | Full directory scanning + metadata extraction |
-| `test/test_scanDicom_integration.py` | 1 | End-to-end pipeline behavior with synthetic data |
+| `code/test/test_scanDicom_unit.py` | 6 | Path resolution, config parsing, logger creation, checkpoint I/O |
+| `code/test/test_scanDicom_full.py` (Groups A–B) | 26 | Full directory scanning + metadata extraction |
+| `code/test/test_scanDicom_integration.py` | 1 | End-to-end pipeline behavior with synthetic data |
 
 **Total:** 33/33 passing.
 
