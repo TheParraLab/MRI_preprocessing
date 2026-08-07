@@ -190,8 +190,8 @@ case "$RUNTIME" in
     ;;
 
   singularity|apptainer)
-    SIF_IMAGE="./control_system/mri_preprocessing.sif"
-    REGISTRY_REF="${REGISTRY_URL:-}:${IMAGE_REPOSITORY:-mri_preprocessing}:${IMAGE_TAG:-latest}"
+    SIF_IMAGE="${SIF_PATH:-./control_system/mri_preprocessing.sif}"
+    REGISTRY_REF="${REGISTRY_URL:-}/${IMAGE_REPOSITORY:-mri_preprocessing}:${IMAGE_TAG:-latest}"
 
     if [ ! -f "$SIF_IMAGE" ]; then
       echo "No local .sif found. Pulling from registry: ${REGISTRY_REF}"
@@ -227,7 +227,9 @@ case "$RUNTIME" in
     echo ""
 
     ${RUNTIME} exec \
+      --nv \
       --bind "$bind_str" \
+      --pwd /FL_system \
       -e DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH" \
       -e NIFTI_DIRECTORY_PATH="$NIFTI_DIRECTORY_PATH" \
       "$SIF_IMAGE" bash
