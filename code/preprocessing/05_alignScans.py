@@ -14,6 +14,9 @@ from toolbox import ProgressBar, get_logger, run_function
 
 BASE_PATH = '/FL_system'
 
+_GPU_CHECK_INTERVAL = 10
+_gpu_calls_since_check = 0
+
 # Define command line arguments
 parser = argparse.ArgumentParser(
     description='Align scans to the first post scan')
@@ -66,6 +69,18 @@ def _check_stop():
         raise KeyboardInterrupt('Shutdown requested')
 
 
+def _check_gpu_health():
+    """Verify GPU is still accessible. Raises RuntimeError if not."""
+    _res = subprocess.run(
+        ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    if _res.returncode != 0 or not _res.stdout.strip():
+        raise RuntimeError(
+            f'GPU health check failed (exit {_res.returncode}): '
+            f'{_res.stderr.strip()}')
+
+
 def align(session_dir: str, save_dir: str):
     """Coregister all scans in *session_dir* to the first post reference scan.
 
@@ -105,7 +120,6 @@ def align(session_dir: str, save_dir: str):
     reference = src_files[1]
     LOGGER.debug(f'Using {reference} as reference for coregistration')
 
-    # Coregister all scans except the reference
     session_failed = False
     for f in src_files[:1] + src_files[2:]:
         _check_stop()
@@ -129,6 +143,24 @@ def align(session_dir: str, save_dir: str):
                 os.remove(out_file)
             session_failed = True
             break
+
+        global _gpu_calls_since_check
+        _gpu_calls_since_check += 1
+        if _gpu_calls_since_check >= _GPU_CHECK_INTERVAL:
+            try:
+                _check_gpu_health()
+                _gpu_calls_since_check = 0
+                LOGGER.info('GPU health check passed at scan '
+                            f'{os.path.basename(f)}')
+            except RuntimeError as e:
+                LOGGER.critical(
+                    f'GPU health check failed in session '
+                    f'{session_dir.split(os.sep)[-1]}: {e}. Purging and '
+                    f'aborting.')
+                if os.path.exists(out_dir):
+                    shutil.rmtree(out_dir)
+                    LOGGER.info(f'Deleted partial output: {out_dir}')
+                raise
 
     if session_failed:
         LOGGER.error(
