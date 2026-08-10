@@ -1,6 +1,7 @@
 import os
 import queue
 import random
+import shutil
 import argparse
 import glob
 import pickle
@@ -105,6 +106,7 @@ def align(session_dir: str, save_dir: str):
     LOGGER.debug(f'Using {reference} as reference for coregistration')
 
     # Coregister all scans except the reference
+    session_failed = False
     for f in src_files[:1] + src_files[2:]:
         _check_stop()
         dest = os.path.join(out_dir, os.path.basename(f)).replace('.nii', '')
@@ -125,6 +127,16 @@ def align(session_dir: str, save_dir: str):
                 f'{os.path.basename(f)}: {e}')
             if os.path.exists(out_file):
                 os.remove(out_file)
+            session_failed = True
+            break
+
+    if session_failed:
+        LOGGER.error(
+            f'Purging incomplete session output directory: {out_dir}')
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir)
+            LOGGER.info(f'Deleted: {out_dir}')
+        return 'failed'
 
     # Copy reference scan into output directory unchanged
     reference_dst = os.path.join(out_dir, os.path.basename(reference))
