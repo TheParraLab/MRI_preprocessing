@@ -758,7 +758,7 @@ if __name__ == '__main__':
                     yappi.stop()
                     profile_output_path = os.path.join(_ensure_profile_dir(cfg), 'step01_profile.yappi')
                     yappi.get_func_stats().save(profile_output_path, type='pstat')
-                return
+                sys.exit(1)
 
             tables = [t for t in os.listdir(tmp_save_dir) if t.endswith('.csv')]
             logger.info(f'All workers done, compiling {len(tables)} tables')
