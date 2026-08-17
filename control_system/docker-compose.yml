@@ -6,11 +6,12 @@ services:
       dockerfile: control_system/dockerfile
     runtime: nvidia
     volumes:
-      - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
-      - ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti
-      - ${RAS_DIRECTORY_PATH}:/FL_system/data/RAS
-      - ${COREG_DIRECTORY_PATH}:/FL_system/data/coreg
-      - ${INPUTS_DIRECTORY_PATH}:/FL_system/data/inputs
+      - ../data:/FL_system/data                           # base: Data_table*.csv, scratch/
+      - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw         # overlays raw/
+      - ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti      # overlays nifti/
+      - ${RAS_DIRECTORY_PATH}:/FL_system/data/RAS           # overlays RAS/
+      - ${COREG_DIRECTORY_PATH}:/FL_system/data/coreg       # overlays coreg/
+      - ${INPUTS_DIRECTORY_PATH}:/FL_system/data/inputs     # overlays inputs/
       - ${DEPLOY_LOG_DIR}:/deployment/
     environment:
       - CONTAINER_NAME
