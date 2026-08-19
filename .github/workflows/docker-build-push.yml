@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set tag from release or branch
+      - name: Set tags
         id: meta
         run: |
           if [[ "${{ github.ref_name }}" == "main" ]]; then
@@ -38,3 +38,7 @@ jobs:
       - name: Push Docker image
         run: |
           docker push "${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
+          IMAGE="${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing"
+          echo ""
+          echo "✅ On the HPC, pull with:"
+          echo "   apptainer pull $IMAGE.sif docker://${IMAGE}:${{ steps.meta.outputs.MRI_TAG }}"
