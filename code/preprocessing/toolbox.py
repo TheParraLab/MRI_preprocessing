@@ -191,6 +191,23 @@ class _LoggerProxy(logging.Logger):
 
 # ---- Public API ------------------------------------------------------------
 
+def get_log_dir() -> str:
+    """Centralised log directory for the current deployment.
+
+    Resolves in order:
+      1. ``LOG_DIR`` environment variable — set by start_control.sh for every
+         runtime (container-mounted ``/deployment/logs`` inside Docker and
+         Singularity; a host-local deployment log dir on bare Conda HPC).
+      2. Fallback for manual/local runs: ``<repo_root>/logs`` so that log
+         creation never requires write access to the filesystem root.
+    """
+    env_log_dir = os.environ.get('LOG_DIR', '').strip()
+    if env_log_dir:
+        return env_log_dir
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(repo_root, 'logs')
+
+
 def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     """Create a logger that is fast under high concurrency.
 
@@ -203,12 +220,13 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     or a previous call), return the existing proxy immediately so workers calling
     get_logger() on every invocation do NOT spawn new queues or threads."""
 
-    if save_dir:
-        if save_dir[-1] != '/':
-            save_dir += '/'
-        os.makedirs(save_dir, exist_ok=True)
+    if not save_dir:
+        save_dir = get_log_dir()
+    if save_dir[-1] != '/':
+        save_dir += '/'
+    os.makedirs(save_dir, exist_ok=True)
 
-   # --- underlying Logger (managed by Python's logging system) ---------------
+    # --- underlying Logger (managed by Python's logging system) ---------------
     logger = logging.getLogger(name)
 
     # file_path must always be defined before either path hits it (original code

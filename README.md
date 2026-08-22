@@ -164,7 +164,7 @@ Test coverage for `01_scanDicom.py` is comprehensive (89 tests). See `code/test/
 ### HIGH PRIORITY
 
 - **Self-contained Docker image with code baked in** — Currently the container only contains runtime dependencies (`PyTorch`, `numpy`, etc.) and the Python scripts are mounted from the host via volumes. For a truly deployable pipeline, the code should be copied into the image at build time so that the version of the pipeline matches the image tag.
-- **Per-deployment script logging** — Currently all preprocessing steps write `.log` files into a shared `<save_dir>/logs/` directory. Refactor `toolbox.get_logger()` to read an optional `LOG_DIR` environment variable, defaulting to `/FL_system/deploy_logs/$DEPLOYMENT_ID`, so that each deployment run produces its own isolated log set rather than overwriting a shared location.
+- ~~**Per-deployment script logging**~~ (done) — `toolbox.get_log_dir()` now resolves the log directory from the `LOG_DIR` environment variable, which `start_control.sh` sets to `/deployment/logs` for Docker and Singularity runs (bound to `deployments/<deployment-id>/logs/` on the host) and to a host-local `deployments/<deployment-id>/logs/` for bare Conda runs. Manual/local runs fall back to `<repo_root>/logs`. All six pipeline steps use this helper, so every deployment produces its own isolated log set under `deployments/<id>/`.
 
 ### MEDIUM PRIORITY
 

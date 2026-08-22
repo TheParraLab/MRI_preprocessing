@@ -58,11 +58,12 @@ except ImportError:
     yappi = None
 
 # Custom imports
-from toolbox import get_logger, run_function
+from toolbox import get_log_dir, get_logger, run_function
 from DICOM import DICOMfilter, DICOMorder, DICOMsplit
 
-# Centralised log directory — mounted at /deployment/ from the host.
-LOG_DIR = os.path.join('/deployment', 'logs')
+# Centralised log directory — resolves to /deployment/logs inside containers
+# (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
+LOG_DIR = get_log_dir()
 
 
 def _check_disk_space(save_dir: str, threshold_gb: float) -> bool:

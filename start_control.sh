@@ -185,6 +185,8 @@ case "$RUNTIME" in
 
     COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}-${DEPLOYMENT_ID}"
     CONTAINER_NAME="control-${DEPLOYMENT_ID}"
+    # Inside the container the deployment dir is mounted at /deployment.
+    export LOG_DIR="/deployment/logs"
     export COMPOSE_PROJECT_NAME CONTAINER_NAME DEPLOY_LOG_DIR
     ${COMPOSE_CMD} -p "${COMPOSE_PROJECT_NAME}" -f "${COMPOSE_FILE}" up --build
     ;;
@@ -232,12 +234,16 @@ case "$RUNTIME" in
       --pwd /FL_system \
       -e DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH" \
       -e NIFTI_DIRECTORY_PATH="$NIFTI_DIRECTORY_PATH" \
+      -e LOG_DIR="/deployment/logs" \
       "$SIF_IMAGE" bash
     ;;
 
   conda|mamba)
     ENV_YML="${script_directory}/environment.yml"
     ENV_NAME="${CONDA_ENV_NAME:-mri_preproc}"
+
+    # Host-local deployment log dir (no container mount for bare conda runs).
+    export LOG_DIR="${DEPLOY_LOG_DIR}/logs"
 
     if [[ -n "${CONDA_DEFAULT_ENV:-}" && "${CONDA_DEFAULT_ENV}" == "${ENV_NAME}" ]]; then
       echo "Conda env ${ENV_NAME} already active."

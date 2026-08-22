@@ -137,7 +137,8 @@ def build_config() -> ScanConfig:
 # ---------------------------------------------------------------------------
 
 def create_logger(cfg: ScanConfig) -> logging.Logger:
-    return get_logger('01_scanDicom', f'{cfg.save_dir}/logs/')
+    # Deployment-isolated logs; see toolbox.get_log_dir() for resolution order.
+    return get_logger('01_scanDicom')
 
 
 # ---------------------------------------------------------------------------

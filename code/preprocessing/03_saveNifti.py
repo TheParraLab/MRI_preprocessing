@@ -22,7 +22,8 @@ from DICOM import DICOMfilter, DICOMorder
 manager = Manager()
 disk_space_lock = Lock()
 #progress_queue = manager.Queue()
-LOGGER = get_logger('03_saveNifti', '/FL_system/data/logs/')
+# Deployment-isolated logs; see toolbox.get_log_dir() for resolution order.
+LOGGER = get_logger('03_saveNifti')
 
 # Define necessary directories
 LOAD_DIR = '/FL_system/data/' # Location to load the constructed Data_table_timing.csv ['/FL_system/data/']

@@ -15,8 +15,9 @@ import threading
 from toolbox import ProgressBar, get_logger
 # Global variables for progress bar and lock
 Progress = None
-# Centralised log directory — mounted at /deployment/ from the host.
-LOG_DIR = os.path.join('/deployment', 'logs')
+# Centralised log directory — resolves to /deployment/logs inside containers
+# (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
+LOG_DIR = get_log_dir()
 
 LOGGER = get_logger('06_genInputs', LOG_DIR)
 

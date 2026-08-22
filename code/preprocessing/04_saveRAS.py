@@ -38,8 +38,9 @@ args = parser.parse_args()
 # Get script name
 script_name = os.path.basename(__file__).split('.')[0]
 
-# Centralised log directory — mounted at /deployment/ from the host.
-LOG_DIR = os.path.join('/deployment', 'logs')
+# Centralised log directory — resolves to /deployment/logs inside containers
+# (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
+LOG_DIR = get_log_dir()
 
 # Other global variables
 LOAD_DIR = args.scan_dir #'/FL_system/data/nifti/'

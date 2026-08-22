@@ -46,8 +46,9 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-# Centralised log directory — mounted at /deployment/ from the host.
-LOG_DIR = os.path.join('/deployment', 'logs')
+# Centralised log directory — resolves to /deployment/logs inside containers
+# (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
+LOG_DIR = get_log_dir()
 
 LOGGER = get_logger('05_alignScans', LOG_DIR)
 
