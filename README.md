@@ -163,7 +163,7 @@ Test coverage for `01_scanDicom.py` is comprehensive (89 tests). See `code/test/
 
 ### HIGH PRIORITY
 
-- **Self-contained Docker image with code baked in** — Currently the container only contains runtime dependencies (`PyTorch`, `numpy`, etc.) and the Python scripts are mounted from the host via volumes. For a truly deployable pipeline, the code should be copied into the image at build time so that the version of the pipeline matches the image tag.
+- ~~**Self-contained Docker image with code baked in**~~ (done) — Code is `COPY`'d into the image at build time and CUDA-enabled NiftyReg is compiled at build time (`CHECK_GPU=OFF` skips the configure-time GPU probe so the build works on GPU-less machines/CI; builds for sm_60–sm_86 + PTX). Containers start immediately — no first-run compile — which also makes Singularity/Apptainer pulls work on read-only container filesystems.
 - ~~**Per-deployment script logging**~~ (done) — `toolbox.get_log_dir()` now resolves the log directory from the `LOG_DIR` environment variable, which `start_control.sh` sets to `/deployment/logs` for Docker and Singularity runs (bound to `deployments/<deployment-id>/logs/` on the host) and to a host-local `deployments/<deployment-id>/logs/` for bare Conda runs. Manual/local runs fall back to `<repo_root>/logs`. All six pipeline steps use this helper, so every deployment produces its own isolated log set under `deployments/<id>/`.
 
 ### MEDIUM PRIORITY

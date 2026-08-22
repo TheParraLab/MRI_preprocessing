@@ -23,8 +23,25 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir --timeout 120 --retries 5 \
     pydicom numpy pandas nibabel scipy yappi pytest
 
-# Clone niftyreg source (compiled at runtime for GPU access)
-RUN git clone --branch v2.0.0 https://github.com/KCL-BMEIS/niftyreg.git /niftyreg-src
+# NiftyReg with CUDA — compiled at BUILD time so the same image tag always
+# ships the same compiled binary (reproducible deploys, no per-run compile
+# cost, and Singularity/Apptainer pulls work on read-only container fs).
+#
+# CHECK_GPU=OFF skips niftyreg's configure-time probe that runs a CUDA binary
+# to detect a card; without it, the build fails in GPU-less containers (CI /
+# any docker build environment) because CMake silently turns USE_CUDA OFF.
+# With the probe off, niftyreg compiles native code for sm_60..sm_86 plus PTX
+# for newer GPUs (V100/T4/A100/A40/RTX-30-class all covered).
+RUN git clone --branch v2.0.0 --depth 1 https://github.com/KCL-BMEIS/niftyreg.git /niftyreg-src && \
+    cmake -S /niftyreg-src -B /niftyreg-build -DUSE_CUDA=ON -DCHECK_GPU=OFF -DCMAKE_BUILD_TYPE=Release && \
+    make -C /niftyreg-build -j"$(nproc)" && \
+    make -C /niftyreg-build install && \
+    ldconfig && \
+    if ldd /usr/local/bin/reg_f3d | grep -q cuda; then \
+        echo "NiftyReg build OK: CUDA libraries linked"; \
+    else \
+        echo "ERROR: reg_f3d built WITHOUT CUDA — this image is broken" && exit 1; \
+    fi
 
 # Bake all project code into the image
 WORKDIR /FL_system
@@ -35,11 +52,12 @@ COPY requirements.txt ./
 COPY requirements-dev.txt ./
 COPY pytest.ini ./
 
-# NiftyReg runtime installer
+# Diagnostic helper: verify GPU + prebuilt NiftyReg, or force a rebuild if needed.
+# Kept in the image for troubleshooting; NOT part of the startup path.
 COPY control_system/scripts/install_niftyreg_runtime.sh /usr/local/bin/install_niftyreg_runtime.sh
 RUN chmod +x /usr/local/bin/install_niftyreg_runtime.sh
 
 COPY control_system/startup.sh /usr/local/bin/startup.sh
 RUN chmod +x /usr/local/bin/startup.sh
 
-CMD ["/usr/local/bin/install_niftyreg_runtime.sh"]
+CMD ["/usr/local/bin/startup.sh"]
