@@ -95,7 +95,7 @@ from conftest import (
 )
 
 # ---- Dynamically load 01_scanDicom.py ----
-proj_root = Path(__file__).resolve().parents[1]
+proj_root = Path(__file__).resolve().parents[2]
 scan_path = proj_root / "code" / "preprocessing" / "01_scanDicom.py"
 spec = importlib.util.spec_from_file_location("scan_module", str(scan_path))
 scan = importlib.util.module_from_spec(spec)

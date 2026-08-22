@@ -14,9 +14,9 @@ import pytest
 # ---- Module loading --------------------------------------------------------
 
 from pathlib import Path
-proj_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[2]
 import sys
-sys.path.insert(0, str(proj_root / "code" / "preprocessing"))
+sys.path.insert(0, str(repo_root / "code" / "preprocessing"))
 import toolbox as _tb  # type: ignore[import-not-found]
 
 

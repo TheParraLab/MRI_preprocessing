@@ -49,8 +49,8 @@ from functools import partial
 # ``_process_worker`` live in a proper module namespace and are picklable for
 # ProcessPoolExecutor workers.
 
-proj_root = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(proj_root / "code" / "preprocessing"))
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root / "code" / "preprocessing"))
 from toolbox import (                            # noqa: E402
     FileHandlerWithLock,
 )                                                # noqa: E402
