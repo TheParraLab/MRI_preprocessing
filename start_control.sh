@@ -86,6 +86,80 @@ image_ref() {
   fi
 }
 
+# ── Deployment finalizer (runs on exit / Ctrl-C) ────────────────
+# All supported runtimes spawn a long-lived foreground process, so sessions
+# normally end with a signal; the EXIT trap is the one place we can reliably
+# record what actually ran. Appends a "runtime" section to the manifest with
+# the runtime-resolved identity (image ID / sif / env), complementing the
+# *intended* reference written at start.
+deployment_finalize() {
+  [ "${FINALIZED:-false}" = true ] && return 0
+  FINALIZED=true
+
+  local manifest="${DEPLOY_LOG_DIR:-}/manifest.json"
+  [ -n "${DEPLOY_LOG_DIR:-}" ] || return 0
+  [ -f "$manifest" ] || return 0
+  command -v python3 &>/dev/null || return 0
+  [ -n "${RUNTIME:-}" ] || return 0
+
+  local image_id="unresolved" sif_bytes=0 env_sha="none"
+  case "$RUNTIME" in
+    docker|docker-compose)
+      if [ -n "${CONTAINER_NAME:-}" ] && docker inspect "${CONTAINER_NAME}" &>/dev/null; then
+        image_id=$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || echo unresolved)
+      fi
+      python3 - "$manifest" "docker" "${CONTAINER_NAME:-}" "${COMPOSE_PROJECT_NAME:-}" "$image_id" <<'PYEOF'
+import json, sys
+path, rtype, container, project, image_id = sys.argv[1:6]
+m = json.load(open(path))
+m["runtime"] = {
+    "type": rtype,
+    "container_name": container or None,
+    "compose_project": project or None,
+    "resolved_image_id": image_id,
+}
+with open(path, "w") as f:
+    json.dump(m, f, indent=2)
+    f.write("\n")
+PYEOF
+      ;;
+    singularity|apptainer)
+      [ -f "${SIF_IMAGE:-}" ] && sif_bytes=$(stat -c %s "${SIF_IMAGE}" 2>/dev/null || echo 0)
+      python3 - "$manifest" "$RUNTIME" "${SIF_IMAGE:-}" "$sif_bytes" <<'PYEOF'
+import json, sys
+path, rtype, sif, size = sys.argv[1:5]
+m = json.load(open(path))
+m["runtime"] = {
+    "type": rtype,
+    "sif_path": sif or None,
+    "sif_bytes": int(size),
+}
+with open(path, "w") as f:
+    json.dump(m, f, indent=2)
+    f.write("\n")
+PYEOF
+      ;;
+    conda|mamba)
+      if [ -f "${project_directory_path}/environment.yml" ]; then
+        env_sha=$(sha256sum "${project_directory_path}/environment.yml" | awk '{print $1}')
+      fi
+      python3 - "$manifest" "$RUNTIME" "${CONDA_ENV_NAME:-mri_preproc}" "$env_sha" <<'PYEOF'
+import json, sys
+path, rtype, env_name, env_sha = sys.argv[1:5]
+m = json.load(open(path))
+m["runtime"] = {
+    "type": rtype,
+    "conda_env": env_name,
+    "environment_yml_sha256": env_sha,
+}
+with open(path, "w") as f:
+    json.dump(m, f, indent=2)
+    f.write("\n")
+PYEOF
+      ;;
+  esac
+}
+
 # ── Create timestamped deployment log directory ─────────────────
 DEPLOYMENT_ID=$(date +%Y%m%d_%H%M%S)
 DEPLOY_LOG_DIR="${project_directory_path}/deployments/${DEPLOYMENT_ID}"
@@ -128,6 +202,9 @@ MANIFEST
 cp "$ENV_FILE" "${DEPLOY_LOG_DIR}/.env.snapshot"
 
 export DEPLOY_LOG_DIR
+# Record the runtime-resolved identity of what actually ran (image ID, sif,
+# conda env) in the manifest when this session ends — normally via Ctrl-C.
+trap 'deployment_finalize' EXIT INT TERM
 echo "Deployment log: ${DEPLOY_LOG_DIR}"
 echo ""
 
