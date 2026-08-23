@@ -1,7 +1,11 @@
-pytest>=7.0
-pydicom>=2.3
-pytest-cov
-numpy
-pandas
-scipy
-matplotlib
+-r requirements.txt
+
+# Testing
+pytest==9.1.1
+pytest-cov==7.1.0
+
+# Diagnostic tooling and local-only visualization (code/tools/, coreg utils);
+# not required by the preprocessing pipeline itself.
+# 3.10.x is the latest series supporting Python 3.10 (image/CI lower bound).
+matplotlib==3.10.7
+tqdm==4.70.0

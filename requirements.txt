@@ -1,20 +1,22 @@
 # General runtime requirements for MRI_preprocessing
+#
+# Pins match the verified 1.0 container image (pip freeze of
+# mri_preprocessing, Python 3.10) — do not loosen without rebuilding the
+# image and re-running the pipeline verification.
 # For development and testing see `requirements-dev.txt`.
 
-numpy>=1.23
-pandas>=1.5
-scipy>=1.9
-matplotlib>=3.5
-pydicom>=2.3
-nibabel>=3.2
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+pydicom==3.0.2
+nibabel==5.4.2
 
-# Optional utilities that may be used by scripts/tests
-tqdm>=4.60
+# Optional profiling for 01/02 (--profile); guarded import, pinned here so the
+# feature works identically in Docker and conda deployments.
+yappi==1.7.6
 
-# Note: the web control UI (under `control_system/app`) is Docker-only and
-# its dependencies (Flask, Flask-SocketIO, etc.) are intentionally not listed
-# here. If you run the web UI outside Docker you'll need to install those
-# packages separately inside an environment managed by you.
 # Notes:
-# - Testing and development tools (pytest, pytest-cov, etc.) are listed in requirements-dev.txt
-# - Pin versions more tightly for reproducible deployments if desired
+# - matplotlib / tqdm are NOT pipeline runtime dependencies; they are used by
+#   diagnostic tooling (code/tools/) and are listed in requirements-dev.txt.
+# - Testing and development tools (pytest, pytest-cov, etc.) are listed in
+#   requirements-dev.txt.

@@ -19,9 +19,15 @@ RUN apt-get update && \
         ln -s /usr/bin/python3 /usr/bin/python; \
     fi
 
-# Python dependencies
+# Python dependencies — installed from the repo's pinned manifests, copied
+# early so this layer (and the NiftyReg build below it) only rebuilds when the
+# pins change. requirements.txt = pipeline runtime deps; requirements-dev.txt
+# adds test + tooling extras used by code/test and code/tools (both are part
+# of the image so the in-image test suite matches what CI runs).
+WORKDIR /FL_system
+COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir --timeout 120 --retries 5 \
-    pydicom numpy pandas nibabel scipy yappi pytest
+        -r requirements.txt -r requirements-dev.txt
 
 # NiftyReg with CUDA — compiled at BUILD time so the same image tag always
 # ships the same compiled binary (reproducible deploys, no per-run compile
@@ -44,12 +50,9 @@ RUN git clone --branch v2.0.0 --depth 1 https://github.com/KCL-BMEIS/niftyreg.gi
     fi
 
 # Bake all project code into the image
-WORKDIR /FL_system
 COPY .gitignore ./
 COPY code/ ./code/
 COPY 04_06_helper.py ./
-COPY requirements.txt ./
-COPY requirements-dev.txt ./
 COPY pytest.ini ./
 
 # Diagnostic helper: verify GPU + prebuilt NiftyReg, or force a rebuild if needed.
