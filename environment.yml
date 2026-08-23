@@ -3,14 +3,17 @@ channels:
   - conda-forge
   - defaults
 
+# Pins mirror requirements.txt / the verified release container image (Python
+# 3.10) so bare-Conda HPC runs behave identically to Docker/Singularity.
+# Update both together when dependencies change.
 dependencies:
-  - python=3
-  - pydicom
-  - numpy
-  - pandas
-  - nibabel
-  - scipy
-  - yappi
-  - dcm2niix
-  - pytest>=7
-  - pytest-cov>=3
+  - python=3.10
+  - numpy=2.2.6
+  - pandas=2.3.3
+  - scipy=1.15.3
+  - pydicom=3.0.2
+  - nibabel=5.4.2
+  - yappi=1.7.6
+  - dcm2niix=1.0.20260416
+  - pytest=9.1.1
+  - pytest-cov=7.1.0
