@@ -73,6 +73,19 @@ if [ ${#missing_deps[@]} -gt 0 ]; then
   exit 1
 fi
 
+# ── Build the intended image reference ───────────────────────────
+# Registry URL is optional (e.g. local Docker build-and-run); only prefix it
+# when set so the result is always a well-formed reference.
+image_ref() {
+  local repo="${IMAGE_REPOSITORY:-mri_preprocessing}"
+  local tag="${IMAGE_TAG:-latest}"
+  if [ -n "${REGISTRY_URL:-}" ]; then
+    echo "${REGISTRY_URL%/}/${repo}:${tag}"
+  else
+    echo "${repo}:${tag}"
+  fi
+}
+
 # ── Create timestamped deployment log directory ─────────────────
 DEPLOYMENT_ID=$(date +%Y%m%d_%H%M%S)
 DEPLOY_LOG_DIR="${project_directory_path}/deployments/${DEPLOYMENT_ID}"
@@ -84,7 +97,7 @@ cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
   "deployment_id": "${DEPLOYMENT_ID}",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "runtime_env_file": "${ENV_FILE}",
-  "image": "${REGISTRY_URL:-}:${IMAGE_REPOSITORY:-mri_preprocessing}:${IMAGE_TAG:-latest}",
+  "image": "$(image_ref)",
   "paths": {
     "raw_data": "${DATA_DIRECTORY_PATH}",
     "nifti": "${NIFTI_DIRECTORY_PATH}",
@@ -193,7 +206,7 @@ case "$RUNTIME" in
 
   singularity|apptainer)
     SIF_IMAGE="${SIF_PATH:-./control_system/mri_preprocessing.sif}"
-    REGISTRY_REF="${REGISTRY_URL:-}/${IMAGE_REPOSITORY:-mri_preprocessing}:${IMAGE_TAG:-latest}"
+    REGISTRY_REF="$(image_ref)"
 
     if [ ! -f "$SIF_IMAGE" ]; then
       echo "No local .sif found. Pulling from registry: ${REGISTRY_REF}"
