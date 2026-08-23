@@ -91,6 +91,18 @@ DEPLOYMENT_ID=$(date +%Y%m%d_%H%M%S)
 DEPLOY_LOG_DIR="${project_directory_path}/deployments/${DEPLOYMENT_ID}"
 mkdir -p "$DEPLOY_LOG_DIR"
 
+# Record which source tree this deployment started from.
+# (The runtime-detected image/container identity is appended later at exit,
+# see deployment_finalize().)
+GIT_COMMIT="unknown"
+GIT_DIRTY=true
+if git -C "$project_directory_path" rev-parse --git-dir &>/dev/null; then
+  GIT_COMMIT=$(git -C "$project_directory_path" rev-parse HEAD)
+  if [ -z "$(git -C "$project_directory_path" status --porcelain)" ]; then
+    GIT_DIRTY=false
+  fi
+fi
+
 # Write a minimal manifest so deployments can be audited later
 cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
 {
@@ -98,6 +110,10 @@ cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "runtime_env_file": "${ENV_FILE}",
   "image": "$(image_ref)",
+  "source": {
+    "git_commit": "${GIT_COMMIT}",
+    "git_dirty": ${GIT_DIRTY}
+  },
   "paths": {
     "raw_data": "${DATA_DIRECTORY_PATH}",
     "nifti": "${NIFTI_DIRECTORY_PATH}",
