@@ -681,26 +681,37 @@ class DICOMfilter():
                matches vendor-neutral positive/negative tokens using word-boundary and
                negative-lookahead groups to suppress substring false positives:
 
-                * FS inside FSPGR, OFFSET, TRANSVERSE → ignored
-                * SAT inside SATURATION / SATURATED   → ignored
-                * ``WE`` excluded (too generic; appears in unrelated contexts)
+                 * FS inside FSPGR, OFFSET, TRANSVERSE → ignored
+                 * T1FS / T1 fs (no space)             → matched deliberately
+                 * SAT inside SATURATION / SATURATED   → ignored
+                 * ``WE`` excluded (too generic; appears in unrelated contexts)
 
-            3. Negation tokens co-appearing on the same row are logged but do NOT override
-               a positive match — a Dixon water series may read "SPAIR NON-FS fat" and we
-               want to keep it as a positive. A *standalone* negation with no counter-token
-               will force ``FatSaturated = False``.
+            3. A negation token co-occurring with a positive one on the same row FORCES
+               ``FatSaturated = False`` — an explicit "non fs" / "not fat sat" /
+               "no fat" statement is the strongest evidence and always wins (e.g.
+               a Dixon water series reading "SPAIR NON-FS fat" is non-fat-saturated).
+
+        The three resulting states matter downstream: ``True`` = positively marked
+        fat-saturated, ``False`` = explicitly NOT fat-saturated (must never be used as
+        a pre-contrast baseline for kinetics), ``NaN`` = no FS marking at all
+        (ambiguous — policy decided by the gate in :meth:`removeNonFSScans`).
 
         ----------
         Positive indicators
-            Generic:   FS, FATSAT, FAT_SAT, FAT SAT, SPAIR, SPIR, CHESS, STIR, PROSET
-            GE:        VIBRANT, IDEAL, SPECIAL  (FSPGR excluded by \\b on FS above)
+            Generic:   FS, T1FS (no space), F/S, FATSAT, FAT_SAT, FAT SAT, SPAIR, SPIR,
+                       CHESS, STIR, PROSET
+            GE:        VIBRANT, IDEAL, SPECIAL  (FSPGR excluded by boundary rules above)
             Siemens:   VIBE, FL3D, TIRM, _W/_F suffix (Dixon water image), DIXON
             Philips:   THRIVE, eTHRIVE, mDixon, SPAIR
 
         ----------
-        Negative indicators
-            NON FS, NOFS, NO FAT SAT, NNFS, WOFS, T1 ONLY, WITHOUT FS/FAT.
-            These have highest precedence only when NOT paired with a positive token.
+        Negative indicators (require the negator adjacent to a fat/fs term)
+            (NON|NO|NOT|WO|W.O) + [space/hyphen] + FS | FATSAT | FAT SAT  (e.g. "non fs",
+            "not fat sat", "non-fat sat", "w/o fat sat") and bare "NON/NO FAT".
+            Standalone: NNFS, WOFS, T1 ONLY.
+
+        Patterns are maintained against the real production corpus — see
+        code/test/test_detect_fs.py for the regression matrix.
 
         Side effect: sets ``self.dicom_table['FatSaturated']`` as bool | NaN.
         """
@@ -719,30 +730,41 @@ class DICOMfilter():
             r'''(?x)
                \b(?:
                   # Generic fat suppression technique names
-                   fat\s*sat  |  fatsat  |  spair  |  spir  |  chess  |  stir  |  proset
+                    fat\s*sat  |  fatsat  |  spair  |  spir  |  chess  |  stir  |  proset
                   # Word-boundary FS (excludes FSPGR, OFFSET, TRANSVERSE…)
-               |  \bfs\b
+                |  \bfs\b
+                  # Corpus forms: "T1FS" (no space) and "f/s" (written with a slash);
+                  # boundaries keep FSPGR / F/S variants safe.
+                |  t1\s*fs\b
+                |  f[/-]s(?=[\s,),;]|$)
                   # Bounded SAT (negative look-ahead strips SATURATION / SATURATED)
-               |  \bsat\b(?!\s*(?:ation|urated))
+                |  \bsat\b(?!\s*(?:ation|urated))
                   # GE-specific (VIBRANT, IDEAL, SPECIAL)
-               |  \b(?:vibran(?:t)?|ideal(?:\w*)?|special)\w*
+                |  \b(?:vibran(?:t)?|ideal(?:\w*)?|special)\w*
                   # Siemens sequence families (VIBE, FL3D, TIRM)
-               |  \b(?:vibe|fl3d|tirm)\w*
-                       # Dixon variants: mDixon, DIXON, eTHRIVE / THRIVE
-               |  \b(?:m?dixon|ethriv|thriv)\w*
-               )
-            ''',
+                |  \b(?:vibe|fl3d|tirm)\w*
+                        # Dixon variants: mDixon, DIXON, eTHRIVE / THRIVE
+                |  \b(?:m?dixon|ethriv|thriv)\w*
+                    )
+             ''',
             regex=True, na=False,
         )
 
-        # Negative pattern (post-normalization) -------------------------
+       # Negative pattern (post-normalization) -------------------------
+        # A negator must sit directly adjacent to a fat/fs term (arbitrary
+        # space/hyphen/dot in between): "non fs", "not fat sat", "non-fat sat".
+        # "no fatigue" / "fatty" do NOT match (word boundaries). A standalone
+        # "... no/non/not [without] FAT" is the corpus idiom for non-fat-saturated
+        # (verified against production descriptions). This is the unambiguous
+        # non-fat-saturated signal — it always wins over positive tokens.
         has_neg = desc_n.str.contains(
             r'''(?x)
-               \b(?:
-                  non\s*(?:fs|fat.?sat)\s*         |  no\s*(?:fs|fat\s*sat)\s*
-               |  nnfs                              |  wofs\s*
-                  |  t1\s+only
-               )
+                \b(?:non|no|not|w[/.]?o)[-\./\s]*(?:fs\b | f[/-]s\b | fat\s*[-.\s]?sat\w*)
+              | without[\s\-]+(?:fat\s*[-.\s]?sat\w* | fs\b | f[/-]s\b)
+              | \b(?:non|no|not|without)[\s\-]+fat\b   # standalone "... no/non FAT" idiom (corpus-verified)
+              | \bnnfs\b                                  # legacy standalone forms
+              | \bwofs(?=\s|$)
+              | t1\s+only
             ''',
             regex=True, na=False,
         )
