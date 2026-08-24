@@ -471,14 +471,67 @@ class DICOMfilter():
         self.dicom_table = self.dicom_table.drop(to_remove)
         return self.dicom_table
 
+    @staticmethod
+    def _treat_unknown_as_saturated() -> bool:
+        """Policy for UNMARKED rows (no FS evidence in the description).
+
+        Controlled by the ``TREAT_UNKNOWN_AS_SATURATED`` environment variable
+        (default: true, i.e. keep unmarked rows). Rationale for the default:
+        the acquisition protocol expects all dynamic series to be fat-saturated
+        and explicit "non fs" marking is reliable in this corpus, so a missing
+        marker is absence of counter-evidence rather than evidence against.
+        Set to false for strict mode (keep only positively marked rows).
+        """
+        return os.environ.get('TREAT_UNKNOWN_AS_SATURATED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+
     def removeNonFSScans(self):
-        """Detects fat saturation, then removes rows that are explicitly non-fat-saturated."""
+        """Remove rows that are non-fat-saturated for the kinetic pipeline.
+
+        Explicitly NON-fat-saturated rows (``FatSaturated == False``) are ALWAYS
+        removed under both policies — they can never serve as a pre-contrast
+        baseline for slope calculation. UNMARKED rows (``NaN``, no FS evidence
+        in the description) follow the ``TREAT_UNKNOWN_AS_SATURATED`` policy
+        (see :meth:`_treat_unknown_as_saturated`).
+
+        Emits one audit line per session with the pos/neg/unknown counts so it
+        is always possible to see what was kept and why, deployment log included.
+        """
         self.detect_fs()
-        mask = self.dicom_table['FatSaturated'] != True
+        fs_state = self.dicom_table['FatSaturated'].astype(object)
+        n_pos = int((fs_state == True).sum())
+        n_neg = int((fs_state == False).sum())
+        n_unk = int(pd.isna(fs_state).sum())
+
+        keep_unknown = self._treat_unknown_as_saturated()
+        if keep_unknown:
+            mask = fs_state == False          # lenient: drop only explicit non-FS
+        else:
+            mask = fs_state != True           # strict: require positive evidence
+
         self.removed['Non_FS'].append(self.dicom_table.loc[mask])
         n_removed = int(mask.sum())
         self.dicom_table = self.dicom_table.loc[~mask].reset_index(drop=True)
-        self.logger.debug(f'Removed {n_removed} non-fat-saturated scans | {self.Session_ID}')
+
+        if keep_unknown:
+            self.logger.debug(
+                f'[FS gate] lenient | pos={n_pos} neg={n_neg} unknown_kept={n_unk} '
+                f'removed={n_removed} kept={len(self.dicom_table)} | {self.Session_ID}')
+            if n_pos == 0 and n_unk > 0 and n_neg == 0:
+                self.logger.warning(
+                    f'[FS gate] No positively fat-saturated marked scans; session relies on '
+                    f'{n_unk} unmarked series (TREAT_UNKNOWN_AS_SATURATED=true) | {self.Session_ID}')
+        else:
+            self.logger.debug(
+                f'[FS gate] strict | pos={n_pos} neg={n_neg} unknown_dropped={n_unk} '
+                f'removed={n_removed} kept={len(self.dicom_table)} | {self.Session_ID}')
+            if n_unk > 0:
+                top = self.removed['Non_FS'][-1].loc[
+                    pd.isna(self.removed['Non_FS'][-1]['FatSaturated']), 'Series_desc'] \
+                    .astype(str).value_counts().head(3)
+                self.logger.warning(
+                    f'[FS gate] strict policy removed {n_unk} unmarked rows, e.g. ' +
+                    '; '.join(f"'{d}'×{cnt}" for d, cnt in top.items()) +
+                    f' | {self.Session_ID}')
         return self.dicom_table
 
     def majorSide(self):

@@ -21,6 +21,7 @@ Run with: pytest code/test/test_detect_fs.py -v
 import sys
 from pathlib import Path
 
+import logging
 import numpy as np
 import pandas as pd
 import pytest
@@ -182,3 +183,83 @@ AMBIGUOUS_DESCRIPTIONS = [
 @pytest.mark.parametrize("desc", AMBIGUOUS_DESCRIPTIONS)
 def test_unmarked_desc_is_nan(desc):
     assert np.isnan(_one(desc)), f"{desc!r} must remain unmarked"
+
+
+# ---------------------------------------------------------------------------
+# 6. Gate policy (removeNonFSScans) — switch behaviour on a mixed session
+# ---------------------------------------------------------------------------
+
+def _session(descs, monkeypatch, policy=None):
+    """Build a session and apply the FS gate under an explicit policy."""
+    if policy is not None:
+        monkeypatch.setenv('TREAT_UNKNOWN_AS_SATURATED', policy)
+    df = pd.DataFrame({
+        'Series_desc': list(descs),
+        'Modality': ['T1'] * len(descs),
+        'SessionID': ['S1'] * len(descs),
+        'Lat': ['Unknown'] * len(descs),
+        'NumSlices': [160] * len(descs),
+        'Type': ["['ORIGINAL', 'PRIMARY']"] * len(descs),
+    })
+    f = DICOMfilter(df)
+    kept = f.removeNonFSScans()
+    return f, kept
+
+
+def _kept_descs(kept):
+    return set(kept['Series_desc'].astype(str))
+
+
+MIXED_SESSION = [
+    "Axial T1 FS pre",          # True  - always kept
+    "T1 non fat sat",           # False - ALWAYS dropped
+    "T1 Sagittal not fat sat",  # False (regression) - ALWAYS dropped
+    "T1 Sagittal post",         # NaN (ambiguous)
+]
+
+
+def test_gate_default_is_lenient(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.delenv('TREAT_UNKNOWN_AS_SATURATED', raising=False)
+    f, kept = _session(MIXED_SESSION, monkeypatch, policy=None)
+    got = _kept_descs(kept)
+    assert got == {"Axial T1 FS pre", "T1 Sagittal post"}, got
+    # audit line present with counts
+    assert any('[FS gate] lenient' in r.message and 'pos=1 neg=2 unknown_kept=1' in r.message for r in caplog.records), \
+        [r.message for r in caplog.records if 'FS gate' in r.message]
+
+
+def test_gate_strict_drops_unmarked(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    f, kept = _session(MIXED_SESSION, monkeypatch, policy='false')
+    got = _kept_descs(kept)
+    assert got == {"Axial T1 FS pre"}, got
+    assert any('[FS gate] strict' in r.message and 'unknown_dropped=1' in r.message for r in caplog.records), \
+        [r.message for r in caplog.records if 'FS gate' in r.message]
+
+
+def test_gate_false_is_unconditional(monkeypatch):
+    # Explicit non-FS must never survive, whatever the policy says
+    f_l, kept_l = _session(MIXED_SESSION, monkeypatch, policy='true')
+    f_s, kept_s = _session(MIXED_SESSION, monkeypatch, policy='false')
+    for kept in (kept_l, kept_s):
+        assert not kept['Series_desc'].str.contains('non fat sat|not fat sat', case=False).any()
+
+
+def test_gate_no_marked_rows_warns(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    # Session entirely unmarked under lenient policy: kept, with a warning naming the policy
+    f, kept = _session(["T1 Sagittal post", "LOC"], monkeypatch, policy='true')
+    assert len(kept) == 2
+    assert any('[FS gate] No positively fat-saturated marked scans' in r.message for r in caplog.records), \
+        [r.message for r in caplog.records if 'FS gate' in r.message]
+
+
+def test_policy_flag_parsing(monkeypatch):
+    cls = DICOMfilter
+    for val, expect in [('true', True), ('TRUE', True), ('1', True), ('yes', True),
+                        ('false', False), ('0', False), ('no', False), ('off', False)]:
+        monkeypatch.setenv('TREAT_UNKNOWN_AS_SATURATED', val)
+        assert cls._treat_unknown_as_saturated() is expect, f"{val!r} parsed as {expect}"
+    monkeypatch.delenv('TREAT_UNKNOWN_AS_SATURATED', raising=False)
+    assert cls._treat_unknown_as_saturated() is True, "default must be lenient"
