@@ -397,6 +397,106 @@ class DICOMextract:
             self.log_error('Unable to read PatientBirthDate', e)
             return self.UNKNOWN
         
+# ---------------------------------------------------------------------------
+# Fat-saturation classification — module-level so EVERY downstream consumer
+# (step-02 gate, step-04 dual-pre tie-break, step-06 alignment prioritisation)
+# shares one implementation instead of private heuristics.
+#
+# Two-pass approach:
+#   1. Raw description: Siemens-style _W/_F suffix (Dixon water image).
+#   2. Normalized description (lowercase; whitespace/underscores collapsed to a
+#      single space): vendor-neutral positive/negative tokens matched with
+#      word-boundary and negative-lookahead rules so that
+#        - FS inside FSPGR / OFFSET / TRANSVERSE  -> ignored
+#        - T1FS (no space) and f/s (slash form)   -> matched deliberately
+#        - SAT inside SATURATION / SATURATED      -> ignored
+#
+# A negative token on the same row FORCES non-FS: an explicit "non fs" /
+# "not fat sat" / "no fat" statement is the strongest evidence and wins over
+# any positive token. Patterns were validated against the production corpus
+# (~1.08M T1 rows, 350k unique descriptions) — see code/test/test_detect_fs.py
+# for the regression matrix.
+#
+# Result semantics: True = positively marked FS; False = explicitly non-FS
+# (never usable as a pre-contrast kinetics baseline); NaN = no marking at all
+# (ambiguous — policy decided by DICOMfilter.removeNonFSScans).
+# ---------------------------------------------------------------------------
+
+FS_POSITIVE_RE = re.compile(r'''(?x)
+    \b(?:
+       # Generic fat suppression technique names
+         fat\s*sat  |  fatsat  |  spair  |  spir  |  chess  |  stir  |  proset
+       # Word-boundary FS (excludes FSPGR, OFFSET, TRANSVERSE…)
+     | \bfs\b
+       # Corpus forms: "T1FS" (no space) and "f/s" (written with a slash);
+       # lookahead keeps parenthesised "(f/s)" safe.
+     | t1\s*fs\b
+     | f[/-]s(?=[\s,),;]|$)
+       # Bounded SAT (negative look-ahead strips SATURATION / SATURATED)
+     | \bsat\b(?!\s*(?:ation|urated))
+       # GE-specific (VIBRANT, IDEAL, SPECIAL)
+     | \b(?:vibran(?:t)?|ideal(?:\w*)?|special)\w*
+       # Siemens sequence families (VIBE, FL3D, TIRM) and Dixon variants
+     | \b(?:vibe|fl3d|tirm)\w*
+     | \b(?:m?dixon|ethriv|thriv)\w*
+    )''')
+
+# A negator must sit directly adjacent to a fat/fs term ("non fs", "not fat
+# sat", "non-fat sat"); "no fatigue" / "fatty" do NOT match (word boundary).
+FS_NEGATIVE_RE = re.compile(r'''(?x)
+    \b(?:non|no|not|w[/.]?o)[-\./\s]*(?:fs\b | f[/-]s\b | fat\s*[-.\s]?sat\w*)
+  | without[\s\-]+(?:fat\s*[-.\s]?sat\w* | fs\b | f[/-]s\b)
+  | \b(?:non|no|not|without)[\s\-]+fat\b   # standalone "... no/non FAT" idiom (corpus-verified)
+  | \bnnfs\b                                # legacy standalone forms
+  | \bwofs(?=\s|$)
+  | t1\s+only''')
+
+# Siemens-style water/fat suffix that normalization would destroy.
+FS_SIEMENS_WF_RE = re.compile(r'(?i)[^a-zA-Z]?_[WF]\b')
+
+
+def classify_fs(desc):
+    """Classify one SeriesDescription as fat-saturated.
+
+    Returns ``True`` (positively marked), ``False`` (explicitly non-FS — the
+    verdict is unconditional; a negative always wins conflicts) or ``None``
+    (no FS evidence at all — ambiguous; the *policy* for such rows lives in
+    :meth:`DICOMfilter.removeNonFSScans`).
+    """
+    raw = '' if desc is None else str(desc)
+    desc_n = _normalize_desc_for_fs(raw)
+    if FS_NEGATIVE_RE.search(desc_n):
+        return False
+    if FS_POSITIVE_RE.search(desc_n) or FS_SIEMENS_WF_RE.search(raw):
+        return True
+    return None
+
+
+def classify_fs_series(series):
+    """Vectorised :func:`classify_fs` over a column of descriptions.
+
+    Returns an object-dtype Series with True / False / NaN entries, indexed
+    like the input, so it can be assigned straight onto a DataFrame column."""
+    import numpy as _np
+    raw = series.astype(str)
+    desc_n = raw.str.lower().str.replace(r'[\s_]+', ' ', regex=True)
+    neg = desc_n.str.contains(FS_NEGATIVE_RE.pattern, regex=True, na=False)
+    pos = (desc_n.str.contains(FS_POSITIVE_RE.pattern, regex=True, na=False)
+           | raw.str.contains(FS_SIEMENS_WF_RE.pattern, regex=True, na=False))
+    vals = _np.empty(len(series), dtype=object)   # explicit object: True/False/nan stay Python types
+    vals[~(pos | neg).values] = _np.nan
+    vals[pos.values & ~neg.values] = True
+    vals[neg.values] = False                     # negative always wins
+    return pd.Series(vals, index=series.index, dtype=object)
+
+
+def _normalize_desc_for_fs(s):
+    """Collapse whitespace/underscores and case for vendor-agnostic matching.
+
+    'Axial  T1  Fat Sat   Post' -> 'axial t1 fat sat post'. Scalars only —
+    use :func:`classify_fs_series` for columns."""
+    return re.sub(r'[\s_]+', ' ', str(s).lower())
+
 class DICOMfilter():
     """
     Class to filter a DataFrame of DICOM metadata corresponding to a single SessionID.
@@ -718,127 +818,27 @@ class DICOMfilter():
         # This is usually the mode of all scans available, but some scans are concatenated across the entire sequence
         n_slices = df['NumSlices'].unique()
 
-    def _normalize_desc_for_fs(self, s: pd.Series) -> pd.Series:
-        """Collapse whitespace/underscores and case for vendor-agnostic matching.
-
-        'Axial  T1  Fat Sat   Post' → 'axial t1 fat sat post'
-        """
-        return s.astype(str).str.lower().str.replace(r'[\s_]+', ' ', regex=True)
     def detect_fs(self):
-        """Derive a boolean ``FatSaturated`` column from ``Series_desc``.
+        """Classify every row's ``Series_desc`` into ``FatSaturated``.
 
-        Two-pass approach:
-            1. **Pre-normalization pass** (on raw description): detects Siemens-style
-               ``_W`` / ``_F`` suffixes which would be lost if underscores are removed.
-            2. **Post-normalization pass** (lowercase, whitespace/underscores collapsed):
-               matches vendor-neutral positive/negative tokens using word-boundary and
-               negative-lookahead groups to suppress substring false positives:
+        Classification (token patterns + negation-wins conflict rule) lives in
+        the module-level function :func:`classify_fs_series` — one shared
+        implementation also used by downstream consumers (step-04 dual-pre
+        tie-break, step-06 alignment prioritisation). Corpus-verified states:
 
-                 * FS inside FSPGR, OFFSET, TRANSVERSE → ignored
-                 * T1FS / T1 fs (no space)             → matched deliberately
-                 * SAT inside SATURATION / SATURATED   → ignored
-                 * ``WE`` excluded (too generic; appears in unrelated contexts)
+            * ``True``   = positively marked fat-saturated
+            * ``False``  = explicitly non-FS (a negative always wins conflicts)
+            * ``NaN``    = no FS marking at all (ambiguous — the gate in
+                           :meth:`removeNonFSScans` decides those rows' fate)
 
-            3. A negation token co-occurring with a positive one on the same row FORCES
-               ``FatSaturated = False`` — an explicit "non fs" / "not fat sat" /
-               "no fat" statement is the strongest evidence and always wins (e.g.
-               a Dixon water series reading "SPAIR NON-FS fat" is non-fat-saturated).
-
-        The three resulting states matter downstream: ``True`` = positively marked
-        fat-saturated, ``False`` = explicitly NOT fat-saturated (must never be used as
-        a pre-contrast baseline for kinetics), ``NaN`` = no FS marking at all
-        (ambiguous — policy decided by the gate in :meth:`removeNonFSScans`).
-
-        ----------
-        Positive indicators
-            Generic:   FS, T1FS (no space), F/S, FATSAT, FAT_SAT, FAT SAT, SPAIR, SPIR,
-                       CHESS, STIR, PROSET
-            GE:        VIBRANT, IDEAL, SPECIAL  (FSPGR excluded by boundary rules above)
-            Siemens:   VIBE, FL3D, TIRM, _W/_F suffix (Dixon water image), DIXON
-            Philips:   THRIVE, eTHRIVE, mDixon, SPAIR
-
-        ----------
-        Negative indicators (require the negator adjacent to a fat/fs term)
-            (NON|NO|NOT|WO|W.O) + [space/hyphen] + FS | FATSAT | FAT SAT  (e.g. "non fs",
-            "not fat sat", "non-fat sat", "w/o fat sat") and bare "NON/NO FAT".
-            Standalone: NNFS, WOFS, T1 ONLY.
-
-        Patterns are maintained against the real production corpus — see
-        code/test/test_detect_fs.py for the regression matrix.
-
-        Side effect: sets ``self.dicom_table['FatSaturated']`` as bool | NaN.
+        See code/test/test_detect_fs.py for the regression matrix.
         """
-        raw_desc = self.dicom_table['Series_desc'].astype(str)
+        self.dicom_table['FatSaturated'] = classify_fs_series(self.dicom_table['Series_desc'])
 
-        # --- Pre-normalization: Siemens _W / _F suffixes ---------------
-        siemens_wf = raw_desc.str.contains(
-            r'(?i)[^a-zA-Z]?_[WF]\b',   # e.g. "DIXON_F", "LAVA_W"
-        )
-
-        # --- Normalized copy for word-boundary matching -----------------
-        desc_n = self._normalize_desc_for_fs(self.dicom_table['Series_desc'])
-
-        # Positive pattern (post-normalization) -------------------------
-        has_pos = desc_n.str.contains(
-            r'''(?x)
-               \b(?:
-                  # Generic fat suppression technique names
-                    fat\s*sat  |  fatsat  |  spair  |  spir  |  chess  |  stir  |  proset
-                  # Word-boundary FS (excludes FSPGR, OFFSET, TRANSVERSE…)
-                |  \bfs\b
-                  # Corpus forms: "T1FS" (no space) and "f/s" (written with a slash);
-                  # boundaries keep FSPGR / F/S variants safe.
-                |  t1\s*fs\b
-                |  f[/-]s(?=[\s,),;]|$)
-                  # Bounded SAT (negative look-ahead strips SATURATION / SATURATED)
-                |  \bsat\b(?!\s*(?:ation|urated))
-                  # GE-specific (VIBRANT, IDEAL, SPECIAL)
-                |  \b(?:vibran(?:t)?|ideal(?:\w*)?|special)\w*
-                  # Siemens sequence families (VIBE, FL3D, TIRM)
-                |  \b(?:vibe|fl3d|tirm)\w*
-                        # Dixon variants: mDixon, DIXON, eTHRIVE / THRIVE
-                |  \b(?:m?dixon|ethriv|thriv)\w*
-                    )
-             ''',
-            regex=True, na=False,
-        )
-
-       # Negative pattern (post-normalization) -------------------------
-        # A negator must sit directly adjacent to a fat/fs term (arbitrary
-        # space/hyphen/dot in between): "non fs", "not fat sat", "non-fat sat".
-        # "no fatigue" / "fatty" do NOT match (word boundaries). A standalone
-        # "... no/non/not [without] FAT" is the corpus idiom for non-fat-saturated
-        # (verified against production descriptions). This is the unambiguous
-        # non-fat-saturated signal — it always wins over positive tokens.
-        has_neg = desc_n.str.contains(
-            r'''(?x)
-                \b(?:non|no|not|w[/.]?o)[-\./\s]*(?:fs\b | f[/-]s\b | fat\s*[-.\s]?sat\w*)
-              | without[\s\-]+(?:fat\s*[-.\s]?sat\w* | fs\b | f[/-]s\b)
-              | \b(?:non|no|not|without)[\s\-]+fat\b   # standalone "... no/non FAT" idiom (corpus-verified)
-              | \bnnfs\b                                  # legacy standalone forms
-              | \bwofs(?=\s|$)
-              | t1\s+only
-            ''',
-            regex=True, na=False,
-        )
-
-        effective_pos = has_pos | siemens_wf.values
-
-        # Conflict resolution: negation always wins.
-        # Rationale: "NON FS" explicitly states lack of suppression — the radiologist flagged it.
-        # Even if FS also appears as a substring inside the same description (e.g.  "T1 NON FS post"),
-        # the explicit cancellation is the stronger signal.
-        fs_col = np.empty(len(self.dicom_table), dtype=object)
-        fs_col[effective_pos  & ~has_neg.values]     = True    # pos only → True
-        fs_col[effective_pos  &  has_neg.values]      = False   # conflict → negation wins  
-        fs_col[~effective_pos & ~has_neg.values]      = np.nan  # neither → unknown
-        fs_col[~effective_pos &  has_neg.values]      = False   # neg only → False
-        self.dicom_table['FatSaturated'] = fs_col
-
-        ser = pd.Series(self.dicom_table['FatSaturated'])
-        n_true   = int(ser.isin([True]).sum())
-        n_false  = int(ser.isin([False]).sum())
-        n_unk    = int(ser.isna().sum())
+        fs_state = self.dicom_table['FatSaturated'].astype(object)
+        n_true   = int((fs_state == True).sum())
+        n_false  = int((fs_state == False).sum())
+        n_unk    = int(pd.isna(fs_state).sum())
         self.logger.debug(
             f'[FS] pos={n_true}  neg={n_false}  unk={n_unk} | {self.Session_ID}'
         )
@@ -1715,6 +1715,27 @@ class DICOMorder():
             self._force_pre_major()
         return self.dicom_table
 
+    def _warn_duplicate_majors(self):
+        """Loud warning (no silent mispairing) when multiple rows map to the same Major.
+
+        Files are written as '{Major:02}.nii'; two rows sharing a Major mean one
+        conversion would overwrite or collide with the other, and downstream
+        row<->file alignment cannot resolve them. Typical case: dual-pre
+        sessions (left+right breast) under the lenient fat-sat policy, where
+        every Unknown-TriTime candidate becomes Major 0.
+        """
+        if 'Major' not in self.dicom_table.columns or len(self.dicom_table) == 0:
+            return
+        ints = self.dicom_table['Major'].astype(int)
+        dup_mask = ints.duplicated(keep=False)
+        if not dup_mask.any():
+            return
+        dups = self.dicom_table.loc[dup_mask]
+        self.logger.warning(
+            f'{len(dups)} scans share Major values {sorted(set(ints[dup_mask].tolist()))} — '
+            f'file naming {{Major:02}}.nii will collide; downstream alignment treats these as '
+            f'suspect. Rows: {[(int(m), str(s)) for m, s in zip(dups["Major"], dups["Series_desc"])]} | {self.Session_ID}')
+
     def _force_pre_major(self):
         """Any row flagged as Pre_scan must have Major=0 regardless of TriTime.
 
@@ -1725,8 +1746,8 @@ class DICOMorder():
         up at Major ≥ 1 and never became 00.nii.  This method corrects those
         misassignments by forcing every Pre_scan row back to Major=0.
 
-        Only applied when the Pre_scan column is still present on the table
-        (it may have been dropped in earlier filter stages)."""
+         Only applied when the Pre_scan column is still present on the table
+        (it may be dropped in earlier filter stages)."""
         if 'Pre_scan' not in self.dicom_table.columns:
             return
         mask = self.dicom_table['Pre_scan'] == True
@@ -1737,6 +1758,12 @@ class DICOMorder():
             self.logger.info(
                 f'Pre-scan Major corrected: {corrected} → 0 | {self.Session_ID}'
             )
+
+        # Every order() exit path runs the Major assignments and then funnels
+        # through this method, so it is the single point where the final Major
+        # values are complete — surface collisions (dual-pre -> multiple rows
+        # at 0) loudly instead of letting them become silent file overwrites.
+        self._warn_duplicate_majors()
 
     def findPre(self):
         post_indx = self.dicom_table[self.dicom_table['Post_scan'] == True].index

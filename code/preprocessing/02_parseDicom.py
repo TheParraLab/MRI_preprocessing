@@ -59,7 +59,7 @@ except ImportError:
 
 # Custom imports
 from toolbox import get_log_dir, get_logger, run_function
-from DICOM import DICOMfilter, DICOMorder, DICOMsplit
+from DICOM import DICOMfilter, DICOMorder, DICOMsplit, classify_fs_series
 
 # Centralised log directory — resolves to /deployment/logs inside containers
 # (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
@@ -1283,6 +1283,22 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             logger.info('Ordering complete')
             logger.info(f'Final sessions: {len(Data_table["SessionID"].unique())}')
             logger.info(f'Final scans   : {len(Data_table)}')
+
+            # Carry the fat-saturation verdict forward: later steps (04 dual-pre
+            # tie-break, 06 alignment prioritisation) consume this column
+            # instead of re-guessing from Series_desc. Within a normal run the
+            # filter step has already stored the fresh detect_fs() result; the
+            # backfill only covers tables persisted by an older build (pre-FS-
+            # feature) that is being resumed or read by a newer one.
+            if 'FatSaturated' not in Data_table.columns:
+                logger.info('FatSaturated column absent — classifying from Series_desc')
+                Data_table['FatSaturated'] = classify_fs_series(Data_table['Series_desc'])
+
+            _n_true = int((Data_table['FatSaturated'] == True).sum())
+            _n_false = int((Data_table['FatSaturated'] == False).sum())
+            _n_unk = int(pd.isna(Data_table['FatSaturated']).sum())
+            logger.info(f'Timing table FatSaturated: true={_n_true} false={_n_false} unknown={_n_unk}')
+
             logger.info(f'Saving ordered data to {out_path}')
             _atomic_write_csv(Data_table, out_path)
     else:
