@@ -263,3 +263,79 @@ def test_policy_flag_parsing(monkeypatch):
         assert cls._treat_unknown_as_saturated() is expect, f"{val!r} parsed as {expect}"
     monkeypatch.delenv('TREAT_UNKNOWN_AS_SATURATED', raising=False)
     assert cls._treat_unknown_as_saturated() is True, "default must be lenient"
+
+
+# ---------------------------------------------------------------------------
+# 7. Shared primitives: scalar classify_fs + vectorised type semantics
+# ---------------------------------------------------------------------------
+
+def test_scalar_classify_fs_matches_series():
+    from DICOM import classify_fs, classify_fs_series
+    descs = ["Axial T1 FS pre", "T1 non fat sat", "Sag T1 f/s RIGHT", "T1FS post",
+             "T1 Sagittal not fat sat", "LOC"]
+    s = classify_fs_series(pd.Series(descs))
+    for d, v in zip(descs, s):
+        scalar = classify_fs(d)
+        if np.isnan(v):
+            assert scalar is None, f"{d!r}: series NaN but scalar {scalar!r}"
+        else:
+            assert bool(scalar) is bool(v), f"{d!r}: series {v!r} vs scalar {scalar!r}"
+
+
+def test_scalar_classify_fs_none_for_unmarked():
+    from DICOM import classify_fs
+    assert classify_fs("Axial T1") is None
+    assert classify_fs(None) is None
+    assert classify_fs("") is None
+
+
+def test_classify_fs_series_object_semantics():
+    """True/False must stay Python bools and unknowns NaN (not float 1.0/0.0),
+    so downstream 'is True' / == False checks work against the raw column."""
+    from DICOM import classify_fs_series
+    s = classify_fs_series(pd.Series(["T1 FS", "non fs", "LOC"]))
+    assert s[0] is True
+    assert s[1] is False
+    assert np.isnan(s[2])
+
+
+def test_classify_fs_series_preserves_index():
+    from DICOM import classify_fs_series
+    idx = [5, 9, 3]
+    s = classify_fs_series(pd.Series(["T1 FS", "LOC", "non fs"], index=idx))
+    assert s.index.tolist() == idx
+
+
+# ---------------------------------------------------------------------------
+# 8. Ordering: dual-pre sessions must not silently collide Major values
+# ---------------------------------------------------------------------------
+
+def _ordered_table(n_pre, logger=None):
+    from DICOM import DICOMorder
+    n = n_pre + 3
+    d = pd.DataFrame({
+        'SessionID': ['S1'] * n,
+        'TriTime': ['Unknown'] * n_pre + ['20032', '20110', '20200'],
+        'AcqTime': [str(x) for x in range(1, n + 1)],
+        'Pre_scan': [True] * n_pre + [False] * 3,
+        'Post_scan': [False] * n_pre + [True] * 3,
+        'Series_desc': [f'pre {i}' for i in range(n_pre)] + ['post a', 'post b', 'post c'],
+        'NumSlices': [160] * n,
+    })
+    o = DICOMorder(d, logger=logger or logging.getLogger('order'))
+    return o.order('TriTime', secondary_param='AcqTime')
+
+
+def test_order_single_pre_has_unique_majors():
+    out = _ordered_table(n_pre=1)
+    majors = sorted(int(x) for x in out['Major'])
+    assert majors == [0, 1, 2, 3]
+
+
+def test_order_dual_pre_emits_collision_warning(caplog):
+    caplog.set_level(logging.WARNING)
+    out = _ordered_table(n_pre=2)
+    majors = sorted(int(x) for x in out['Major'])
+    assert majors.count(0) == 2, "both pre scans must occupy Major 0"
+    assert any('share Major' in r.message for r in caplog.records), \
+        [r.message for r in caplog.records if r.levelno >= logging.WARNING]
