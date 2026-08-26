@@ -259,6 +259,99 @@ def makeNifti(Data_subset):
 def split_table(ID):
     return Data_table[Data_table['SessionID'] == ID].reset_index(drop=True)
 
+def audit_nifti_directory():
+    """Audit the NIfTI directory against Data_table_timing.csv (post-conversion).
+
+    Per session: expected files derive from the table's Major column
+    ('{Major:02}.nii'), compared with what is actually on disk. Catches (a)
+    rows with no file (conversion failed / timed out but step 03 moved on),
+    (b) files with no row (leftovers from a previous run — 'unrequested
+    data' that a later alignment would be tempted to pair), and (c) duplicate
+    Majors in the table (dual-pre collisions: two rows, one filename).
+
+    Pure audit: logs per-finding at ERROR/WARNING and writes
+    <deployment log dir>/nifti_audit.json. Never aborts the run — the origin
+    of each mismatch is already reported where it happened (step 02 ordering,
+    per-command run_cmd failures above), and step 06 decides what to trust.
+
+    Returns True if every session on disk has exact parity with its table rows.
+    """
+    timing_csv = f'{LOAD_DIR}Data_table_timing.csv'
+    if not os.path.exists(timing_csv):
+        LOGGER.error(f'[AUDIT] Timing table {timing_csv} not found, skipping NIfTI audit')
+        return False
+
+    from toolbox import get_log_dir
+    table = pd.read_csv(timing_csv, low_memory=False)
+    table['SessionID'] = table['SessionID'].astype(str)
+    expected_by_session = {}
+    for sid, grp in table.groupby('SessionID'):
+        majors = [int(m) for m in grp['Major']]
+        expected_by_session[str(sid)] = majors
+
+    disk_sessions = set(
+        d for d in os.listdir(SAVE_DIR) if os.path.isdir(os.path.join(SAVE_DIR, d)))
+    audit, n_missing_rows, n_extra_files, n_dup = 0, 0, 0, 0
+
+    for sid in sorted(disk_sessions):
+        sdir = os.path.join(SAVE_DIR, sid)
+        if sid not in expected_by_session:
+            LOGGER.error(f'[AUDIT] Session {sid} exists in nifti dir but has NO timing-table rows '
+                         f'({len(os.listdir(sdir))} files on disk — unrequested data)')
+            audit += 1
+            continue
+
+        majors = expected_by_session[sid]
+        exp_names = sorted(set(f'{m:02d}.nii' for m in majors))
+        on_disk = set(f for f in os.listdir(sdir)
+                      if f.endswith('.nii') and not f.endswith('_RAS.nii'))
+
+        missing = [f for f in exp_names if f not in on_disk]
+        extra = sorted(f for f in on_disk if f not in set(exp_names))
+        mc = {f'{m:02d}': int(c) for m, c in pd.Series(majors).value_counts().items() if c > 1}
+
+        ok = not (missing or extra or mc)
+        audit += 0 if ok else 1
+        n_missing_rows += len(missing)
+        n_extra_files += len(extra)
+        n_dup += sum(mc.values()) - len(mc)
+
+        for f in missing:
+            LOGGER.error(f'[AUDIT] {sid}: expected {f} (from table Major column) is MISSING on disk '
+                         f'— conversion for this scan failed or was skipped; step 06 cannot pair this row')
+        if extra:
+            LOGGER.warning(f'[AUDIT] {sid}: {len(extra)} file(s) on disk with no table row '
+                           f'(leftover/unrequested): {extra}')
+        if mc:
+            LOGGER.error(f'[AUDIT] {sid}: duplicate Major values in table {mc} — filename collision, '
+                         f'one conversion overwrote another')
+
+    if audit == 0 and (n_missing_rows or n_extra_files or n_dup) == 0:
+        LOGGER.info('[AUDIT] NIfTI directory matches timing table for all sessions present on disk')
+
+    try:
+        log_dir = get_log_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        out_json = os.path.join(log_dir, 'nifti_audit.json')
+        import json
+        with open(out_json, 'w') as fh:
+            json.dump({
+                'timing_table': timing_csv,
+                'nifti_dir': SAVE_DIR,
+                'sessions_on_disk': len(disk_sessions),
+                'clean': audit == 0 and not (n_missing_rows or n_extra_files or n_dup),
+                'missing_files': n_missing_rows,
+                'extra_files': n_extra_files,
+                'duplicate_major_rows': n_dup,
+            }, fh, indent=2)
+        LOGGER.info(f'[AUDIT] Wrote {out_json} '
+                    f'(clean={audit == 0 and not (n_missing_rows or n_extra_files or n_dup)}, '
+                    f'missing={n_missing_rows}, extra={n_extra_files}, dup_majors={n_dup})')
+    except Exception as e:
+        LOGGER.warning(f'[AUDIT] Could not write audit json: {e}')
+
+    return audit == 0 and not (n_missing_rows or n_extra_files or n_dup)
+
 def handle_keyboard_interrupt(signum, frame):
     LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will complete, queued ones cancelled...')
     raise KeyboardInterrupt('Interrupted')
@@ -354,5 +447,13 @@ if __name__ == '__main__':
             LOGGER.info('Nifti conversion complete with stop flag')
             save_progress(list(commands), 'saveNifti_progress.pkl')
             LOGGER.info('checkpoint file saved')
+
+    # Post-conversion audit: compare what step 02 said we needed (Major column)
+    # with what dcm2niix actually produced. Surfaces missed conversions,
+    # leftover 'unrequested' files, and duplicate-Major collisions that a later
+    # positional alignment would otherwise silently mis-pair. Pure audit — logs,
+    # writes <LOG_DIR>/nifti_audit.json, never aborts (step 06 decides trust).
+    audit_nifti_directory()
+
     stop_flag.set()
 
