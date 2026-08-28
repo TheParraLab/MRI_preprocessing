@@ -39,6 +39,10 @@ should_run() {
   return 0
 }
 
+# ── Pipeline version banner ─────────────────────────────────────────
+MRI_VERSION=$(python -c "import code; print(code.__version__)" 2>/dev/null || echo "dev")
+echo "MRI_preprocessing v${MRI_VERSION} — pipeline starting"
+
 # Step 01
 if should_run 1; then
   STEP01_ARGS=()

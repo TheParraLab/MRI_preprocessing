@@ -24,7 +24,12 @@ PROJECT_ROOT=$(realpath "${SCRIPT_DIR}/..")
 # ── Configuration (override in .env or via env vars) ─────────────
 ENV_FILE="${PROJECT_ROOT}/.env"
 if [ -f "$ENV_FILE" ]; then
-  while IFS='=' read -r key value || [ -n "$key" ]; doCEese
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    key="${key//[[:space:]]/}"
+    case "$key" in ''|\#*) continue ;; esac
+    export "${key}=${value:-}"
+  done < "$ENV_FILE"
+fi
 REGISTRY="${REGISTRY_URL:-registry.forgejo.local:5000}"
 REPO="${IMAGE_REPOSITORY:-mri_preprocessing}"
 TAG="${1:-latest}"

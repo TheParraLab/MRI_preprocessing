@@ -25,6 +25,10 @@ RUN apt-get update && \
 # adds test + tooling extras used by code/test and code/tools (both are part
 # of the image so the in-image test suite matches what CI runs).
 WORKDIR /FL_system
+# Image identity (set by the CI release flow / build_and_push.sh on the CLI)
+ARG IMAGE_VERSION=1.0.0
+ARG VCS_REVISION=unknown
+
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir --timeout 120 --retries 5 \
         -r requirements.txt -r requirements-dev.txt
@@ -64,3 +68,5 @@ COPY control_system/startup.sh /usr/local/bin/startup.sh
 RUN chmod +x /usr/local/bin/startup.sh
 
 CMD ["/usr/local/bin/startup.sh"]
+
+LABEL org.opencontainers.image.version="${IMAGE_VERSION}" org.label-schema.version="${IMAGE_VERSION}" org.label-schema.version-final="1.0" org.opencontainers.image.revision="${VCS_REVISION}"
