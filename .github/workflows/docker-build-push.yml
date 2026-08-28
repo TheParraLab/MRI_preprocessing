@@ -14,6 +14,15 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Pull registry credentials into env vars so step `if:` (which cannot
+    # reference `secrets.` directly) can still gate the push.
+    env:
+      FOU_RDOU_URL:      ${{ secrets.REGISTRY_URL }}
+      FOU_RDOU_USER:     ${{ secrets.REGISTRY_USERNAME }}
+      FOU_RDOU_PASS:     ${{ secrets.REGISTRY_PASSWORD }}
+      DHUB_USER:   ${{ secrets.DOCKERHUB_USERNAME }}
+      DHUB_TOKEN:  ${{ secrets.DOCKERHUB_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,34 +35,39 @@ jobs:
             echo "MRI_TAG=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Log in to Forgejo registry
-        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin "${{ secrets.REGISTRY_URL }}"
-
       - name: Build Docker image
         run: |
           docker build \
-            --tag "${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" \
+            --tag "mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" \
             --file control_system/dockerfile . \
             --build-arg VCS_REVISION=$(git rev-parse --short HEAD)
 
-      - name: Push Docker image
+      - name: Push to Forgejo registry
+        if: ${{ env.FOU_RDOU_URL != '' && env.FOU_RDOU_USER != '' && env.FOU_RDOU_PASS != '' }}
         run: |
-          docker push "${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
-          IMAGE="${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing"
+          echo "${FOU_RDOU_PASS}" | docker login -u "${FOU_RDOU_USER}" --password-stdin "${FOU_RDOU_URL}"
+          docker tag "mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" "${FOU_RDOU_URL}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
+          docker push "${FOU_RDOU_URL}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
+          IMAGE="${FOU_RDOU_URL}/parra-lab/mri_preprocessing"
           echo ""
           echo "✅ On the HPC, pull with:"
           echo "   apptainer pull $IMAGE.sif docker://${IMAGE}:${{ steps.meta.outputs.MRI_TAG }}"
 
       - name: Push to DockerHub
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        if: ${{ env.DHUB_USER != '' && env.DHUB_TOKEN != '' }}
         run: |
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-          BASE="${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing"
-          TAG="${{ steps.meta.outputs.MRI_TAG }}"
-          docker tag "${BASE}:${TAG}" "nickl99/preprocessing:${TAG}"
-          docker tag "${BASE}:${TAG}" "nickl99/preprocessing:latest"
-          docker push "nickl99/preprocessing:${TAG}"
+          echo "${DHUB_TOKEN}" | docker login -u "${DHUB_USER}" --password-stdin
+          docker tag "mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" "nickl99/preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
+          docker tag "mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" "nickl99/preprocessing:latest"
+          docker push "nickl99/preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
           docker push "nickl99/preprocessing:latest"
           echo ""
           echo "✅ Also on DockerHub:"
-          echo "   apptainer pull nickl99/preprocessing.sif docker://nickl99/preprocessing:${TAG}"
+          echo "   apptainer pull nickl99/preprocessing.sif docker://nickl99/preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
+
+      - name: Fail if no registry was configured
+        if: ${{ env.FOU_RDOU_URL == '' && env.DHUB_USER == '' }}
+        run: |
+          echo "ERROR: Neither Forgejo (REGISTRY_URL/USERNAME/PASSWORD) nor DockerHub (DOCKERHUB_USERNAME/TOKEN) secrets are defined."
+          echo "       Build succeeded but nothing was pushed. Set at least one set of secrets to publish this image."
+          exit 1
