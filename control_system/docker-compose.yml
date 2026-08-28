@@ -1,22 +1,25 @@
 services:
   control:
-    container_name: control
+    container_name: ${CONTAINER_NAME:-control}
     build:
-      context: .
-      dockerfile: dockerfile
+      context: ..
+      dockerfile: control_system/dockerfile
     runtime: nvidia
     volumes:
-      - ${PROJECT_DIRECTORY_PATH}:/FL_system
-      - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
-      #- ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti
+      - ../data:/FL_system/data                           # base: Data_table*.csv, scratch/
+      - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw         # overlays raw/
+      - ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti      # overlays nifti/
+      - ${RAS_DIRECTORY_PATH}:/FL_system/data/RAS           # overlays RAS/
+      - ${COREG_DIRECTORY_PATH}:/FL_system/data/coreg       # overlays coreg/
+      - ${INPUTS_DIRECTORY_PATH}:/FL_system/data/inputs     # overlays inputs/
+      - ${DEPLOY_LOG_DIR}:/deployment/
     environment:
-      - PROJECT_DIRECTORY_PATH
+      - CONTAINER_NAME
       - DATA_DIRECTORY_PATH
       - NIFTI_DIRECTORY_PATH
+      - RAS_DIRECTORY_PATH
+      - COREG_DIRECTORY_PATH
+      - INPUTS_DIRECTORY_PATH
+      - DEPLOY_LOG_DIR
       - NVIDIA_VISIBLE_DEVICES=all
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]

@@ -145,28 +145,40 @@ class DICOMextract:
     def Modality(self) -> str:
         """Attempts to extract the modality of the scan"""
         try:
-            # DIAGNOSTIC LOG: Validate RepetitionTime attribute existence and value
             rep_time_raw = getattr(self.metadata, 'RepetitionTime', None)
             if self.debug > 0:
                 logging.debug(f'[DIAGNOSTIC Modality] RepetitionTime raw value = {rep_time_raw} (type={type(rep_time_raw).__name__}) | File: {getattr(self.metadata, "filepath", "N/A")}')
-            
-            # Handle case where RepetitionTime exists but is a pydicom DataElement (not raw value)
-            if rep_time_raw is not None and not isinstance(rep_time_raw, (int, float)):
-                rep_time = float(rep_time_raw) if rep_time_raw is not None else None
-            else:
-                rep_time = rep_time_raw
-            
-            if rep_time is None:
-                logging.warning(f'[DIAGNOSTIC Modality] RepetitionTime is None, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
+
+            if rep_time_raw is None:
+                if self.debug > 0:
+                    logging.warning(f'[DIAGNOSTIC Modality] RepetitionTime is None, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
                 return self.UNKNOWN
-            
-            if rep_time >= 780:
+
+            # Normalize to a float in milliseconds regardless of pydicom VR / scanner quirks
+            try:
+                rep_time_ms = float(rep_time_raw)
+            except ValueError:
+                if self.debug > 0:
+                    logging.warning(f'[DIAGNOSTIC Modality] Could not convert TR to numeric, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
+                return self.UNKNOWN
+
+            # If the value looks like microseconds (>1e6), convert down
+            if rep_time_ms > 10**6:
+                rep_time_ms = rep_time_ms / 1000
+            # If it still looks suspiciously large for TR in ms (e.g. raw seconds stored as int)
+            elif rep_time_ms < 50:
+                rep_time_ms = rep_time_ms * 1000
+
+            if self.debug > 0:
+                logging.debug(f'[DIAGNOSTIC Modality] Normalized TR = {rep_time_ms:.2f} ms | File: {getattr(self.metadata, "filepath", "N/A")}')
+
+            if rep_time_ms >= 780:
                 modality = 'T2'
             else:
                 modality = 'T1'
-            
+
             if self.debug > 0:
-                logging.debug(f'[DIAGNOSTIC Modality] Final modality = {modality} (rep_time={rep_time}) | File: {getattr(self.metadata, "filepath", "N/A")}')
+                logging.debug(f'[DIAGNOSTIC Modality] Final modality = {modality} (rep_time={rep_time_ms}) | File: {getattr(self.metadata, "filepath", "N/A")}')
             return modality
         except Exception as e:
             self.log_error('Unable to read RepetitionTime', e)
@@ -290,6 +302,9 @@ class DICOMextract:
             files = sorted(glob.glob(glob_pattern))
             if self.debug > 0:
                 logging.debug(f'[DIAGNOSTIC glob] found {len(files)} files')
+            if not files:
+                self.log_error('No .dcm files found in directory', None)
+                return self.UNKNOWN
             rcsCoordX2 = pyd.dcmread(files[-1], stop_before_pixels=True, specific_tags=(tag.Tag('ImageOrientationPatient'),)).ImageOrientationPatient[0]
             if np.mean([rcsCoordX1, rcsCoordX2]) > 0:
                 return 'left'
@@ -382,6 +397,106 @@ class DICOMextract:
             self.log_error('Unable to read PatientBirthDate', e)
             return self.UNKNOWN
         
+# ---------------------------------------------------------------------------
+# Fat-saturation classification — module-level so EVERY downstream consumer
+# (step-02 gate, step-04 dual-pre tie-break, step-06 alignment prioritisation)
+# shares one implementation instead of private heuristics.
+#
+# Two-pass approach:
+#   1. Raw description: Siemens-style _W/_F suffix (Dixon water image).
+#   2. Normalized description (lowercase; whitespace/underscores collapsed to a
+#      single space): vendor-neutral positive/negative tokens matched with
+#      word-boundary and negative-lookahead rules so that
+#        - FS inside FSPGR / OFFSET / TRANSVERSE  -> ignored
+#        - T1FS (no space) and f/s (slash form)   -> matched deliberately
+#        - SAT inside SATURATION / SATURATED      -> ignored
+#
+# A negative token on the same row FORCES non-FS: an explicit "non fs" /
+# "not fat sat" / "no fat" statement is the strongest evidence and wins over
+# any positive token. Patterns were validated against the production corpus
+# (~1.08M T1 rows, 350k unique descriptions) — see code/test/test_detect_fs.py
+# for the regression matrix.
+#
+# Result semantics: True = positively marked FS; False = explicitly non-FS
+# (never usable as a pre-contrast kinetics baseline); NaN = no marking at all
+# (ambiguous — policy decided by DICOMfilter.removeNonFSScans).
+# ---------------------------------------------------------------------------
+
+FS_POSITIVE_RE = re.compile(r'''(?x)
+    \b(?:
+       # Generic fat suppression technique names
+         fat\s*sat  |  fatsat  |  spair  |  spir  |  chess  |  stir  |  proset
+       # Word-boundary FS (excludes FSPGR, OFFSET, TRANSVERSE…)
+     | \bfs\b
+       # Corpus forms: "T1FS" (no space) and "f/s" (written with a slash);
+       # lookahead keeps parenthesised "(f/s)" safe.
+     | t1\s*fs\b
+     | f[/-]s(?=[\s,),;]|$)
+       # Bounded SAT (negative look-ahead strips SATURATION / SATURATED)
+     | \bsat\b(?!\s*(?:ation|urated))
+       # GE-specific (VIBRANT, IDEAL, SPECIAL)
+     | \b(?:vibran(?:t)?|ideal(?:\w*)?|special)\w*
+       # Siemens sequence families (VIBE, FL3D, TIRM) and Dixon variants
+     | \b(?:vibe|fl3d|tirm)\w*
+     | \b(?:m?dixon|ethriv|thriv)\w*
+    )''')
+
+# A negator must sit directly adjacent to a fat/fs term ("non fs", "not fat
+# sat", "non-fat sat"); "no fatigue" / "fatty" do NOT match (word boundary).
+FS_NEGATIVE_RE = re.compile(r'''(?x)
+    \b(?:non|no|not|w[/.]?o)[-\./\s]*(?:fs\b | f[/-]s\b | fat\s*[-.\s]?sat\w*)
+  | without[\s\-]+(?:fat\s*[-.\s]?sat\w* | fs\b | f[/-]s\b)
+  | \b(?:non|no|not|without)[\s\-]+fat\b   # standalone "... no/non FAT" idiom (corpus-verified)
+  | \bnnfs\b                                # legacy standalone forms
+  | \bwofs(?=\s|$)
+  | t1\s+only''')
+
+# Siemens-style water/fat suffix that normalization would destroy.
+FS_SIEMENS_WF_RE = re.compile(r'(?i)[^a-zA-Z]?_[WF]\b')
+
+
+def classify_fs(desc):
+    """Classify one SeriesDescription as fat-saturated.
+
+    Returns ``True`` (positively marked), ``False`` (explicitly non-FS — the
+    verdict is unconditional; a negative always wins conflicts) or ``None``
+    (no FS evidence at all — ambiguous; the *policy* for such rows lives in
+    :meth:`DICOMfilter.removeNonFSScans`).
+    """
+    raw = '' if desc is None else str(desc)
+    desc_n = _normalize_desc_for_fs(raw)
+    if FS_NEGATIVE_RE.search(desc_n):
+        return False
+    if FS_POSITIVE_RE.search(desc_n) or FS_SIEMENS_WF_RE.search(raw):
+        return True
+    return None
+
+
+def classify_fs_series(series):
+    """Vectorised :func:`classify_fs` over a column of descriptions.
+
+    Returns an object-dtype Series with True / False / NaN entries, indexed
+    like the input, so it can be assigned straight onto a DataFrame column."""
+    import numpy as _np
+    raw = series.astype(str)
+    desc_n = raw.str.lower().str.replace(r'[\s_]+', ' ', regex=True)
+    neg = desc_n.str.contains(FS_NEGATIVE_RE.pattern, regex=True, na=False)
+    pos = (desc_n.str.contains(FS_POSITIVE_RE.pattern, regex=True, na=False)
+           | raw.str.contains(FS_SIEMENS_WF_RE.pattern, regex=True, na=False))
+    vals = _np.empty(len(series), dtype=object)   # explicit object: True/False/nan stay Python types
+    vals[~(pos | neg).values] = _np.nan
+    vals[pos.values & ~neg.values] = True
+    vals[neg.values] = False                     # negative always wins
+    return pd.Series(vals, index=series.index, dtype=object)
+
+
+def _normalize_desc_for_fs(s):
+    """Collapse whitespace/underscores and case for vendor-agnostic matching.
+
+    'Axial  T1  Fat Sat   Post' -> 'axial t1 fat sat post'. Scalars only —
+    use :func:`classify_fs_series` for columns."""
+    return re.sub(r'[\s_]+', ' ', str(s).lower())
+
 class DICOMfilter():
     """
     Class to filter a DataFrame of DICOM metadata corresponding to a single SessionID.
@@ -437,8 +552,7 @@ class DICOMfilter():
         """Removes T2 scans from the table"""
         self.removed['T2'].append(self.dicom_table[self.dicom_table['Modality'].isin(['T2', 'Unknown'])])
         self.dicom_table = self.dicom_table[self.dicom_table['Modality'].isin(['T1'])]
-        self.logger.debug(f'Removed {len(self.removed["T2"])} T2 scans | {self.Session_ID}')
-        #self.dicom_table['Remove_T2'] = self.dicom_table['Modality'].apply(lambda x: 1 if x == 'T1' else 0)
+        self.logger.debug(f'Removed {len(self.removed["T2"][-1])} T2 scans | {self.Session_ID}')
         #self.update_valid('Remove_T2')
         return self.dicom_table
     
@@ -453,10 +567,73 @@ class DICOMfilter():
                 logging.error(f'unable to read BreastSize | {e}')
                 to_remove.append(i)
         self.removed['Implants'].append(self.dicom_table.iloc[to_remove])
-        self.logger.debug(f'Removed {len(self.removed["Implants"])} scans with implants | {self.Session_ID}')
+        self.logger.debug(f'Removed {len(self.removed["Implants"][-1])} scans with implants | {self.Session_ID}')
         self.dicom_table = self.dicom_table.drop(to_remove)
         return self.dicom_table
-    
+
+    @staticmethod
+    def _treat_unknown_as_saturated() -> bool:
+        """Policy for UNMARKED rows (no FS evidence in the description).
+
+        Controlled by the ``TREAT_UNKNOWN_AS_SATURATED`` environment variable
+        (default: true, i.e. keep unmarked rows). Rationale for the default:
+        the acquisition protocol expects all dynamic series to be fat-saturated
+        and explicit "non fs" marking is reliable in this corpus, so a missing
+        marker is absence of counter-evidence rather than evidence against.
+        Set to false for strict mode (keep only positively marked rows).
+        """
+        return os.environ.get('TREAT_UNKNOWN_AS_SATURATED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def removeNonFSScans(self):
+        """Remove rows that are non-fat-saturated for the kinetic pipeline.
+
+        Explicitly NON-fat-saturated rows (``FatSaturated == False``) are ALWAYS
+        removed under both policies — they can never serve as a pre-contrast
+        baseline for slope calculation. UNMARKED rows (``NaN``, no FS evidence
+        in the description) follow the ``TREAT_UNKNOWN_AS_SATURATED`` policy
+        (see :meth:`_treat_unknown_as_saturated`).
+
+        Emits one audit line per session with the pos/neg/unknown counts so it
+        is always possible to see what was kept and why, deployment log included.
+        """
+        self.detect_fs()
+        fs_state = self.dicom_table['FatSaturated'].astype(object)
+        n_pos = int((fs_state == True).sum())
+        n_neg = int((fs_state == False).sum())
+        n_unk = int(pd.isna(fs_state).sum())
+
+        keep_unknown = self._treat_unknown_as_saturated()
+        if keep_unknown:
+            mask = fs_state == False          # lenient: drop only explicit non-FS
+        else:
+            mask = fs_state != True           # strict: require positive evidence
+
+        self.removed['Non_FS'].append(self.dicom_table.loc[mask])
+        n_removed = int(mask.sum())
+        self.dicom_table = self.dicom_table.loc[~mask].reset_index(drop=True)
+
+        if keep_unknown:
+            self.logger.debug(
+                f'[FS gate] lenient | pos={n_pos} neg={n_neg} unknown_kept={n_unk} '
+                f'removed={n_removed} kept={len(self.dicom_table)} | {self.Session_ID}')
+            if n_pos == 0 and n_unk > 0 and n_neg == 0:
+                self.logger.warning(
+                    f'[FS gate] No positively fat-saturated marked scans; session relies on '
+                    f'{n_unk} unmarked series (TREAT_UNKNOWN_AS_SATURATED=true) | {self.Session_ID}')
+        else:
+            self.logger.debug(
+                f'[FS gate] strict | pos={n_pos} neg={n_neg} unknown_dropped={n_unk} '
+                f'removed={n_removed} kept={len(self.dicom_table)} | {self.Session_ID}')
+            if n_unk > 0:
+                top = self.removed['Non_FS'][-1].loc[
+                    pd.isna(self.removed['Non_FS'][-1]['FatSaturated']), 'Series_desc'] \
+                    .astype(str).value_counts().head(3)
+                self.logger.warning(
+                    f'[FS gate] strict policy removed {n_unk} unmarked rows, e.g. ' +
+                    '; '.join(f"'{d}'×{cnt}" for d, cnt in top.items()) +
+                    f' | {self.Session_ID}')
+        return self.dicom_table
+
     def majorSide(self):
         """Determines the major side of the breast"""
         mode_series = self.dicom_table['Lat'].mode()
@@ -472,7 +649,7 @@ class DICOMfilter():
         """Removes scans from the minor side of the breast"""
         self.removed['Side'].append(self.dicom_table[self.dicom_table['Lat'] != self.SIDE])
         self.dicom_table = self.dicom_table[self.dicom_table['Lat'] == self.SIDE]
-        self.logger.debug(f'Removed {len(self.removed["Side"])} scans from the minor side | {self.Session_ID}')
+        self.logger.debug(f'Removed {len(self.removed["Side"][-1])} scans from the minor side | {self.Session_ID}')
         return self.dicom_table
     
     def majorSlices(self):
@@ -567,7 +744,7 @@ class DICOMfilter():
             #self.dicom_table['Remove_Computed'] = np.where(self.dicom_table['Type'].str.contains(flag.upper(), na=False), 1, 0)
         # Concatenate all removed rows into a single DataFrame
         self.removed['Computed'].append(pd.concat(removed, ignore_index=True))
-        self.logger.debug(f'Removed {len(self.removed["Computed"])} scans with computed descriptions | {self.Session_ID}')
+        self.logger.debug(f'Removed {len(self.removed["Computed"][-1])} scans with computed descriptions | {self.Session_ID}')
         #self.update_valid('Remove_Computed')
         return self.dicom_table
 
@@ -576,17 +753,7 @@ class DICOMfilter():
         desc_matches = self.dicom_table['Series_desc'].fillna('').str.lower().str.contains(desc_pattern, na=False)
         self.removed['Description'].append(self.dicom_table[desc_matches])
         self.dicom_table = self.dicom_table[~desc_matches]
-        self.logger.debug(f'Removed {len(self.removed["Description"])} scans for containing flagged descriptions | {self.Session_ID}')
-        return self.dicom_table
-
-    def removeTimes(self, filter_columns: list):
-        """Removes scans with computed flags"""
-        removed = []
-        for column in filter_columns:
-            self.dicom_table = self.dicom_table[self.dicom_table[column] != 'Unknown']
-            removed.append(self.dicom_table[self.dicom_table[column] == 'Unknown'])
-        self.removed['Times'].append(pd.concat(removed))
-        self.logger.debug(f'Removed {len(self.removed["Times"])} scans with unknown times | {self.Session_ID}')
+        self.logger.debug(f'Removed {len(self.removed["Description"][-1])} scans for containing flagged descriptions | {self.Session_ID}')
         return self.dicom_table
 
     def removeDWI(self):
@@ -650,6 +817,32 @@ class DICOMfilter():
         # This funciton is intended to identify the actual number of slices per scan.
         # This is usually the mode of all scans available, but some scans are concatenated across the entire sequence
         n_slices = df['NumSlices'].unique()
+
+    def detect_fs(self):
+        """Classify every row's ``Series_desc`` into ``FatSaturated``.
+
+        Classification (token patterns + negation-wins conflict rule) lives in
+        the module-level function :func:`classify_fs_series` — one shared
+        implementation also used by downstream consumers (step-04 dual-pre
+        tie-break, step-06 alignment prioritisation). Corpus-verified states:
+
+            * ``True``   = positively marked fat-saturated
+            * ``False``  = explicitly non-FS (a negative always wins conflicts)
+            * ``NaN``    = no FS marking at all (ambiguous — the gate in
+                           :meth:`removeNonFSScans` decides those rows' fate)
+
+        See code/test/test_detect_fs.py for the regression matrix.
+        """
+        self.dicom_table['FatSaturated'] = classify_fs_series(self.dicom_table['Series_desc'])
+
+        fs_state = self.dicom_table['FatSaturated'].astype(object)
+        n_true   = int((fs_state == True).sum())
+        n_false  = int((fs_state == False).sum())
+        n_unk    = int(pd.isna(fs_state).sum())
+        self.logger.debug(
+            f'[FS] pos={n_true}  neg={n_false}  unk={n_unk} | {self.Session_ID}'
+        )
+
 
     def detect_pre(self, action: str = 'check'):
         '''
@@ -953,6 +1146,7 @@ class DICOMfilter():
               maintainability and testability.
         """
         # SHOULD THIS FUNCTION FLOW DEPEND ON SESSION PROTOCOL [16-328, 19-093, 20-425]
+        self.removeNonFSScans()
         self.print_table(columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series'])
 
         ### Fixing laterality from series description
@@ -1428,8 +1622,8 @@ class DICOMorder():
             return  # Exit the constructor if SessionID is missing
         if self.Session_ID.size > 1:
             print('Multiple Session_IDs found in the table')
-            print('Not currently implemented, please remake with a single Session_ID')
-            return None
+            self.logger.error('Multiple Session_IDs found in the table. Not currently implemented, please filter to a single Session_ID.')
+            return
     
     def order(self, timing_param: str, secondary_param: str) -> pd.DataFrame:
         """
@@ -1464,51 +1658,112 @@ class DICOMorder():
                 return self.dicom_table
             else:
                 self.logger.debug(f'Ordering by secondary param {secondary_param}, {len(unknown_rows_2)} unknown rows | {self.Session_ID}')
+                # Coerce secondary param to numeric; move any that fail back to unknown
+                coerced_2 = pd.to_numeric(
+                    self.dicom_table.loc[valid_rows_index_2, secondary_param], errors='coerce'
+                )
+                bad_mask = coerced_2.isna()
+                if bad_mask.any():
+                    newly_unknown = valid_rows_index_2[bad_mask]
+                    unknown_rows_2 = pd.concat([unknown_rows_2, self.dicom_table.loc[newly_unknown]])
+                    valid_rows_index_2 = valid_rows_index_2[~bad_mask]
+                    self.dicom_table.loc[valid_rows_index_2, secondary_param] = coerced_2[~bad_mask]
+                else:
+                    self.dicom_table.loc[valid_rows_index_2, secondary_param] = coerced_2
                 valid_rows_2 = self.dicom_table.loc[valid_rows_index_2].sort_values(by=[secondary_param])
                 self.n_post = len(valid_rows_2)
-                # Convert valid secondary_param values to int for ordering
-                self.dicom_table[secondary_param] = self.dicom_table[secondary_param].astype(str).str.split('.').str[0]
-                self.dicom_table.loc[valid_rows_index_2, secondary_param] = self.dicom_table.loc[valid_rows_index_2, secondary_param].astype(int)
                 self.dicom_table.loc[valid_rows_2.index, 'Major'] = np.linspace(1, len(valid_rows_2), int(len(valid_rows_2)))
                 unknown_idx_2 = unknown_rows_2.index
                 self.dicom_table.loc[unknown_idx_2, 'Major'] = np.zeros(len(unknown_idx_2))
+                self._force_pre_major()
                 return self.dicom_table
         else:
             self.logger.debug(f'Ordering by {timing_param}, {n_unknown} unknown rows (pre scans) | {self.Session_ID}')
-            # Convert the timing_param column to integers for valid rows
-            self.dicom_table.loc[valid_rows_index, timing_param] = self.dicom_table.loc[valid_rows_index, timing_param].astype(float).astype(int)
+            # Coerce to numeric; move any that become NaN back to unknown
+            coerced = pd.to_numeric(
+                self.dicom_table.loc[valid_rows_index, timing_param], errors='coerce'
+            )
+            bad_mask = coerced.isna()
+            if bad_mask.any():
+                newly_unknown = valid_rows_index[bad_mask]
+                unknown_rows = pd.concat([unknown_rows, self.dicom_table.loc[newly_unknown]])
+                valid_rows_index = valid_rows_index[~bad_mask]
+                n_unknown = len(unknown_rows)
+                self.dicom_table.loc[valid_rows_index, timing_param] = coerced[~bad_mask].astype(int)
+            else:
+                self.dicom_table.loc[valid_rows_index, timing_param] = coerced.astype(int)
+            # Check if all valid TriTime values are identical — no inherent ordering
+            valid_timing_values = self.dicom_table.loc[valid_rows_index, timing_param].unique()
+            if len(valid_timing_values) == 1:
+                self.logger.warning(
+                    f'All valid {timing_param} values are identical ({valid_timing_values[0]}), '
+                    f'falling back to {secondary_param} for ordering | {self.Session_ID}'
+                )
+                # Sort by secondary param instead
+                valid_rows = self.dicom_table.loc[valid_rows_index].sort_values(by=[secondary_param])
+                self.n_post = len(valid_rows)
+                self.dicom_table.loc[valid_rows.index, 'Major'] = np.linspace(1, len(valid_rows), int(len(valid_rows)))
+                self.dicom_table.loc[unknown_rows.index, 'Major'] = np.zeros(n_unknown)
+                self._force_pre_major()
+                return self.dicom_table
             # Sort the valid rows
             valid_rows = self.dicom_table.loc[valid_rows_index].sort_values(by=[timing_param])
             self.n_post = len(valid_rows)
             # Add a 'Major' column to the valid rows
             self.dicom_table.loc[valid_rows.index, 'Major'] = np.linspace(1, len(valid_rows), int(len(valid_rows)))
             self.dicom_table.loc[unknown_rows.index, 'Major'] = np.zeros(n_unknown)
-            return self.dicom_table
-    
-    def alternate_pre(self):
-        if self.debug > 0:
-            print(f'Attemting to solve for pre scan for {self.dicom_table["SessionID"].unique()}')
-        # Find the scans with unknown timing parameters
-        unknown_rows = self.dicom_table[self.dicom_table[self.timing_param].astype(str).str.lower() == 'unknown']
-        # if there is only one unknown value, assume it is a pre scan
-        if len(unknown_rows) == 1:
-            if self.debug > 0:
-                print(f'Found a single unknown value for {self.dicom_table["SessionID"].unique()}')
-                print(f'Assuming this is a pre scan')
-        elif len(unknown_rows) == 2:
-            print(f'Found two unknown values for {self.dicom_table["SessionID"].unique()}')
-            print(f'Analyzing to see if either row includes "FS" in the description')
-            for i in range(len(unknown_rows)):
-                if 'FS' not in unknown_rows['Series_desc'].iloc[i]:
-                    if self.debug > 0:
-                        print(f'Found a FS scan for {self.dicom_table["SessionID"].unique()}')
-                        print(f'Assuming this is a pre scan')
-                    # remove the other row
-                    unknown_rows = unknown_rows.drop(unknown_rows.index[i])
-                    break
-            # check if one of the unknown values is a FS scan
-        # return index of unknown row
-        return unknown_rows.index              
+            self._force_pre_major()
+        return self.dicom_table
+
+    def _warn_duplicate_majors(self):
+        """Loud warning (no silent mispairing) when multiple rows map to the same Major.
+
+        Files are written as '{Major:02}.nii'; two rows sharing a Major mean one
+        conversion would overwrite or collide with the other, and downstream
+        row<->file alignment cannot resolve them. Typical case: dual-pre
+        sessions (left+right breast) under the lenient fat-sat policy, where
+        every Unknown-TriTime candidate becomes Major 0.
+        """
+        if 'Major' not in self.dicom_table.columns or len(self.dicom_table) == 0:
+            return
+        ints = self.dicom_table['Major'].astype(int)
+        dup_mask = ints.duplicated(keep=False)
+        if not dup_mask.any():
+            return
+        dups = self.dicom_table.loc[dup_mask]
+        self.logger.warning(
+            f'{len(dups)} scans share Major values {sorted(set(ints[dup_mask].tolist()))} — '
+            f'file naming {{Major:02}}.nii will collide; downstream alignment treats these as '
+            f'suspect. Rows: {[(int(m), str(s)) for m, s in zip(dups["Major"], dups["Series_desc"])]} | {self.Session_ID}')
+
+    def _force_pre_major(self):
+        """Any row flagged as Pre_scan must have Major=0 regardless of TriTime.
+
+        DICOMfilter.isolate_sequence() runs before this and has already set
+        Pre_scan=True on the true baseline scan(s).  The prior ordering logic
+        assigned Major values purely from TriTime (Unknown → 0, numeric → ≥1),
+        which means a pre-scan that happened to carry a real TriggerTime wound
+        up at Major ≥ 1 and never became 00.nii.  This method corrects those
+        misassignments by forcing every Pre_scan row back to Major=0.
+
+         Only applied when the Pre_scan column is still present on the table
+        (it may be dropped in earlier filter stages)."""
+        if 'Pre_scan' not in self.dicom_table.columns:
+            return
+        mask = self.dicom_table['Pre_scan'] == True
+        before = self.dicom_table.loc[mask, 'Major'].tolist()
+        corrected = [m for m in before if m != 0.0]
+        self.dicom_table.loc[mask, 'Major'] = 0.0
+        if corrected:
+            self.logger.info(
+                f'Pre-scan Major corrected: {corrected} → 0 | {self.Session_ID}'
+            )
+
+        # Every order() exit path runs the Major assignments and then funnels
+        # through this method, so it is the single point where the final Major
+        # values are complete — surface collisions (dual-pre -> multiple rows
+        # at 0) loudly instead of letting them become silent file overwrites.
+        self._warn_duplicate_majors()
 
     def findPre(self):
         post_indx = self.dicom_table[self.dicom_table['Post_scan'] == True].index
@@ -1524,36 +1779,3 @@ class DICOMorder():
             self.logger.warning(f'Pre scan should be found, possible error in earlier processing steps | {self.Session_ID}')
             self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
             return self.dicom_table
-
-        # series_numbers = self.dicom_table['Series'][self.dicom_table['Major'] > 0].astype(int)
-        # if len(series_numbers) == 0:
-        #     if self.debug > 0:
-        #         print(f'No series_numbers found for {self.dicom_table["SessionID"].unique()}')
-        #     #clear dicom table
-        #     self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
-        #     return self.dicom_table
-        # indx = self.dicom_table[self.dicom_table['Major'] > 0].index
-
-        # # sort series numbers
-        # series_numbers = series_numbers.sort_values()
-        # pre_value = series_numbers.iloc[0] - 1
-
-        # pre_indx = self.dicom_table[self.dicom_table['Series'] == pre_value].index
-        # if len(pre_indx) == 1:
-        #     indx = np.append(indx, pre_indx)
-        #     self.dicom_table = self.dicom_table.loc[indx]
-        #     return self.dicom_table
-        # elif len(pre_indx) == 0:
-        #     print(f'No pre scan found for {self.dicom_table["SessionID"].unique()}')
-        #     print(f'Attempting alternate pre scan detection')
-        #     pre_indx = self.alternate_pre()
-        
-        # if len(pre_indx) == 1:
-        #     indx = np.append(indx, pre_indx)
-        #     self.dicom_table = self.dicom_table.loc[indx]
-        #     return self.dicom_table
-        # else:
-        #     print('Alternative pre scan detection failed')
-        #     print('No pre scan found')
-        #     print('Returning empty dicom table')
-        #     self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)

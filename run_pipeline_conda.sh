@@ -113,6 +113,7 @@ fi
 
 # ── Verify dependencies ──────────────────────────────────────────
 echo ""
+echo "MRI_preprocessing v$(python -c 'import code; print(code.__version__)' 2>/dev/null || echo dev)"
 echo "✓ dcm2niix:    $(command -v dcm2niix 2>/dev/null || echo 'NOT FOUND')"
 echo "✓ reg_f3d:     $(command -v reg_f3d 2>/dev/null || echo 'NOT FOUND')"
 echo "✓ python:      $(python --version 2>&1)"

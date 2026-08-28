@@ -58,8 +58,12 @@ except ImportError:
     yappi = None
 
 # Custom imports
-from toolbox import get_logger, run_function
-from DICOM import DICOMfilter, DICOMorder, DICOMsplit
+from toolbox import get_log_dir, get_logger, run_function
+from DICOM import DICOMfilter, DICOMorder, DICOMsplit, classify_fs_series
+
+# Centralised log directory — resolves to /deployment/logs inside containers
+# (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
+LOG_DIR = get_log_dir()
 
 
 def _check_disk_space(save_dir: str, threshold_gb: float) -> bool:
@@ -101,8 +105,8 @@ class ParseConfig:
 def build_config() -> ParseConfig:
     """Parse CLI arguments and return a ParseConfig instance."""
     parser = argparse.ArgumentParser(description='Parse DICOM data: filter, split, and order scans')
-    parser.add_argument('--multi', '-m', nargs='?', const=max(1, cpu_count()-1), type=int,
-                        help='Run with multiprocessing enabled (default: max-1 CPUs)')
+    parser.add_argument('--multi', '-m', action='store_true',
+                        help='DEPRECATED — ignored. Multiprocessing is currently disabled.')
     parser.add_argument('--save_dir', type=str, default='/FL_system/data/',
                         help='Directory to save the updated tables (default: /FL_system/data/)')
     parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv',
@@ -119,8 +123,8 @@ def build_config() -> ParseConfig:
                         help='Run with profiler enabled')
     parser.add_argument('--resume', action='store_true',
                         help='Resume filtering from checkpoint if available')
-    parser.add_argument('--batch_size', type=int, default=10,
-                        help='Number of sessions per batch before saving checkpoint (default: 10)')
+    parser.add_argument('--batch_size', type=int, default=250,
+                        help='Sessions per batch before checkpoint. ')
     parser.add_argument('--min_free_gb', type=float, default=50,
                         help='Minimum free disk space in GB to proceed (default: 50)')
     parser.add_argument('--fully_removed', action='store_true',
@@ -134,8 +138,8 @@ def build_config() -> ParseConfig:
         dir_idx=args.dir_idx,
         filter_only=args.filter_only,
         force=args.force,
-        parallel=args.multi is not None,
-        n_cpus=args.multi if args.multi is not None else cpu_count() - 1,
+        parallel=False,
+        n_cpus=0,
         profile=args.profile,
         resume=args.resume,
         filter_batch_size=args.batch_size,
@@ -148,7 +152,7 @@ def create_logger(cfg: ParseConfig) -> logging.Logger:
     """Create logger instance from config."""
     logger = logging.getLogger('02_parseDicom')
     logger.handlers.clear()
-    return get_logger('02_parseDicom', f'{cfg.save_dir}/logs/')
+    return get_logger('02_parseDicom', LOG_DIR)
 
 # ------ -- --- ----------------------------- ----- ----------------- --- ---
 # Utility helpers
@@ -225,8 +229,16 @@ def _load_checkpoint_data(
     results_path = os.path.join(cp_dir, 'results.pkl')
     removed_path = os.path.join(cp_dir, 'removed.pkl')
     try:
-        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
-        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        if os.path.exists(results_path):
+            with open(results_path, 'rb') as f:
+                results = pickle.load(f)
+        else:
+            results = []
+        if os.path.exists(removed_path):
+            with open(removed_path, 'rb') as f:
+                removed = pickle.load(f)
+        else:
+            removed = []
         return results, removed
     except Exception as e:
         logger.error(f'Failed to load checkpoint data: {e}')
@@ -285,7 +297,7 @@ def _split_checkpoint_path(cfg: ParseConfig) -> str:
 SPLIT_RELOCATION_FILE = 'split_relocations.pkl'
 
 
-def _save_split_relocations(cfg: ParseConfig, relocations: list) -> None:
+def _save_split_relocations(cfg: ParseConfig, relocations: list, logger: logging.Logger) -> None:
     """Persist split relocation list alongside the split CSV so symlinks can
     be recreated on re-run even when the CSV already exists."""
     path = os.path.join(cfg.save_dir, SPLIT_RELOCATION_FILE)
@@ -293,10 +305,10 @@ def _save_split_relocations(cfg: ParseConfig, relocations: list) -> None:
         with open(path, 'wb') as f:
             pickle.dump(relocations, f)
     except Exception as e:
-        logging.getLogger(__name__).error(f'Failed to save split relocations: {e}')
+        logger.error(f'Failed to save split relocations: {e}')
 
 
-def _load_split_relocations(cfg: ParseConfig) -> Optional[list]:
+def _load_split_relocations(cfg: ParseConfig, logger: logging.Logger) -> Optional[list]:
     """Load previously saved split relocation list."""
     path = os.path.join(cfg.save_dir, SPLIT_RELOCATION_FILE)
     if not os.path.exists(path):
@@ -305,7 +317,7 @@ def _load_split_relocations(cfg: ParseConfig) -> Optional[list]:
         with open(path, 'rb') as f:
             return pickle.load(f)
     except Exception as e:
-        logging.getLogger(__name__).error(f'Failed to load split relocations: {e}')
+        logger.error(f'Failed to load split relocations: {e}')
         return None
 
 
@@ -363,9 +375,21 @@ def _load_split_checkpoint_data(
     removed_path = os.path.join(cp_dir, 'removed.pkl')
     redirect_path = os.path.join(cp_dir, 'redirections.pkl')
     try:
-        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
-        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
-        redirections = pickle.load(open(redirect_path, 'rb')) if os.path.exists(redirect_path) else []
+        if os.path.exists(results_path):
+            with open(results_path, 'rb') as f:
+                results = pickle.load(f)
+        else:
+            results = []
+        if os.path.exists(removed_path):
+            with open(removed_path, 'rb') as f:
+                removed = pickle.load(f)
+        else:
+            removed = []
+        if os.path.exists(redirect_path):
+            with open(redirect_path, 'rb') as f:
+                redirections = pickle.load(f)
+        else:
+            redirections = []
         return results, removed, redirections
     except Exception as e:
         logger.error(f'Failed to load split checkpoint data: {e}')
@@ -469,8 +493,16 @@ def _load_order_checkpoint_data(
     results_path = os.path.join(cp_dir, 'results.pkl')
     removed_path = os.path.join(cp_dir, 'removed.pkl')
     try:
-        results = pickle.load(open(results_path, 'rb')) if os.path.exists(results_path) else []
-        removed = pickle.load(open(removed_path, 'rb')) if os.path.exists(removed_path) else []
+        if os.path.exists(results_path):
+            with open(results_path, 'rb') as f:
+                results = pickle.load(f)
+        else:
+            results = []
+        if os.path.exists(removed_path):
+            with open(removed_path, 'rb') as f:
+                removed = pickle.load(f)
+        else:
+            removed = []
         return results, removed
     except Exception as e:
         logger.error(f'Failed to load order checkpoint data: {e}')
@@ -647,14 +679,15 @@ def _split_worker(data_subset: pd.DataFrame, log_dir: str) -> tuple:
     return splitter.dicom_table, pd.DataFrame(columns=data_subset.columns), splitter.temporary_relocations
 
 
-def _save_removal_worker(tup: tuple, save_dir: str) -> None:
+def _save_removal_worker(tup: tuple, save_dir: str, log_dir: str) -> None:
     """Worker for saving removal logs — called per category."""
+    worker_logger = get_logger('02_parseDicom', log_dir)
     key, item = tup
-    out_path = os.path.join(save_dir, 'removal_log', f'Removed_{key}.csv')
+    out_path = os.path.join(log_dir, 'removal_log', f'Removed_{key}.csv')
     try:
         item.to_csv(out_path, index=False)
-    except Exception:
-        pass
+    except Exception as e:
+        worker_logger.error(f'Failed to write removal log {out_path}: {e}')
 
 
 def _relocate_worker(commands: list, relocations: list, log_dir: str) -> None:
@@ -767,9 +800,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
     total, used, free = shutil.disk_usage(cfg.save_dir)
     free_gb = free / (1024**3)
-    if free_gb < 20:
+    if free_gb < cfg.min_free_gb:
         logger.error(f'Insufficient disk space: {free_gb:.1f} GB remaining in {cfg.save_dir}. '
-                      f'Need at least 20 GB. Aborting.')
+                      f'Need at least {cfg.min_free_gb} GB. Aborting.')
         return
 
     # -- Overwrite guard -----------------------------------------------------
@@ -779,8 +812,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             logger.info(f'{cfg.out_name} already exists -- overwriting (--force)')
         else:
             logger.warning(f'{cfg.out_name} already exists')
-            if sys.stdin.isatty() == False:
-                logger.warning('Running in non-interactive mode, skipping prompt and exiting to avoid overwrite')
+            if not sys.stdin.isatty():
+                logger.warning('Non-interactive environment detected, skipping prompt')
                 logger.warning('To force overwrite, use the --force flag.')
                 return
             try:
@@ -843,7 +876,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         else:
             logger.info(f'Processing {len(Data_subsets)} session(s)')
 
-            log_dir = os.path.join(cfg.save_dir, 'logs/')
+            log_dir = LOG_DIR
             filter_fn = functools.partial(
                 _filter_worker,
                 save_dir=cfg.save_dir,
@@ -873,26 +906,26 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if rel:
                         temporary_relocation.extend(rel)
 
-                # Track completed session IDs
+                # Track completed session IDs — use a set for O(1) lookups
+                seen = set(completed_ids)
                 for df in batch_results:
                     for sid in df['SessionID'].unique():
-                        completed_ids.append(sid)
+                        if sid not in seen:
+                            seen.add(sid)
+                            completed_ids.append(sid)
                 for subset in batch:
                     sid = subset['SessionID'].values[0]
-                    if sid not in completed_ids:
+                    if sid not in seen:
+                        seen.add(sid)
                         completed_ids.append(sid)
 
-                # Save checkpoint after each batch
-                # Reload existing checkpoint, extend with current batch, save, then clear to cap RAM
-                existing_results, existing_removed = _load_checkpoint_data(cfg, logger)
-                all_results = existing_results + all_results
-                all_removed = existing_removed + all_removed
-                _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
-                all_results.clear()
-                all_removed.clear()
-
-                # Check disk space threshold
+                # Check disk space threshold — checkpoint only under pressure
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    logger.info('Disk pressure detected, saving checkpoint before exit')
+                    existing_results, existing_removed = _load_checkpoint_data(cfg, logger)
+                    all_results = existing_results + all_results
+                    all_removed = existing_removed + all_removed
+                    _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
                     total, used, free = shutil.disk_usage(cfg.save_dir)
                     logger.warning(
                         f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
@@ -901,9 +934,21 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            # Final assembly: reload from checkpoint to reconstruct full state (in-memory
-            # lists were cleared post-batch to cap RAM)
-            _, all_results, all_removed = _load_filter_checkpoint(cfg, logger)
+                # Optional mid-run checkpoint every N batches (not per-batch) to avoid
+                # O(n²) pickle churn.  Only checkpoint if we've accumulated enough work.
+                if (batch_start // batch_size + 1) % 10 == 0:
+                    existing_results, existing_removed = _load_checkpoint_data(cfg, logger)
+                    all_results = existing_results + all_results
+                    all_removed = existing_removed + all_removed
+                    _save_filter_checkpoint(cfg, logger, completed_ids, all_results, all_removed)
+                    all_results.clear()
+                    all_removed.clear()
+
+            # Final assembly — use whatever is still in memory plus whatever was
+            # paged to disk during pressure checkpoints.
+            remaining_results, remaining_removed = _load_checkpoint_data(cfg, logger)
+            all_results = remaining_results + all_results
+            all_removed = remaining_removed + all_removed
             results = [df for df in all_results if df is not None and not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
 
@@ -946,8 +991,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         logger.info(f'Saving filtered data to {filter_path}')
         _atomic_write_csv(Data_table, filter_path)
 
-        os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
-        save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir)
+        os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
+        save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir, log_dir=LOG_DIR)
         run_function(logger, save_fn, list(removed_tables.items()),
                     Parallel=cfg.parallel, P_type='process')
 
@@ -960,7 +1005,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             ]
             if fully_removed_list:
                 fully_removed = pd.concat(fully_removed_list, ignore_index=True)
-                fully_path = os.path.join(cfg.save_dir, 'removal_log', 'Removed_fully.csv')
+                fully_path = os.path.join(LOG_DIR, 'removal_log', 'Removed_fully.csv')
                 fully_removed.to_csv(fully_path, index=False)
                 logger.info(f'Saved fully removed sessions to {fully_path}')
         else:
@@ -1013,7 +1058,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         else:
             logger.info(f'Splitting {len(split_subsets)} session(s)')
 
-            split_fn = functools.partial(_split_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
+            split_fn = functools.partial(_split_worker, log_dir=LOG_DIR)
 
             for batch_start in range(0, len(split_subsets), cfg.filter_batch_size):
                 batch = split_subsets[batch_start:batch_start + cfg.filter_batch_size]
@@ -1035,27 +1080,28 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     if rel:
                         all_split_redirections.extend(rel)
 
+                # Use a set for O(1) lookups
+                seen_split = set(split_completed_ids)
                 for df in batch_results:
                     for sid in df['SessionID'].unique():
-                        split_completed_ids.append(sid)
+                        if sid not in seen_split:
+                            seen_split.add(sid)
+                            split_completed_ids.append(sid)
                 for subset in batch:
                     sid = subset['SessionID'].values[0]
-                    if sid not in split_completed_ids:
+                    if sid not in seen_split:
+                        seen_split.add(sid)
                         split_completed_ids.append(sid)
 
-                # Load existing checkpoint, extend, save, then clear to cap RAM
-                existing_split_results, existing_split_removed, existing_split_redirections = _load_split_checkpoint_data(cfg, logger)
-                all_split_results = existing_split_results + all_split_results
-                all_split_removed = existing_split_removed + all_split_removed
-                all_split_redirections = existing_split_redirections + all_split_redirections
-                _save_split_checkpoint(cfg, logger, split_completed_ids,
-                                       all_split_results, all_split_removed, all_split_redirections)
-                all_split_results.clear()
-                all_split_removed.clear()
-                all_split_redirections.clear()
-
-                # Check disk space threshold
+                # Check disk space threshold — checkpoint only under pressure
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
+                    logger.info('Disk pressure detected, saving split checkpoint before exit')
+                    existing_results, existing_removed, existing_redir = _load_split_checkpoint_data(cfg, logger)
+                    all_split_results = existing_results + all_split_results
+                    all_split_removed = existing_removed + all_split_removed
+                    all_split_redirections = existing_redir + all_split_redirections
+                    _save_split_checkpoint(cfg, logger, split_completed_ids,
+                                           all_split_results, all_split_removed, all_split_redirections)
                     total, used, free = shutil.disk_usage(cfg.save_dir)
                     logger.warning(
                         f'Disk space critically low ({free / (1024**3):.1f} GB remaining). '
@@ -1064,8 +1110,24 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            # Final assembly: reload from checkpoint so full state is available again
-            _, all_split_results, split_removed_final, all_split_redirections = _load_split_checkpoint(cfg, logger)
+                # Mid-run checkpoint every 10 batches to avoid O(n²) pickle churn
+                bs = cfg.filter_batch_size
+                if (batch_start // bs + 1) % 10 == 0:
+                    existing_results, existing_removed, existing_redir = _load_split_checkpoint_data(cfg, logger)
+                    all_split_results = existing_results + all_split_results
+                    all_split_removed = existing_removed + all_split_removed
+                    all_split_redirections = existing_redir + all_split_redirections
+                    _save_split_checkpoint(cfg, logger, split_completed_ids,
+                                           all_split_results, all_split_removed, all_split_redirections)
+                    all_split_results.clear()
+                    all_split_removed.clear()
+                    all_split_redirections.clear()
+
+            # Final assembly — merge in-memory with disk checkpoint if any
+            leftover_results, leftover_removed, leftover_redir = _load_split_checkpoint_data(cfg, logger)
+            all_split_results = leftover_results + all_split_results
+            split_removed_final = leftover_removed + all_split_removed
+            all_split_redirections = leftover_redir + all_split_redirections
             results = [df for df in all_split_results if df is not None and not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
             temporary_relocation = list(all_split_redirections)
@@ -1077,9 +1139,9 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     split_removed_df = pd.concat(split_removed_dfs, ignore_index=True)
                     logger.info(f'{len(split_removed_df)} scans removed during splitting for '
                                 f'{split_removed_df["SessionID"].nunique()} session(s)')
-                    os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+                    os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
                     _atomic_write_csv(split_removed_df,
-                                      os.path.join(cfg.save_dir, 'removal_log', 'Removed_Splitting.csv'))
+                                       os.path.join(LOG_DIR, 'removal_log', 'Removed_Splitting.csv'))
                 else:
                     logger.info('No scans removed during splitting')
             else:
@@ -1093,11 +1155,11 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         logger.debug(f'Temp relocations example [first 3]: {temporary_relocation[:3]}')
 
         _atomic_write_csv(Data_table, split_path)
-        _save_split_relocations(cfg, temporary_relocation)
+        _save_split_relocations(cfg, temporary_relocation, logger)
     else:
         logger.info('Split table found, loading split data')
         Data_table = pd.read_csv(split_path, low_memory=False)
-        temporary_relocation = _load_split_relocations(cfg) or []
+        temporary_relocation = _load_split_relocations(cfg, logger) or []
         if temporary_relocation:
             logger.info(f'Loaded {len(temporary_relocation)} persistent split relocations')
         else:
@@ -1109,7 +1171,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
 
     if not os.path.exists(out_path):
         logger.info('No ordered table found, starting ordering process')
-        order_fn = functools.partial(_order_worker, log_dir=os.path.join(cfg.save_dir, 'logs/'))
+        order_fn = functools.partial(_order_worker, log_dir=LOG_DIR)
 
         if cfg.resume:
             completed_ids, order_results, order_removed = _load_order_checkpoint(
@@ -1135,13 +1197,13 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                             f'{order_removed_df["SessionID"].nunique()} '
                             f'session(s)')
                         os.makedirs(
-                            os.path.join(cfg.save_dir, 'removal_log'),
+                            os.path.join(LOG_DIR, 'removal_log'),
                             exist_ok=True,
                         )
                         _atomic_write_csv(
                             order_removed_df,
                             os.path.join(
-                                cfg.save_dir,
+                                LOG_DIR,
                                 'removal_log',
                                 'Removed_Ordering.csv',
                             ),
@@ -1175,16 +1237,18 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 order_removed.extend(new_removed)
                 completed_ids.extend(batch_ids)
 
-                # Load existing checkpoint, extend, save, then clear to cap RAM
-                existing_order_results, existing_order_removed = _load_order_checkpoint_data(cfg, logger)
-                order_results = existing_order_results + order_results
-                order_removed = existing_order_removed + order_removed
-                _save_order_checkpoint(
-                    cfg, logger, completed_ids, order_results,
-                    order_removed,
-                )
-                order_results.clear()
-                order_removed.clear()
+                # Mid-run checkpoint every 10 batches to avoid O(n²) pickle churn
+                bs = getattr(cfg, 'filter_batch_size', 10)
+                if (start // bs + 1) % 10 == 0:
+                    existing_order_results, existing_order_removed = _load_order_checkpoint_data(cfg, logger)
+                    order_results = existing_order_results + order_results
+                    order_removed = existing_order_removed + order_removed
+                    _save_order_checkpoint(
+                        cfg, logger, completed_ids, order_results,
+                        order_removed,
+                    )
+                    order_results.clear()
+                    order_removed.clear()
 
                 # Check disk space threshold
                 if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
@@ -1196,8 +1260,12 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                     )
                     return
 
-            # Final assembly: reload from checkpoint so full state is available again
-            _, order_results, order_removed = _load_order_checkpoint(cfg, logger)
+            # Final assembly: merge on-disk checkpoint with whatever remains in memory
+            ckpt_ids, ckpt_results, ckpt_removed = _load_order_checkpoint(cfg, logger)
+            if ckpt_results is not None:
+                order_results = ckpt_results + order_results
+            if ckpt_removed is not None:
+                order_removed = ckpt_removed + order_removed
             order_results = [df for df in order_results if df is not None and not df.empty]
             Data_table = pd.concat(order_results).reset_index(drop=True) if order_results else pd.DataFrame()
 
@@ -1206,15 +1274,31 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             if not order_removed_df.empty:
                 logger.info(f'{len(order_removed_df)} scans removed during ordering for '
                             f'{order_removed_df["SessionID"].nunique()} session(s)')
-                os.makedirs(os.path.join(cfg.save_dir, 'removal_log'), exist_ok=True)
+                os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
                 _atomic_write_csv(order_removed_df,
-                                  os.path.join(cfg.save_dir, 'removal_log', 'Removed_Ordering.csv'))
+                                  os.path.join(LOG_DIR, 'removal_log', 'Removed_Ordering.csv'))
             else:
                 logger.info('No scans removed during ordering')
 
             logger.info('Ordering complete')
             logger.info(f'Final sessions: {len(Data_table["SessionID"].unique())}')
             logger.info(f'Final scans   : {len(Data_table)}')
+
+            # Carry the fat-saturation verdict forward: later steps (04 dual-pre
+            # tie-break, 06 alignment prioritisation) consume this column
+            # instead of re-guessing from Series_desc. Within a normal run the
+            # filter step has already stored the fresh detect_fs() result; the
+            # backfill only covers tables persisted by an older build (pre-FS-
+            # feature) that is being resumed or read by a newer one.
+            if 'FatSaturated' not in Data_table.columns:
+                logger.info('FatSaturated column absent — classifying from Series_desc')
+                Data_table['FatSaturated'] = classify_fs_series(Data_table['Series_desc'])
+
+            _n_true = int((Data_table['FatSaturated'] == True).sum())
+            _n_false = int((Data_table['FatSaturated'] == False).sum())
+            _n_unk = int(pd.isna(Data_table['FatSaturated']).sum())
+            logger.info(f'Timing table FatSaturated: true={_n_true} false={_n_false} unknown={_n_unk}')
+
             logger.info(f'Saving ordered data to {out_path}')
             _atomic_write_csv(Data_table, out_path)
     else:
@@ -1229,7 +1313,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         _relocate_worker(
             commands=temporary_relocation,
             relocations=temporary_relocation,
-            log_dir=os.path.join(cfg.save_dir, 'logs/'))
+            log_dir=LOG_DIR)
 
     if _check_disk_space(cfg.save_dir, cfg.min_free_gb):
         logger.warning(
@@ -1315,7 +1399,7 @@ if __name__ == '__main__':
                     try:
                         tables = [
                             t for t in os.listdir(save_dir_worker)
-                            if t.endswith('.csv')
+                            if t.startswith('Data_table_timing_') and t.endswith('.csv')
                         ]
                         logger.info(f'All workers done, compiling {len(tables)} tables')
                         frames = []
@@ -1326,15 +1410,15 @@ if __name__ == '__main__':
                                     pd.read_csv(os.path.join(save_dir_worker, table))
                                 )
                             except pd.errors.EmptyDataError:
-                                logger.error(f'{table} is empty, skipping')
+                                logger.warning(f'{table} is empty, skipping')
                                 continue
                             except Exception as e:
                                 logger.error(f'Error compiling {table}: {e}')
-                                break
+                                continue
+
                         combined = (
                             pd.concat(frames, ignore_index=True)
-                            if frames
-                            else pd.DataFrame()
+                            if frames else pd.DataFrame()
                         )
 
                         final_dir = os.path.dirname(save_dir_worker.rstrip('/'))
@@ -1359,5 +1443,3 @@ if __name__ == '__main__':
             logger.info(f'Writing profile results to {profile_path}')
             yappi.get_func_stats().save(profile_path, type='pstat')
             logger.info(f'Profile results saved to {profile_path}')
-
-    sys.exit(0)

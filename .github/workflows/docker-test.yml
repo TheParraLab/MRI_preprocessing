@@ -20,5 +20,4 @@ jobs:
 
       - name: Build Docker image
         run: |
-          cd control_system
-          docker build -t mri_preprocessing_test --target base .
+          docker build -t mri_preprocessing_test -f control_system/dockerfile .

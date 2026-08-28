@@ -6,7 +6,7 @@ import queue
 import atexit as _atexit
 import sys
 
-from typing import Callable, List, Any, Optional
+from typing import Callable, List, Any, Optional, Literal
 from functools import partial
 from multiprocessing import cpu_count
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -77,11 +77,10 @@ def _init_child_logger(
     fh.setFormatter(fmt)
     lgr.addHandler(fh)
 
-    # Prevent every log line from double-writing via propagation to root handler
+  # Prevent every log line from double-writing via propagation to root handler
     lgr.propagate = False
 
-    # Give the root logger a handler so bare logging.error/warning calls from
-    # deep inside worker functions or library code also reach the log file.
+    # Give the root logger a handler for bare logging calls from library code.
     root = logging.getLogger()
     if not root.handlers:
         root_fh = FileHandlerWithLock(file_path, mode='a')
@@ -192,25 +191,60 @@ class _LoggerProxy(logging.Logger):
 
 # ---- Public API ------------------------------------------------------------
 
+def get_log_dir() -> str:
+    """Centralised log directory for the current deployment.
+
+    Resolves in order:
+      1. ``LOG_DIR`` environment variable — set by start_control.sh for every
+         runtime (container-mounted ``/deployment/logs`` inside Docker and
+         Singularity; a host-local deployment log dir on bare Conda HPC).
+      2. Fallback for manual/local runs: ``<repo_root>/logs`` so that log
+         creation never requires write access to the filesystem root.
+    """
+    env_log_dir = os.environ.get('LOG_DIR', '').strip()
+    if env_log_dir:
+        return env_log_dir
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(repo_root, 'logs')
+
+
 def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     """Create a logger that is fast under high concurrency.
 
     The hot-path from *every* producer thread / process is an expensive-free
     ``queue.put(record)`` call to our :class:`~logging.handlers.QueueHandler`.  A
     single daemon consumer drains the queue and does all file + stream I/O
-    sequentially — meaning zero per-emit lock contention."""
+    sequentially — meaning zero per-emit lock contention.
 
-    if save_dir:
-        if save_dir[-1] != '/':
-            save_dir += '/'
-        os.makedirs(save_dir, exist_ok=True)
+    Idempotent: if this logger already has live handlers (from _init_child_logger
+    or a previous call), return the existing proxy immediately so workers calling
+    get_logger() on every invocation do NOT spawn new queues or threads."""
 
-    log_level = logging.DEBUG
-    formatter_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    file_path = save_dir + name + '.log'
+    if not save_dir:
+        save_dir = get_log_dir()
+    if save_dir[-1] != '/':
+        save_dir += '/'
+    os.makedirs(save_dir, exist_ok=True)
 
     # --- underlying Logger (managed by Python's logging system) ---------------
     logger = logging.getLogger(name)
+
+    # file_path must always be defined before either path hits it (original code
+    # had this early; the idempotent guard moved inside and the ref on line 244+
+    # would hit an UnboundLocalError otherwise).
+    file_path = save_dir + name + '.log' if save_dir else ''
+
+    # Idempotent guard — if handlers are already installed (either by a previous
+    # get_logger() call or by _init_child_logger in a spawned worker), return
+    # immediately.  Avoids creating duplicate QueueListener threads per-worker.
+    if logger.handlers:
+        log_level = logging.DEBUG
+        formatter_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        file_path = save_dir + name + '.log' if save_dir else ''
+        logger._log_level = log_level
+        logger._file_path = os.path.abspath(file_path) if file_path else ''
+        logger._formatter_str = formatter_str
+        return _LoggerProxy(logger)
 
     # Stop any existing listener for this name to prevent thread + handler leak.
     old_listener = _listener_registry.pop(name, None)
@@ -221,6 +255,8 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
             pass
 
     logger.handlers.clear()
+    log_level = logging.DEBUG
+    formatter_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     logger.setLevel(log_level)
 
     fmt = logging.Formatter(formatter_str)
@@ -282,6 +318,7 @@ def run_function(
     LOGGER: Any,                          # can be a Logger or _LoggerProxy
     target: Callable[..., Any], items: List[Any],
     Parallel: bool = True, P_type: str = 'thread', N_CPUS: int = 0, N_THREADS: int = 0,
+    P_role: Literal['io', 'compute'] | None = None,
     stop_flag: Optional[object] = None, *args: Any, **kwargs: Any,
 ) -> List[Any]:
     """Run a function over *items* in parallel or sequentially.
@@ -295,11 +332,14 @@ def run_function(
         items (List[Any]): Items to feed into *target* one by one.
         Parallel (bool): Whether to dispatch in parallel at all (False → serial loop).
         P_type (str): ``'thread'``, ``'process'`` or ``'hybrid'``.  Anything else falls back to serial.
-            Hybrid mode spawns ProcessPoolExecutor workers -- each managing its own 
+            Hyper threading mode spawns ProcessPoolExecutor workers -- each managing its own 
             ThreadPoolExecutor of size *N_THREADS* for concurrent I/O within process-scoped network address space isolation.
         N_CPUS (int): Suggested worker count; 0 means "best auto-guess".
-        N_THREADS (int): Thread pool size per-hybrid-worker or max workers when P_type == 'thread';
+        N_THREADS (int): Thread pool size per-hyper-worker or max workers when P_type == 'thread';
             0 uses default (2 * N_CPUS).
+        P_role (str | None): ``'io'`` for I/O-bound workloads, ``'compute'`` for CPU-bound.
+            I/O-bound: caps workers at min(8, cpu_count()-1) or half the available cores on larger machines.
+            Compute-bound: uses full core capacity.  None falls back to legacy behavior.
 
     Returns:
         List[Any]: Results in the same order as *items*.  If every result is a tuple,
@@ -313,6 +353,11 @@ def run_function(
 
     N_CPUS = _effective_cpus(N_CPUS)
 
+    def _effective_workers(count: int, role: str | None = None) -> int:
+        if role == 'io':
+            return min(8, max(2, count // 2))
+        return count
+
     LOGGER.debug(f'Running {target_name} {" in parallel" if Parallel else "serially"}')
     LOGGER.debug(f'Number of items: {len(items)}')
 
@@ -320,8 +365,9 @@ def run_function(
     try:
         # ───────── process mode ─────────
         if Parallel and P_type == 'process':
-            max_workers = min(32, 2 * N_CPUS)
-            LOGGER.debug(f'Using {P_type} workers={max_workers}')
+            effective = _effective_workers(N_CPUS, role=P_role)
+            max_workers = min(32, 2 * effective)
+            LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             init_args = (LOGGER.name, LOGGER._log_level,
                          LOGGER._file_path, LOGGER._formatter_str)
 
@@ -332,55 +378,58 @@ def run_function(
                               for i, item in enumerate(items)}
                 ordered: List[Optional[Any]] = [None] * len(future_map)
 
-                for fut in as_completed(future_map):
-                    idx = future_map.pop(fut)
-                    if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
-                        LOGGER.info('Stopping parallel processing (stop flag).')
-                        break
-                    try:
-                        result = fut.result()         # fast path for already-completed work
-                        ordered[idx] = result
-                        LOGGER.debug(f'Future {idx} completed successfully')
-                    except KeyboardInterrupt:
-                        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
-                        if stop_flag and getattr(stop_flag, 'set', None):
-                            stop_flag.set()
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except Exception as e:
-                        LOGGER.error(
-                            f'Error parallel processing item {idx}: {e}', exc_info=True)
-                        ordered[idx] = None
+                try:
+                    for fut in as_completed(future_map):
+                        idx = future_map.pop(fut)
+                        if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
+                            LOGGER.info('Stopping parallel processing (stop flag).')
+                            break
+                        try:
+                            result = fut.result()         # fast path for already-completed work
+                            ordered[idx] = result
+                            LOGGER.debug(f'Future {idx} completed successfully')
+                        except Exception as e:
+                            LOGGER.error(
+                                f'Error parallel processing item {idx}: {e}', exc_info=True)
+                            ordered[idx] = None
+                except KeyboardInterrupt:
+                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                    for remaining_fut in list(future_map.keys()):
+                        remaining_fut.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
 
                 results = list(ordered)
 
         # ───────── thread mode ────────────────
         elif Parallel and P_type == 'thread':
-            max_workers = min(32, 2 * N_CPUS)
-            LOGGER.debug(f'Using {P_type} workers={max_workers}')
+            effective = _effective_workers(N_CPUS, role=P_role)
+            max_workers = min(32, 2 * effective)
+            LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_map = {executor.submit(target, item, *args, **kwargs): i
                               for i, item in enumerate(items)}
                 ordered = [None] * len(future_map)
 
-                for fut in as_completed(future_map):
-                    idx = future_map.pop(fut)
-                    if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
-                        LOGGER.info('Stopping parallel processing (stop flag).')
-                        break
-                    try:
-                        result = fut.result()
-                        ordered[idx] = result
-                        LOGGER.debug(f'Future {idx} completed successfully')
-                    except KeyboardInterrupt:
-                        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
-                        if stop_flag and getattr(stop_flag, 'set', None):
-                            stop_flag.set()
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except Exception as e:
-                        LOGGER.error(f'Error parallel processing item {idx}: {e}', exc_info=True)
-                        ordered[idx] = None
+                try:
+                    for fut in as_completed(future_map):
+                        idx = future_map.pop(fut)
+                        if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
+                            LOGGER.info('Stopping parallel processing (stop flag).')
+                            break
+                        try:
+                            result = fut.result()
+                            ordered[idx] = result
+                            LOGGER.debug(f'Future {idx} completed successfully')
+                        except Exception as e:
+                            LOGGER.error(f'Error parallel processing item {idx}: {e}', exc_info=True)
+                            ordered[idx] = None
+                except KeyboardInterrupt:
+                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                    for remaining_fut in list(future_map.keys()):
+                        remaining_fut.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
 
                 results = list(ordered)
 
@@ -421,19 +470,26 @@ def run_function(
                     for start, chunk in workers
                 }
 
-                for fut in as_completed(future_to_chunk):
-                    idx_range = future_to_chunk.pop(fut)
-                    try:
-                        global_start, ordered_list = fut.result()
-                        if not isinstance(ordered_list, list):
-                            ordered_list = list(ordered_list)
-                        for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
-                                          ordered_list):
-                            if k < len(results):
-                                results[k] = val
-                    except KeyboardInterrupt:
-                        pexecutor.shutdown(wait=False, cancel_futures=True)
-                        raise
+                try:
+                    for fut in as_completed(future_to_chunk):
+                        idx_range = future_to_chunk.pop(fut)
+                        try:
+                            global_start, ordered_list = fut.result()
+                            if not isinstance(ordered_list, list):
+                                ordered_list = list(ordered_list)
+                            for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
+                                               ordered_list):
+                                if k < len(results):
+                                    results[k] = val
+                        except Exception as e:
+                            root = logging.getLogger()
+                            root.error(f'Hybrid worker error at chunk {idx_range}: {e}', exc_info=True)
+                except KeyboardInterrupt:
+                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
+                    for remaining_fut in list(future_to_chunk.keys()):
+                        remaining_fut.cancel()
+                    pexecutor.shutdown(wait=True, cancel_futures=True)
+                    raise
 
                 results = list(results)
 
@@ -450,9 +506,8 @@ def run_function(
                     LOGGER.exception(f'Error at index {i}')
 
     except KeyboardInterrupt:
-        LOGGER.error('KeyboardInterrupt received. Stopping processing.')
-        if stop_flag and getattr(stop_flag, 'set', None):
-            stop_flag.set()
+        LOGGER.info('KeyboardInterrupt received. In-flight workers completed, queued cancelled. Returning collected results.')
+        raise
     finally:
         LOGGER.debug(f'Completed {target_name} {" in parallel" if Parallel else "serially"}')
         LOGGER.debug(f'Number of results: {len(results)}')

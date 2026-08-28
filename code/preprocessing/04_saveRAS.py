@@ -1,38 +1,46 @@
 import os
+import re
 import glob
 import argparse
 import fcntl
 import pickle
 import json
 import random
+import signal
 import numpy as np
 import nibabel as nib
-from multiprocessing import Manager, cpu_count, Lock
+from multiprocessing import cpu_count, Manager
 # Custom Imports
 from toolbox import run_function, get_logger
+manager = Manager()
+stop_flag = manager.Event()
+
+
+def _check_stop():
+    if stop_flag.is_set():
+        raise KeyboardInterrupt('Shutdown requested')
 
 # Define command line arguments
 parser = argparse.ArgumentParser(description='Convert Nifti files to RAS orientation')
-parser.add_argument('--scan_dir', type=str, required=False, help='Directory containing scans to process')
-parser.add_argument('--save_dir', type=str, required=True, help='Directory to save the output')
+parser.add_argument('--scan_dir', type=str, default='/FL_system/data/nifti/', help='Directory containing scans to process')
+parser.add_argument('--save_dir', type=str, default='/FL_system/data/RAS/', help='Directory to save the output')
 parser.add_argument('--dir_idx', type=int, required=False, help='Index of the directory to process')
 parser.add_argument('--dir_list', type=str, default='list.txt', help='List of directories to process')
 parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
 parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
 parser.add_argument('--test', nargs='?', type=int, const=10, help='Run in test mode, limit the number of directories to process')
-parser.add_argument('--test-stop', action='store_true', help='Randomly trip the disk space checker to simulate low disk space')
+parser.add_argument('--test_stop', action='store_true', help='Randomly trip the disk space checker to simulate low disk space')
+parser.add_argument(
+    '--ids_file', type=str, default=None,
+    help='CSV/txt file containing one ID per line. If provided, only process directories whose name appears in this file.'
+)
 args = parser.parse_args()
 # Get script name
 script_name = os.path.basename(__file__).split('.')[0]
-# Get current working directory
-script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Global variables for progress bar
-#Progress = None
-manager = Manager()
-disk_space_lock = Lock()
-stop_flag = manager.Event()
-#progress_queue = manager.Queue()
+# Centralised log directory — resolves to /deployment/logs inside containers
+# (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
+LOG_DIR = get_log_dir()
 
 # Other global variables
 LOAD_DIR = args.scan_dir #'/FL_system/data/nifti/'
@@ -41,14 +49,9 @@ TEST = args.test is not None # If True, the script will run with a limited numbe
 if TEST:
     N_TEST = args.test
 PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
-PROFILE = args.profile # If True, the script will run with the profiler enabled
 DISK_SPACE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 100 GB
 #PROGRESS = False
-print(script_dir)
-print(script_dir.split(os.sep)[:-2])
-logging_dir = f'{f"{os.sep}".join(script_dir.split(os.sep)[:-2])}{os.sep}data{os.sep}logs{os.sep}'
-LOGGER = get_logger(script_name, logging_dir)
-LOGGER.info(f'Initialized logger at {logging_dir}')
+LOGGER = get_logger(script_name, LOG_DIR)
 
 #### Preprocessing | Step 4: Save RAS Nifti Files ####
 # This script is for taking the semi-processed nifti files and saving them into RAS
@@ -162,20 +165,20 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     # This function converts all nifti files in the input directory to RAS orientation
     # It saves the RAS files in the output directory
 
-    if check_flag(script_name, logging_dir):
+    _check_stop()
+    if check_flag(script_name, LOG_DIR):
         LOGGER.warning(f'Flag {script_name} is set, exiting...')
         return
-    if check_progress(script_name, dir.split(os.sep)[-1], dir=logging_dir):
+    if check_progress(script_name, dir.split(os.sep)[-1], dir=LOG_DIR):
         LOGGER.warning(f'{dir} is present in progress file, skipping...')
         return
     if not check_source_files(dir):
         LOGGER.warning(f'No source files found in {dir}, saving stop flag and exiting...')
-        #set_flag(script_name, dir=logging_dir)
-        update_progress(f'04_missing', dir.split(os.sep)[-1], dir=logging_dir)
+        update_progress(f'04_missing', dir.split(os.sep)[-1], dir=LOG_DIR)
         return
     if not check_disk_space(SAVE_DIR):
         LOGGER.warning(f'Not enough disk space in {SAVE_DIR}, saving stop flag and exiting...')
-        set_flag(script_name, dir=logging_dir)
+        set_flag(script_name, dir=LOG_DIR)
         return
     
     
@@ -191,12 +194,19 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     Fils_out = [os.path.split(ii)[-1] for ii in Fils_out]
     Fils_out = [ii.replace('_RAS.nii', '.nii') for ii in Fils_out]
     LOGGER.debug(f'{dir} | Found {len(Fils_out)} files in {save_path}')
+
+    no_pre_scan = not any(re.match(r'00\d*\.\w+', f) for f in Fils)
+    if no_pre_scan:
+        LOGGER.warning(f'{dir} | Pre-scan 00.nii missing, decrementing all file numbers by 1')
+
     for ii in Fils:
         LOGGER.debug(f'{dir} | Processing: {os.path.join(dir, ii)}')
         if ii.endswith('00a.nii'):
             LOGGER.debug(f'{dir} | found 00a.nii, attempting to isolate FS sample...')
-            json_00 = json.load(open(f'{dir}/00.json'))
-            json_00a = json.load(open(f'{dir}/00a.json'))
+            with open(f'{dir}/00.json', 'r') as f:
+                json_00 = json.load(f)
+            with open(f'{dir}/00a.json', 'r') as f:
+                json_00a = json.load(f)
             LOGGER.debug(f'{dir} | 00_desc: {json_00["SeriesDescription"]}')
             LOGGER.debug(f'{dir} | 00a_desc: {json_00a["SeriesDescription"]}')  
             if 'FS' in json_00['SeriesDescription']:
@@ -208,11 +218,22 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
             else:
                 LOGGER.error(f'{dir} | No FS found in 00 or 00a')
                 return
-    for ii in Fils:
-        LOGGER.debug(f'{dir} | Processing: {os.path.join(dir, ii)}')
-        LOGGER.debug(f'{dir} | Checking if {ii} is in {Fils_out}')
 
-        if ii in Fils_out:
+    def _shift(niiname):
+        if not no_pre_scan:
+            return niiname
+        m = re.match(r'(\d+)(\.\w+)', niiname)
+        if m:
+            nr = f'{int(m.group(1)) - 1:02d}{m.group(2)}'
+            LOGGER.warning(f'{dir} | Renaming {niiname} → {nr} to compensate for missing pre-scan')
+        return nr
+
+    for ii in Fils:
+        _check_stop()
+        shifted = _shift(ii)
+        LOGGER.debug(f'{dir} | Checking if {shifted} is in {Fils_out}...')
+
+        if shifted in Fils_out:
             LOGGER.warning(f'{dir} | {ii} | Already processed, skipping')
             continue
         LOGGER.debug(f'{dir} | {ii} | Not processed, converting to RAS')
@@ -246,20 +267,28 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     
         # Create a new Nifti1Image with the RAS data and updated affine
         ras_img = nib.Nifti1Image(ras_data, ras_affine)
-        #save_path = ii.replace('/data/nifti', '/data/RAS')
-        if ii.endswith('00a.nii'):
-            ii = ii.replace('00a.nii', '00.nii')
-        ii = ii.replace('.nii', '_RAS.nii')
-        nib.save(ras_img,os.path.join(save_path,ii))
-        LOGGER.debug(f'{dir} | Saving: {os.path.join(save_path,ii)}')
+        out_name = shifted if no_pre_scan else ii
+        if out_name.endswith('00a.nii'):
+            out_name = out_name.replace('00a.nii', '00.nii')
+        out_name = out_name.replace('.nii', '_RAS.nii')
+        nib.save(ras_img,os.path.join(save_path,out_name))
+        LOGGER.debug(f'{dir} | Saving: {os.path.join(save_path,out_name)}')
     if args.dir_idx is not None:
         progress_name = f'{script_name}_{args.dir_idx}'
     else:
         progress_name = f'{script_name}'
-    update_progress(progress_name, dir.split(os.sep)[-1], dir=logging_dir)
+    update_progress(progress_name, dir.split(os.sep)[-1], dir=LOG_DIR)
     return 'completed'
 
+
+def handle_keyboard_interrupt(signum, frame):
+    LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will complete, queued ones cancelled...')
+    raise KeyboardInterrupt('Interrupted')
+
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT, handle_keyboard_interrupt)
+    signal.signal(signal.SIGTERM, handle_keyboard_interrupt)
     LOGGER.info('Starting saveRAS: Step 04')
     LOGGER.info(f'LOAD_DIR: {LOAD_DIR}')
     LOGGER.info(f'SAVE_DIR: {SAVE_DIR}')
@@ -275,32 +304,46 @@ if __name__ == '__main__':
         except Exception as e:
             LOGGER.error(f'Error creating directory {SAVE_DIR}: {e}')
     
-    #clear_flag('04_saveRAS', dir=logging_dir)
+    # Get IDs to process if file specified
+    ids_to_process = None
+    if args.ids_file is not None:
+        with open(args.ids_file, 'r') as f:
+            ids_to_process = set(line.strip() for line in f if line.strip())
+        LOGGER.info(f'Loaded {len(ids_to_process)} IDs from {args.ids_file}')
 
     # If not running on an HPC
     if args.dir_idx is None:
         Dirs = glob.glob(f'{LOAD_DIR}*')
+        if ids_to_process is not None:
+            Dirs = [d for d in Dirs if os.path.basename(d) in ids_to_process]
+            LOGGER.info(f'Filtered to {len(Dirs)} directories matching IDs')
         if TEST:
-            Dirs = Dirs[:N_TEST]
-        run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', stop_flag=stop_flag)
+            Dirs = random.sample(Dirs, min(N_TEST, len(Dirs)))
+        try:
+            run_function(LOGGER, RAS_convert, Dirs, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', P_role='io', stop_flag=stop_flag)
+        except KeyboardInterrupt:
+            LOGGER.info('Interrupted. Progress files and completed directories are safe to resume.')
+            compile_progress(script_name, dir=LOG_DIR)
+            raise
     else:
         assert os.path.exists(args.dir_list), f'Directory list file {args.dir_list} does not exist'
-        # Save to temporary directory
         with open(args.dir_list, 'rb') as f:
             Dirs = pickle.load(f)
         Dir = Dirs[args.dir_idx]
-        # Make Dir list if not
         if type(Dir) == str:
             LOGGER.debug(f'Converting Dir to list: {Dir}')
             Dir = [Dir]
         LOGGER.info(f'Processing index {args.dir_idx} of {len(Dirs)}: {Dir}')
-        run_function(LOGGER, RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', stop_flag=stop_flag)
-    
-    if args.dir_idx == len(Dirs) - 1:
-        LOGGER.info('This is the last job in the array, compiling progress file')
-        # Compile progress file
-        compile_progress(script_name, dir=logging_dir)
+        try:
+            run_function(LOGGER, RAS_convert, Dir, Parallel=PARALLEL, save_path=SAVE_DIR, P_type='process', P_role='io', stop_flag=stop_flag)
+        except KeyboardInterrupt:
+            LOGGER.info('Interrupted. Progress files and completed directories are safe to resume.')
+            compile_progress(script_name, dir=LOG_DIR)
+            raise
 
+    if args.dir_idx is None or args.dir_idx == len(Dirs) - 1:
+        LOGGER.info('Compiling progress file')
+        compile_progress(script_name, dir=LOG_DIR)
 
     LOGGER.info('Completed saveRAS: Step 04')
     LOGGER.info('All files saved to RAS directory')

@@ -1,11 +1,13 @@
 import os
+import random
+import argparse
 import pydicom as pyd
 import glob
 import numpy as np
 import pandas as pd
 import nibabel as nib
 from typing import Callable, List, Any
-from multiprocessing import Queue, Manager, cpu_count
+from multiprocessing import Queue, cpu_count
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
 import subprocess
@@ -13,16 +15,30 @@ import threading
 from toolbox import ProgressBar, get_logger
 # Global variables for progress bar and lock
 Progress = None
-manager = Manager()
-progress_queue = manager.Queue()
-LOGGER = get_logger('06_genInputs', '/FL_system/data/logs/')
+# Centralised log directory — resolves to /deployment/logs inside containers
+# (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
+LOG_DIR = get_log_dir()
 
-LOAD_DIR = '/FL_system/data/coreg/'
-SAVE_DIR = '/FL_system/data/inputs/'
+LOGGER = get_logger('06_genInputs', LOG_DIR)
+
+# argparse configuration
+parser = argparse.ArgumentParser(description='Generate model inputs from coregistered scans')
+parser.add_argument('--load_dir', type=str, default='/FL_system/data/coreg/', help='Directory to load scans from')
+parser.add_argument('--save_dir', type=str, default='/FL_system/data/inputs/', help='Directory to save model inputs')
+parser.add_argument('--test', nargs='?', type=int, const=40, help='Run in test mode, randomly sample N sessions (default: 40)')
+parser.add_argument('--parallel', action='store_true', help='Enable multiprocessing')
+parser.add_argument(
+    '--ids_file', type=str, default=None,
+    help='CSV/txt file containing one ID per line. If provided, only process sessions whose name appears in this file.'
+)
+args = parser.parse_args()
+
+LOAD_DIR = args.load_dir
+SAVE_DIR = args.save_dir
 DEBUG = 0
-TEST = False
-N_TEST = 40
-PARALLAL = True
+TEST = args.test is not None
+N_TEST = args.test if TEST else 40
+PARALLEL = args.parallel
 PROGRESS = False
 # This script is for generating the numpy files utilized for model training
 # Performs the calculation of the slope 1 (enhancement) for each scan
@@ -36,8 +52,7 @@ def progress_wrapper(item, target, progress_queue, *args, **kwargs):
 def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
     """Run a function with a progress bar"""
     # Initialize using a manager to allow for shared progress queue
-    manager = Manager()
-    progress_queue = manager.Queue()
+    progress_queue = Queue()
     target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
 
     # Debugging information
@@ -129,7 +144,12 @@ def generate_slopes(SessionID):
     # Check trigger time is not unkown for any of the scans
     Times = [Data['TriTime'].iloc[ii] for ii in sorting] #Loading Times in ms
     Scan_Duration = [Data['ScanDur'].iloc[ii] for ii in sorting] #Loading Scan Duration in us
-    if 'Unknown' in Times[1:]:
+    post_tritimes = Times[1:]
+    tri_all_unknown = 'Unknown' in post_tritimes
+    tri_all_identical = all(
+        t == post_tritimes[0] for t in post_tritimes
+    ) and all(t != 'Unknown' for t in post_tritimes) and len(post_tritimes) > 1
+    if tri_all_unknown:
         LOGGER.error(f'{SessionID} | Trigger time is unknown for the post scan, cannot calculate slopes')
         return
     else:
@@ -157,6 +177,31 @@ def generate_slopes(SessionID):
             except Exception as e:
                 LOGGER.error(f'{SessionID} | Error loading times')
                 LOGGER.error(f'{SessionID} | {e}')
+                return
+        
+        # Fallback: if post-scan trigger times are all identical, estimate from AcqTime
+        if tri_all_identical:
+            LOGGER.warning(
+                f'{SessionID} | Post-scan trigger times are all identical ({Times[1]}s), '
+                f'estimating relative times from AcqTime differences'
+            )
+            try:
+                AcqTime = [Data['AcqTime'].iloc[ii] for ii in sorting]
+                AcqTime_sec = []
+                for t in AcqTime:
+                    if isinstance(t, str) and ':' in t:
+                        parts = t.split(':')
+                        AcqTime_sec.append(int(parts[0])*3600 + int(parts[1])*60 + int(parts[2]))
+                    else:
+                        s = str(int(t)).zfill(6)
+                        AcqTime_sec.append(int(s[:2])*3600 + int(s[2:4])*60 + int(s[4:]))
+                first_post_acq = AcqTime_sec[1]
+                Times[1:] = [float(AcqTime_sec[i] - first_post_acq) for i in range(1, len(Times))]
+                LOGGER.warning(
+                    f'{SessionID} | Estimated post-scan times: {Times}'
+                )
+            except Exception as e:
+                LOGGER.error(f'{SessionID} | Failed to estimate post-scan times from AcqTime: {e}')
                 return
             
     LOGGER.debug(f'{SessionID} | Times | {Times}')
@@ -206,9 +251,12 @@ def generate_slopes(SessionID):
     LOGGER.debug(f'{SessionID} | Starting slope 1 calculation')
     Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1).astype(np.float32)
     Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1).astype(np.float32)
+    denom1 = np.sum(np.square((T[:,:,:,0:2] - Tmean)), axis=3)
     slope1 = np.divide(
         np.sum((T[:,:,:,0:2] - Tmean) * (D[:,:,:,0:2] - Dmean), axis=3),
-        np.sum(np.square((T[:,:,:,0:2] - Tmean)), axis=3)
+        denom1,
+        out=np.zeros_like(denom1, dtype=np.float32),
+        where=denom1 != 0
     ).astype(np.float32)
     slope1 = slope1 / p95
 
@@ -227,9 +275,12 @@ def generate_slopes(SessionID):
     LOGGER.debug(f'{SessionID} | Starting slope 2 calculation')
     Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,1:], axis=3), axis=-1), len(Times)-1, axis=-1).astype(np.float32)
     Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,1:], axis=3), axis=-1), len(Times)-1, axis=-1).astype(np.float32)
+    denom2 = np.sum(np.square((T[:,:,:,1:] - Tmean)), axis=3)
     slope2 = np.divide(
         np.sum((T[:,:,:,1:] - Tmean) * (D[:,:,:,1:] - Dmean), axis=3),
-        np.sum(np.square((T[:,:,:,1:] - Tmean)), axis=3)
+        denom2,
+        out=np.zeros_like(denom2, dtype=np.float32),
+        where=denom2 != 0
     ).astype(np.float32)
     slope2 = slope2 / p95
 
@@ -268,11 +319,21 @@ if __name__ == '__main__':
         LOGGER.error('MISSING CRITICAL FILE | "data_table_timing.csv"')
         exit()
      
+    # Load IDs to filter by (if --ids_file provided)
+    ids_to_process = None
+    if args.ids_file is not None:
+        with open(args.ids_file, 'r') as f:
+            ids_to_process = set(line.strip() for line in f if line.strip())
+        LOGGER.info(f'Loaded {len(ids_to_process)} IDs from {args.ids_file}')
+
     session = np.unique(Data_table['SessionID'])
     Dirs = os.listdir(f'{LOAD_DIR}/')
+    if ids_to_process is not None:
+        Dirs = [d for d in Dirs if d in ids_to_process]
+        LOGGER.info(f'Filtered to {len(Dirs)} directories matching IDs')
     if TEST:
-        session = session[:N_TEST]
-        Dirs = Dirs[:N_TEST]
+        session = random.sample(list(session), min(N_TEST, len(session)))
+        Dirs = random.sample(Dirs, min(N_TEST, len(Dirs)))
     session = Dirs
     N = len(Dirs)
     k = 0
@@ -290,4 +351,4 @@ if __name__ == '__main__':
         os.mkdir(SAVE_DIR)
 
 
-    run_with_progress(generate_slopes, session, Parallel=True)
+    run_with_progress(generate_slopes, session, Parallel=False)

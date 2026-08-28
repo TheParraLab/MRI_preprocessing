@@ -1,3 +1,15 @@
+"""
+Digest a comparison report JSON into plain-text session ID lists.
+
+Takes the JSON output from compare_checksum.py and produces three
+plain-text files, each containing one session ID per line:
+  - sessions_need_transfer.txt
+  - sessions_ready_for_deletion.txt
+  - sessions_missing_from_primary.txt
+
+Usage:
+  python digest_comparison.py <comparison_report.json> [-o OUTPUT_DIR]
+"""
 import json
 import os
 import sys

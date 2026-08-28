@@ -7,7 +7,7 @@ Tests are organized by **what** they verify and **how deeply** they exercise the
 
 ```bash
 # Run all tests
-pytest test/ -v
+pytest code/test/ -v
 
 # Run only unit tests (fastest, ~6s)
 pytest test/test_scanDicom_unit.py -v

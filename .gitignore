@@ -25,3 +25,20 @@ reset_02.sh
 
 # Singularity images (large, site-specific)
 *.sif
+
+# Test/inspection artifacts
+*.pdf
+.pytest_cache/
+pytest_cache/
+
+# Tool output directories
+tools/**/scan_results/*
+tools/**/comparison_findings/*
+
+# Environment file containing deployment-specific paths / secrets
+.env
+
+# Deployment logs (generated per run)
+deployments/
+code/tools/data_checksum_analysis/comparison_findings/
+code/tools/data_checksum_analysis/scan_results/

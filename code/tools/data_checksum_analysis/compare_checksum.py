@@ -1,8 +1,20 @@
+"""
+Compare two scan result JSON files and classify sessions into three categories:
+  - ready_for_deletion: every file in the session matches between source and destination.
+  - need_transfer: at least one file differs or is missing in the destination.
+  - missing_from_primary: sessions that exist in the destination but not the source.
+
+Interactively lists available scans in scan_results/ and lets the user pick two.
+Writes a comparison report JSON to comparison_findings/.
+
+Usage:
+  python compare_checksum.py
+"""
 import os
 import json
 from datetime import datetime, timezone
 
-start_time = datetime.now(timezone.utc) # Record the start time of the comparison in UTC timezone
+start_time = datetime.now(timezone.utc)
 
 print('Available scans for comparison:')
 print('Primary selection will be the source scan, and secondary should be the destination scan to compare against.')
@@ -21,9 +33,6 @@ with open(scan2_path, 'r') as f:
     scan2_data = json.load(f)
     print(f'Loaded secondary scan: {scans[scan2_index]} with {len(scan2_data["results"])} directories')
 
-# Compare at the session level: any file mismatch flags the entire session for transfer.
-# Only sessions where every file matches go to ready_for_deletion.
-# Sessions only in secondary are flagged as missing from primary.
 report = {
     'ready_for_deletion': [],
     'need_transfer': [],
@@ -68,9 +77,8 @@ for dir_name in (secondary_session_set - primary_session_set):
         'file_count': len(dir_data['files']),
     })
 
-stop_time = datetime.now(timezone.utc) # Record the stop time of the comparison in UTC timezone
+stop_time = datetime.now(timezone.utc)
 header = {
-    # Take both scan headers
     'primary': scan1_data['header'],
     'secondary': scan2_data['header'],
     'analysis': {

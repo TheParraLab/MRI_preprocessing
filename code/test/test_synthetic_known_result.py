@@ -19,11 +19,11 @@ import pandas as pd
 import pytest
 
 # ---- Module loading ----
-proj_root = Path(__file__).resolve().parents[1]
+proj_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(proj_root / "code" / "preprocessing"))
 from DICOM import DICOMfilter
 
-SYNTHETIC_CSV = str(proj_root / "test" / "synthetic_Data_table.csv")
+SYNTHETIC_CSV = str(proj_root / "code" / "test" / "synthetic_Data_table.csv")
 
 
 @pytest.fixture(scope="module")
