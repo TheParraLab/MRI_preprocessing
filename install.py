@@ -93,6 +93,13 @@ def install_docker():
 
 
 def install_container_toolkit():
+    if not is_docker_installed():
+        print("Docker is not installed. Run install_docker() first or invoke install.py from main().")
+        sys.exit(1)
+    if not check_gpu_presence():
+        print("No GPU detected. The NVIDIA container toolkit is not required; skipping.")
+        print("(Run on a GPU node if you need CUDA in Docker; CPU-only runs work without it.)")
+        return
     print("Installing NVIDIA Container Toolkit on Linux...")
     print("This process will follow the instructions from https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html")
     print("Please make sure you have sudo privileges.")
@@ -127,10 +134,13 @@ def main():
         print("Docker is already installed.")
 
     if not check_gpu_presence():
-        print("No GPU detected. The pipeline requires a GPU for preprocessing.")
-        sys.exit(1)
-    else:
-        print("GPU detected.")
+        print("WARNING: No GPU detected. The pipeline can run CPU-only for most steps;")
+        print("         coregistration (step 05) will use the CPU fallback for niftyreg.")
+        print("         Skipping the NVIDIA container toolkit install.")
+        print("\nInstallation complete (CPU-only).")
+        return
+
+    print("GPU detected.")
 
     if not is_docker_gpu_configured():
         install_container_toolkit()

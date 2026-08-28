@@ -321,6 +321,20 @@ case "$RUNTIME" in
       "${DEPLOY_LOG_DIR}:/deployment/"
     )
 
+    # Pass GPUs into the container only when the host node actually has a
+    # GPU (nvidia-smi on PATH). On a CPU-only HPC partition, --nv causes
+    # Singularity/Apptainer to fail or hang; reg_f3d falls back to CPU either
+    # way, so omitting --nv is safe and matches the container's own GPU-less
+    # path (see control_system/scripts/install_niftyreg_runtime.sh).
+    Additional=( )
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+      Additional+=( --nv )
+      echo "GPU detected on host — passing --nv into the container."
+    else
+      echo "No GPU detected on this host — launching without --nv (CPU-only)."
+      echo "Coregistration (step 05) will fall back to CPU if niftyreg/CUDA is not loaded."
+    fi
+
     bind_str=$(IFS=','; echo "${Binds[*]}")
 
     echo "Using ${RUNTIME} with image: $SIF_IMAGE"
@@ -335,7 +349,7 @@ case "$RUNTIME" in
     echo ""
 
     ${RUNTIME} exec \
-      --nv \
+      "${Additional[@]}" \
       --bind "$bind_str" \
       --pwd /FL_system \
       -e DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH" \
