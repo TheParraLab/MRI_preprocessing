@@ -33,7 +33,8 @@ jobs:
         run: |
           docker build \
             --tag "${{ secrets.REGISTRY_URL }}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" \
-            --file control_system/dockerfile .
+            --file control_system/dockerfile . \
+            --build-arg VCS_REVISION=$(git rev-parse --short HEAD)
 
       - name: Push Docker image
         run: |
