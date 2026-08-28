@@ -126,7 +126,7 @@ The pipeline consists of numbered scripts that should generally be run in order:
 
 1. **01_scanDicom.py** — Scans raw DICOM data, extracts metadata, produces `Data_table.csv`
 2. **02_parseDicom.py** — Filters scans (removes T2, DWI, computed images), orders by trigger time, produces `Data_table_timing.csv`
-3. **03_saveNifti.py** — Converts selected DICOM series to NIfTI format using dcm2niix
+3. **03_saveNifti.py** — Converts selected DICOM series to NIfTI format using dcm2niix; after conversion it runs a post-conversion audit comparing the nifti directory against `Data_table_timing.csv` (missing / extra / duplicate-Major / ghost sessions) and writes `nifti_audit.json` to the deployment log dir (pure audit, never aborts)
 4. **04_saveRAS.py** — Reorients NIfTI files to RAS orientation
 5. **05_alignScans.py** — Coregisters all scans to a reference volume
 6. **06_genInputs.py** — Generates numpy inputs for model training
@@ -165,6 +165,7 @@ Test coverage for `01_scanDicom.py` is comprehensive (89 tests). See `code/test/
 
 - ~~**Self-contained Docker image with code baked in**~~ (done) — Code is `COPY`'d into the image at build time and CUDA-enabled NiftyReg is compiled at build time (`CHECK_GPU=OFF` skips the configure-time GPU probe so the build works on GPU-less machines/CI; builds for sm_60–sm_86 + PTX). Containers start immediately — no first-run compile — which also makes Singularity/Apptainer pulls work on read-only container filesystems.
 - ~~**Per-deployment script logging**~~ (done) — `toolbox.get_log_dir()` now resolves the log directory from the `LOG_DIR` environment variable, which `start_control.sh` sets to `/deployment/logs` for Docker and Singularity runs (bound to `deployments/<deployment-id>/logs/` on the host) and to a host-local `deployments/<deployment-id>/logs/` for bare Conda runs. Manual/local runs fall back to `<repo_root>/logs`. All six pipeline steps use this helper, so every deployment produces its own isolated log set under `deployments/<id>/`.
+- ~~**Post-conversion NIfTI audit (step 03)**~~ (done) — 03_saveNifti.py now audits the nifti directory against Data_table_timing.csv (missing/extra/duplicate-Major/ghost), writes deployments/<id>/logs/nifti_audit.json, never aborts.
 
 ### MEDIUM PRIORITY
 

@@ -266,15 +266,18 @@ def audit_nifti_directory():
     ('{Major:02}.nii'), compared with what is actually on disk. Catches (a)
     rows with no file (conversion failed / timed out but step 03 moved on),
     (b) files with no row (leftovers from a previous run — 'unrequested
-    data' that a later alignment would be tempted to pair), and (c) duplicate
-    Majors in the table (dual-pre collisions: two rows, one filename).
+    data' that a later alignment would be tempted to pair), (c) duplicate
+    Majors in the table (dual-pre collisions: two rows, one filename), and
+    (d) ghost sessions — table rows with no directory at all (dcm2niix failed
+    before output was created), reported as all-expected-files-missing.
 
     Pure audit: logs per-finding at ERROR/WARNING and writes
     <deployment log dir>/nifti_audit.json. Never aborts the run — the origin
     of each mismatch is already reported where it happened (step 02 ordering,
     per-command run_cmd failures above), and step 06 decides what to trust.
 
-    Returns True if every session on disk has exact parity with its table rows.
+    Returns True if the union of table sessions and disk sessions shows exact
+    parity (no missing, extra, duplicate-Major, or ghost-session findings).
     """
     timing_csv = f'{LOAD_DIR}Data_table_timing.csv'
     if not os.path.exists(timing_csv):
@@ -291,9 +294,19 @@ def audit_nifti_directory():
 
     disk_sessions = set(
         d for d in os.listdir(SAVE_DIR) if os.path.isdir(os.path.join(SAVE_DIR, d)))
-    audit, n_missing_rows, n_extra_files, n_dup = 0, 0, 0, 0
+    all_sessions = sorted(set(expected_by_session) | disk_sessions)
+    audit, n_missing_rows, n_extra_files, n_dup, n_ghost_sessions = 0, 0, 0, 0, 0
 
-    for sid in sorted(disk_sessions):
+    for sid in all_sessions:
+        if sid in expected_by_session and sid not in disk_sessions:
+            majors = expected_by_session[sid]
+            LOGGER.error(f'[AUDIT] {sid}: present in timing table but has NO directory in nifti dir '
+                         f'({len(majors)} expected files — conversion failed before output was created)')
+            audit += 1
+            n_ghost_sessions += 1
+            n_missing_rows += len(majors)
+            continue
+
         sdir = os.path.join(SAVE_DIR, sid)
         if sid not in expected_by_session:
             LOGGER.error(f'[AUDIT] Session {sid} exists in nifti dir but has NO timing-table rows '
@@ -326,8 +339,10 @@ def audit_nifti_directory():
             LOGGER.error(f'[AUDIT] {sid}: duplicate Major values in table {mc} — filename collision, '
                          f'one conversion overwrote another')
 
-    if audit == 0 and (n_missing_rows or n_extra_files or n_dup) == 0:
-        LOGGER.info('[AUDIT] NIfTI directory matches timing table for all sessions present on disk')
+    clean = (audit == 0 and n_ghost_sessions == 0
+             and not (n_missing_rows or n_extra_files or n_dup))
+    if clean:
+        LOGGER.info('[AUDIT] NIfTI directory matches timing table for all sessions')
 
     try:
         log_dir = get_log_dir()
@@ -339,18 +354,20 @@ def audit_nifti_directory():
                 'timing_table': timing_csv,
                 'nifti_dir': SAVE_DIR,
                 'sessions_on_disk': len(disk_sessions),
-                'clean': audit == 0 and not (n_missing_rows or n_extra_files or n_dup),
+                'clean': clean,
                 'missing_files': n_missing_rows,
                 'extra_files': n_extra_files,
                 'duplicate_major_rows': n_dup,
+                'ghost_sessions': n_ghost_sessions,
             }, fh, indent=2)
         LOGGER.info(f'[AUDIT] Wrote {out_json} '
-                    f'(clean={audit == 0 and not (n_missing_rows or n_extra_files or n_dup)}, '
-                    f'missing={n_missing_rows}, extra={n_extra_files}, dup_majors={n_dup})')
+                    f'(clean={clean}, '
+                    f'missing={n_missing_rows}, extra={n_extra_files}, '
+                    f'dup_majors={n_dup}, ghost_sessions={n_ghost_sessions})')
     except Exception as e:
         LOGGER.warning(f'[AUDIT] Could not write audit json: {e}')
 
-    return audit == 0 and not (n_missing_rows or n_extra_files or n_dup)
+    return clean
 
 def handle_keyboard_interrupt(signum, frame):
     LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will complete, queued ones cancelled...')
