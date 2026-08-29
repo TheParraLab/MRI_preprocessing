@@ -10,6 +10,7 @@ on:
       - "control_system/**"
       - "code/**"
       - "requirements*.txt"
+  workflow_dispatch:
 
 jobs:
   build-and-push:
