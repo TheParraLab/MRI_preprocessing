@@ -14,6 +14,15 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Pull registry credentials into env vars so step `if:` (which cannot
+    # reference `secrets.` directly) can still gate the push.
+    env:
+      FOU_RDOU_URL:      ${{ secrets.REGISTRY_URL }}
+      FOU_RDOU_USER:     ${{ secrets.REGISTRY_USERNAME }}
+      FOU_RDOU_PASS:     ${{ secrets.REGISTRY_PASSWORD }}
+      DHUB_USER:   ${{ secrets.DOCKERHUB_USERNAME }}
+      DHUB_TOKEN:  ${{ secrets.DOCKERHUB_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
 
