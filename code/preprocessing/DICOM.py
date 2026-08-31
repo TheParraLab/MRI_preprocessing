@@ -1369,6 +1369,27 @@ class DICOMfilter():
 
 
 
+def ensure_dir_writable(dir_path: str, context: str = 'scratch') -> None:
+    """Create `dir_path` if missing; raise RuntimeError with the bind fix if the
+    containing filesystem is read-only (Apptainer/Singularity SIF default).
+
+    Callers: anywhere in the pipeline that must create a subdir under a
+    user-controlled path that may land on the squashfs build layer.
+    """
+    if os.path.exists(dir_path):
+        return
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(
+            f"Cannot create directory '{dir_path}' ({context}): {e}\n"
+            f"  The containing filesystem is read-only.\n"
+            f"  If running under Apptainer/Singularity manually, bind a writable scratch dir:\n"
+            f"    --bind \"$PWD/mri_data_base/tmp:/FL_system/data/tmp\"\n"
+            f"  or launch via start_control.sh (it binds the writable base automatically)."
+        ) from e
+
+
 class DICOMsplit():
     """
     Class used to split a single directory with multiple scans into multiple directories
@@ -1490,8 +1511,7 @@ class DICOMsplit():
             self.logger.warning(f'Error scanning {self.scan_path} | [{self.Session_ID}]')
             return 
         else:
-            if not os.path.exists(f'{self.tmp_save}/directory_scan/'):
-                os.makedirs(f'{self.tmp_save}/directory_scan/')
+            ensure_dir_writable(f'{self.tmp_save}/directory_scan/', context='scan results cache')
             self.scan_results.to_csv(f'{self.tmp_save}/directory_scan/{self.Session_ID}.csv', index=False)
             return 
     
