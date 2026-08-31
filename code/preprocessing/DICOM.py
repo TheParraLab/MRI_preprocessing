@@ -9,6 +9,7 @@ import pandas as pd
 import re
 import shutil
 from collections import defaultdict
+from toolbox import ensure_dir_writable  # re-exported for backwards compat
 
 # Tags loaded during initialization to avoid parsing megabytes of vendor private blocks.
 # Maps one-to-one to every `self.metadata.<attr>` / `getattr(self.metadata, ...)` access.
@@ -1490,8 +1491,7 @@ class DICOMsplit():
             self.logger.warning(f'Error scanning {self.scan_path} | [{self.Session_ID}]')
             return 
         else:
-            if not os.path.exists(f'{self.tmp_save}/directory_scan/'):
-                os.makedirs(f'{self.tmp_save}/directory_scan/')
+            ensure_dir_writable(f'{self.tmp_save}/directory_scan/', context='scan results cache')
             self.scan_results.to_csv(f'{self.tmp_save}/directory_scan/{self.Session_ID}.csv', index=False)
             return 
     

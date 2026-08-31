@@ -11,6 +11,8 @@ A modular pipeline for automated MRI DICOM preprocessing. Converts raw DICOM MRI
   - [Starting the Container](#starting-the-container)
   - [Direct Container Access](#direct-container-access)
   - [Running Preprocessing Steps](#running-preprocessing-steps)
+  - [HPC / Singularity-Apptainer Path Contract](#hpc--singularity-apptainer-path-contract)
+  - [Batch submission (Slurm)](#batch-submission-slurm)
 - [Preprocessing Workflow](#preprocessing-workflow)
 - [Testing](#testing)
 - [TODO / Roadmap](#todo--roadmap)
@@ -119,6 +121,96 @@ python 02_parseDicom.py --save_dir /FL_system/data
 # Full pipeline:
 bash /FL_system/code/preprocessing/00_preprocess.sh
 ```
+
+### HPC / Singularity-Apptainer Path Contract
+
+Inside the container the pipeline uses a **fixed set of paths**. Host-side
+directories are mapped onto them with bind mounts — you never edit the
+in-container paths, you point a writable host directory at each one.
+
+| In-container path | Written by | Default host source (`start_control.sh`) |
+|---|---|---|
+| `/FL_system/data` | base: `Data_table*.csv`, step 03 pickles, scratch | `./mri_data_base` (created for you) |
+| `/FL_system/data/raw` | read (raw DICOM) | `DATA_DIRECTORY_PATH` |
+| `/FL_system/data/nifti` | step 03 | `NIFTI_DIRECTORY_PATH` |
+| `/FL_system/data/RAS` | step 04 | `RAS_DIRECTORY_PATH` |
+| `/FL_system/data/coreg` | step 05 | `COREG_DIRECTORY_PATH` |
+| `/FL_system/data/inputs` | step 06 | `INPUTS_DIRECTORY_PATH` |
+| `/deployment/logs` | all steps (logs) | `deployments/<deployment-id>/logs` |
+
+`start_control.sh` sets this up for you in the Singularity/Apptainer branch: it
+creates a writable base (`./mri_data_base`) and mounts it **first**, then
+overlays the five per-purpose directories on top (the same layering
+`control_system/docker-compose.yml` uses). So a normal
+`bash start_control.sh` run needs no manual bind flags.
+
+**Read-only filesystem.** A `.sif`/`.singularity` image is a read-only
+squashfs, so any path that ends up *baked into the image* (not a bind mount)
+is not writable. The code guards every such write and, when it fails,
+raises a readable error that names the exact `--bind` to add, e.g.
+
+```
+RuntimeError: Cannot create directory '/FL_system/data/nifti' (...): [Errno 30] ...
+  The containing filesystem is read-only.
+  If running under Apptainer/Singularity manually, bind a writable scratch dir:
+    --bind "$PWD/mri_data_base/nifti:/FL_system/data/nifti"
+  or launch via start_control.sh (it binds the writable base automatically).
+```
+
+If you launch the image **by hand** (e.g. `apptainer shell mri.sif`), you must
+reproduce the same layering yourself — bind a writable base for
+`/FL_system/data` (and `/deployment` for logs) before running the pipeline.
+Prefer `start_control.sh`, which does this and pre-checks writability.
+
+### Batch submission (Slurm)
+
+To fan a large set of sessions out across the cluster rather than running them
+one at a time on a single node, submit a Slurm **array** job. Each array task
+runs one session's work inside the *same* SIF and the *same* bind contract as
+`start_control.sh` — you reuse the `--dir_idx` / `--dir_list` arguments that
+`01_scanDicom`, `02_parseDicom`, `04_saveRAS`, and `05_alignScans` already
+support. From the login node, write `submit.slurm`:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=mri_05
+#SBATCH --array=0-199               # one task per entry in list.txt
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=64G
+#SBATCH --output=logs/05_%A_%a.out
+#SBATCH --error=logs/05_%A_%a.err
+
+# --- same settings as .env (or `source .env` after exporting) ---
+DATA_BASE_DIR="$PWD/mri_data_base"          # writable base for /FL_system/data
+SIF="$PWD/control_system/mri_preprocessing.sif"
+
+apptainer exec \
+  --bind "${DATA_BASE_DIR}:/FL_system/data" \
+  --bind "${DATA_DIRECTORY_PATH}:/FL_system/data/raw" \
+  --bind "${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti" \
+  --bind "${RAS_DIRECTORY_PATH}:/FL_system/data/RAS" \
+  --bind "${COREG_DIRECTORY_PATH}:/FL_system/data/coreg" \
+  --bind "${INPUTS_DIRECTORY_PATH}:/FL_system/data/inputs" \
+  --bind "$PWD/deployments/logs:/deployment/" \
+  --pwd /FL_system \
+  -e LOG_DIR="/deployment/logs" \
+  "$SIF" \
+  python code/preprocessing/05_alignScans.py \
+    --dir_idx "${SLURM_ARRAY_TASK_ID}" \
+    --dir_list "$PWD/list.txt" \
+    --save_dir /FL_system/data/coreg
+```
+
+Notes:
+
+- `list.txt` is the flat list of session dirs (one per line) that
+  `--dir_idx` indexes into — the same format step scripts expect.
+- Add `--nv` after `apptainer exec` only if the target partition has GPUs;
+  `start_control.sh` adds it automatically when `nvidia-smi` is present and
+  skips it otherwise.
+- On a CPU-only partition, step 05's GPU health check will still call
+  `nvidia-smi`; if that aborts the job it means the node has no GPU and you
+  should re-run on a GPU partition (or drop step 05).
 
 ## Preprocessing Workflow
 
