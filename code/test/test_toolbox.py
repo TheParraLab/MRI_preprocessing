@@ -35,10 +35,12 @@ Test matrix
 
 import logging as _logging_module
 import os
+import subprocess
 import sys
 import time
 import tempfile
 import threading
+import unittest
 
 from pathlib import Path
 from functools import partial
@@ -479,3 +481,66 @@ class TestLoggerPerformance:
         assert elapsed < 5.0, (
             f"{elapsed:.2f}s for {n_threads}x{msgs_per_thread} msgs -- too slow"
         )
+
+
+# ---- Non-writable log dir (read-only SIF simulation) -----------------------
+# Simulate an Apptainer/Singularity read-only filesystem: the log directory
+# cannot be created.  get_logger() must degrade to console-only logging
+# instead of raising OSError (which is what used to kill the pipeline when
+# LOG_DIR pointed at a path on the squashfs build layer).
+
+@unittest.skipIf(sys.platform == "win32", "chmod-based read-only simulation is POSIX-only")
+class TestNonWritableLogDir(unittest.TestCase):
+    """get_logger() on a non-creatable log dir must not crash the pipeline."""
+
+    @staticmethod
+    def _toolbox_dir() -> str:
+        return str(Path(__file__).resolve().parents[2] / "code" / "preprocessing")
+
+    def _run_child(self, save_dir: str, marker: str):
+        """Run get_logger in a subprocess; returns CompletedProcess.
+
+        A subprocess is used because the non-writable ancestor is chmod-ed
+        here, so re-entrant logger state must be freshly imported."""
+        code = (
+            "import sys, time\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import toolbox as tb\n"
+            "save_dir = sys.argv[2]\n"
+            "lgr = tb.get_logger('ro_sim', save_dir=save_dir)\n"
+            "lgr.info('RO_SIM_MARKER_' + 'M1')\n"
+            "time.sleep(0.3)\n"
+            "print('CHILD_OK')\n"
+        )
+        if marker:
+            code = code.replace("'RO_SIM_MARKER_' + 'M1'", f"'RO_SIM_MARKER_{marker}'")
+        return subprocess.run(
+            [sys.executable, "-c", code, self._toolbox_dir(), save_dir],
+            text=True, capture_output=True, timeout=60,
+        )
+
+    def test_degrades_to_console_instead_of_error(self):
+        tmpdir = tempfile.mkdtemp(prefix="robase_")
+        os.chmod(tmpdir, 0o555)  # read-only: subdir creation must fail
+        try:
+            proc = self._run_child(os.path.join(tmpdir, "logs"), "ABC")
+            combined = proc.stdout + proc.stderr
+            self.assertIn("CHILD_OK", combined,
+                          f"Child crashed. rc={proc.returncode}\n"
+                          f"stdout={proc.stdout}\nstderr={proc.stderr}")
+            self.assertIn("not writable", proc.stderr,
+                          "Expected the console-only warning on stderr.")
+            self.assertIn("RO_SIM_MARKER_ABC", proc.stderr,
+                          "Expected the log record on the console.")
+        finally:
+            os.chmod(tmpdir, 0o755)
+
+    def test_no_log_dir_or_file_is_created(self):
+        tmpdir = tempfile.mkdtemp(prefix="robase_")
+        os.chmod(tmpdir, 0o555)
+        try:
+            self._run_child(os.path.join(tmpdir, "logs"), "XYZ")
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, "logs")),
+                             "Log dir must never have been created.")
+        finally:
+            os.chmod(tmpdir, 0o755)

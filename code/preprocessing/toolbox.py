@@ -72,18 +72,31 @@ def _init_child_logger(
     lgr._file_path = file_path_abs
 
     fmt = logging.Formatter(formatter_str)
-    fh = FileHandlerWithLock(file_path, mode='a')
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    lgr.addHandler(fh)
 
-  # Prevent every log line from double-writing via propagation to root handler
+    # Empty file_path means the parent ran console-only (log dir was not
+    # writable, e.g. on a read-only SIF) — mirror that here instead of trying
+    # to open an empty path.
+    if file_path:
+        fh = FileHandlerWithLock(file_path, mode='a')
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(fmt)
+        lgr.addHandler(fh)
+
+    ch_stream = logging.StreamHandler()
+    ch_stream.setLevel(logging.INFO)
+    ch_stream.setFormatter(fmt)
+    lgr.addHandler(ch_stream)
+
+    # Prevent every log line from double-writing via propagation to root handler
     lgr.propagate = False
 
     # Give the root logger a handler for bare logging calls from library code.
     root = logging.getLogger()
     if not root.handlers:
-        root_fh = FileHandlerWithLock(file_path, mode='a')
+        if file_path:
+            root_fh = FileHandlerWithLock(file_path, mode='a')
+        else:
+            root_fh = logging.StreamHandler()
         root_fh.setLevel(logger_level)
         root_fh.setFormatter(fmt)
         root.addHandler(root_fh)
@@ -224,7 +237,21 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
         save_dir = get_log_dir()
     if save_dir[-1] != '/':
         save_dir += '/'
-    os.makedirs(save_dir, exist_ok=True)
+
+    # A Singularity/Apptainer SIF is mounted read-only, so the log directory may
+    # not be writable.  Degrade to console-only logging instead of crashing the
+    # pipeline the moment the first handler tries to open the file.
+    file_ok = True
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+    except OSError as e:
+        file_ok = False
+        sys.stderr.write(
+            f'[WARNING] log directory {save_dir!r} is not writable ({e}). '
+            f'Logging to console only for this run. '
+            f'Bind a writable directory (e.g. --bind "$PWD/mri_data_base/logs:/deployment/logs") '
+            f'or set LOG_DIR to a writable path.\n'
+        )
 
     # --- underlying Logger (managed by Python's logging system) ---------------
     logger = logging.getLogger(name)
@@ -240,7 +267,12 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     if logger.handlers:
         log_level = logging.DEBUG
         formatter_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        file_path = save_dir + name + '.log' if save_dir else ''
+        # Keep a previously-established console-only decision (empty _file_path)
+        # instead of resurrecting a file path that was never writable.
+        if not getattr(logger, '_file_path', '') and not file_ok:
+            file_path = ''
+        else:
+            file_path = save_dir + name + '.log' if save_dir else ''
         logger._log_level = log_level
         logger._file_path = os.path.abspath(file_path) if file_path else ''
         logger._formatter_str = formatter_str
@@ -260,24 +292,34 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     logger.setLevel(log_level)
 
     fmt = logging.Formatter(formatter_str)
-
-    # Use plain FileHandler for the parent QueueListener consumer path.
-    # The listener drains records from a single thread, so there's only one
-    # concurrent writer and we don't need per-emit flock overhead.
-    fh_file = logging.FileHandler(file_path, mode='a')
-    fh_file.setLevel(logging.DEBUG)
-    fh_file.setFormatter(fmt)
-
     ch_stream = logging.StreamHandler()
     ch_stream.setLevel(logging.INFO)
     ch_stream.setFormatter(fmt)
 
-    # Ensure the root logger also has a handler so bare `logging.error()` calls work.
-    if not logging.getLogger().handlers:
-        root_fh = FileHandlerWithLock(file_path, mode='a')
-        root_fh.setLevel(log_level)
-        root_fh.setFormatter(fmt)
-        logging.getLogger().addHandler(root_fh)
+    if file_ok:
+        # Use plain FileHandler for the parent QueueListener consumer path.
+        # The listener drains records from a single thread, so there's only one
+        # concurrent writer and we don't need per-emit flock overhead.
+        fh_file = logging.FileHandler(file_path, mode='a')
+        fh_file.setLevel(logging.DEBUG)
+        fh_file.setFormatter(fmt)
+
+        # Ensure the root logger also has a handler so bare `logging.error()` calls work.
+        if not logging.getLogger().handlers:
+            root_fh = FileHandlerWithLock(file_path, mode='a')
+            root_fh.setLevel(log_level)
+            root_fh.setFormatter(fmt)
+            logging.getLogger().addHandler(root_fh)
+    else:
+        # Console-only degradation: no file handler, nothing opened.
+        fh_file = None
+
+        root = logging.getLogger()
+        if not root.handlers:
+            root_fh = logging.StreamHandler()
+            root_fh.setLevel(log_level)
+            root_fh.setFormatter(fmt)
+            root.addHandler(root_fh)
 
     # Producer-side QueueHandler (cheap put only) -----------------
     log_queue: 'queue.Queue[logging.LogRecord]' = queue.Queue(-1)
@@ -288,7 +330,7 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     logger.propagate = False
 
     listener = QueueListener(
-        log_queue, fh_file, ch_stream,
+        log_queue, *[h for h in (fh_file, ch_stream) if h is not None],
         respect_handler_level=True,
     )
     # Non-daemon so interpreter waits for it -> flushes pending records.
@@ -305,7 +347,9 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
     listener.start()                           # begin draining the queue immediately
 
     logger._log_level = logging.DEBUG
-    logger._file_path = os.path.abspath(file_path) if file_path else ''
+    # Empty _file_path signals "console-only": run_function propagates it to
+    # spawned children so they also skip constructing a file handler.
+    logger._file_path = os.path.abspath(file_path) if (file_ok and file_path) else ''
     logger._formatter_str = formatter_str
 
     ctx = _LoggerProxy(logger)
