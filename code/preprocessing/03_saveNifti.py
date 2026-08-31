@@ -14,7 +14,7 @@ import time
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
-from toolbox import ProgressBar, get_logger, run_function
+from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable
 from DICOM import DICOMfilter, DICOMorder
 
 # Global variables for progress bar and lock
@@ -60,9 +60,11 @@ def check_source_files(source_path: str) -> bool:
 def save_progress(data, filename):
     """Save progress to a file."""
     LOGGER.info(f'Saving progress to {filename}')
-    if os.path.exists(f'{LOAD_DIR}{filename}'):
-        os.remove(f'{LOAD_DIR}{filename}')
-    with open(f'{LOAD_DIR}{filename}', 'wb') as f:
+    dest = f'{LOAD_DIR}{filename}'
+    ensure_dir_writable(os.path.dirname(dest), context='progress file location')
+    if os.path.exists(dest):
+        os.remove(dest)
+    with open(dest, 'wb') as f:
         pickle.dump(data, f)
 
 def load_progress(filename):
@@ -206,12 +208,9 @@ def run_cmd(command, commands):
             return
 
     if not os.path.isdir(f'{SAVE_DIR}{SessionID}'):
-        try:
-            os.mkdir(f'{SAVE_DIR}{SessionID}')
-            if DEBUG > 0:
-                LOGGER.debug(f'Created directory for {SessionID}')
-        except FileExistsError:
-            LOGGER.warning(f'Directory for {SessionID} already exists')
+        ensure_dir_writable(f'{SAVE_DIR}{SessionID}', context=f'save dir for session {SessionID}')
+        if DEBUG > 0:
+            LOGGER.debug(f'Created directory for {SessionID}')
 
     LOGGER.info(f'[RUN] Executing dcm2niix for {file_name}')
     t0 = time.time()
@@ -400,7 +399,7 @@ if __name__ == '__main__':
     else:
         LOGGER.info('No progress file found. Starting from scratch')
         if not os.path.exists(SAVE_DIR):
-            os.mkdir(SAVE_DIR)
+            ensure_dir_writable(SAVE_DIR, context='saveNifti output dir')
 
         # Load the timing information
         Data_table = pd.read_csv(f'{LOAD_DIR}Data_table_timing.csv')

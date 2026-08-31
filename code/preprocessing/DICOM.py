@@ -9,6 +9,7 @@ import pandas as pd
 import re
 import shutil
 from collections import defaultdict
+from toolbox import ensure_dir_writable  # re-exported for backwards compat
 
 # Tags loaded during initialization to avoid parsing megabytes of vendor private blocks.
 # Maps one-to-one to every `self.metadata.<attr>` / `getattr(self.metadata, ...)` access.
@@ -1367,27 +1368,6 @@ class DICOMfilter():
         self.print_table(columns=['Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series', 'IS_DISCO', 'Pre_scan', 'Post_scan'])
         return True
 
-
-
-def ensure_dir_writable(dir_path: str, context: str = 'scratch') -> None:
-    """Create `dir_path` if missing; raise RuntimeError with the bind fix if the
-    containing filesystem is read-only (Apptainer/Singularity SIF default).
-
-    Callers: anywhere in the pipeline that must create a subdir under a
-    user-controlled path that may land on the squashfs build layer.
-    """
-    if os.path.exists(dir_path):
-        return
-    try:
-        os.makedirs(dir_path, exist_ok=True)
-    except OSError as e:
-        raise RuntimeError(
-            f"Cannot create directory '{dir_path}' ({context}): {e}\n"
-            f"  The containing filesystem is read-only.\n"
-            f"  If running under Apptainer/Singularity manually, bind a writable scratch dir:\n"
-            f"    --bind \"$PWD/mri_data_base/tmp:/FL_system/data/tmp\"\n"
-            f"  or launch via start_control.sh (it binds the writable base automatically)."
-        ) from e
 
 
 class DICOMsplit():

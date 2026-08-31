@@ -29,6 +29,62 @@ def _stop_all_listeners() -> None:
 _atexit.register(_stop_all_listeners)
 
 
+# ---- Writable-target guard (read-only SIF defense) -------------------------
+
+_DATA_BASE = '/FL_system/data'
+
+
+def _derive_bind_hint(dir_path: str) -> str:
+    """Return the ``--bind`` hint line for a failing in-container path, or
+    ``''`` if the path is outside the canonical writable base.
+
+    Paths under ``/FL_system/data/<sub>/`` map to
+    ``$PWD/mri_data_base/<sub>:/FL_system/data/<sub>``.
+    """
+    norm = os.path.normpath(dir_path)
+    base = _DATA_BASE
+    if norm == base or norm.startswith(base + os.sep):
+        sub = os.path.relpath(norm, base)
+        if sub == '.':
+            host_sub = 'mri_data_base'
+            container = base
+        else:
+            host_sub = f'mri_data_base/{sub}'
+            container = norm
+        return (
+            "  If running under Apptainer/Singularity manually, bind a writable scratch dir:\n"
+            f'    --bind "$PWD/{host_sub}:{container}"\n'
+        )
+    return ''
+
+
+def ensure_dir_writable(dir_path: str, context: str = 'scratch') -> None:
+    """Create `dir_path` if missing; raise RuntimeError with an actionable
+    message if the containing filesystem is read-only (Apptainer/Singularity
+    SIF default, or a manual `apptainer run` without a writable base bind).
+
+    The bind hint is auto-derived from the in-container path: any failing
+    path under /FL_system/data/<sub>/ becomes
+        --bind "$PWD/mri_data_base/<sub>:/FL_system/data/<sub>"
+    Paths outside that base get a generic message.
+
+    Callers: anywhere in the pipeline that must create a subdir under a
+    user-controlled path that may land on the squashfs build layer.
+    """
+    if os.path.exists(dir_path):
+        return
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+    except OSError as e:
+        bind_block = _derive_bind_hint(dir_path)
+        raise RuntimeError(
+            f"Cannot create directory '{dir_path}' ({context}): {e}\n"
+            f"  The containing filesystem is read-only.\n"
+            f"{bind_block}"
+            f"  or launch via start_control.sh (it binds the writable base automatically)."
+        ) from e
+
+
 # ---- Handlers --------------------------------------------------------------
 
 class FileHandlerWithLock(logging.FileHandler):
