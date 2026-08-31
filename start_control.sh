@@ -312,7 +312,24 @@ case "$RUNTIME" in
       echo "Image cached at ${SIF_IMAGE}"
     fi
 
+    # Writable base for /FL_system/data. The pipeline writes to the data
+    # TOP-LEVEL (step 03 progress pickles, Data_table*.csv), to /FL_system/data/tmp
+    # (01/02 scratch), and to checkpoints — none of which are covered by the five
+    # subdirectory binds below. Mount a real host directory as the base first,
+    # then overlay the five per-purpose dirs on top (same layering docker-compose.yml uses).
+    DATA_BASE_DIR="${project_directory_path}/mri_data_base"
+    mkdir -p "${DATA_BASE_DIR}/tmp" || {
+      echo "ERROR: Cannot create writable data base at ${DATA_BASE_DIR}."
+      echo "       The pipeline needs a writable host dir backing /FL_system/data."
+      exit 1
+    }
+    if [ ! -w "$DATA_BASE_DIR" ]; then
+      echo "ERROR: Data base ${DATA_BASE_DIR} is not writable (check storage permissions/quota)."
+      exit 1
+    fi
+
     Binds=(
+      "${DATA_BASE_DIR}:/FL_system/data"
       "${DATA_DIRECTORY_PATH}:/FL_system/data/raw"
       "${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti"
       "${RAS_DIRECTORY_PATH}:/FL_system/data/RAS"
