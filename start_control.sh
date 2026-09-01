@@ -484,13 +484,19 @@ case "$RUNTIME" in
     # user's 'could not open image …DATA_DIRECTORY_PATH=…' error.
     BindFlags=( )
     for b in "${Binds[@]}"; do BindFlags+=( --bind "$b" ); done
+    # Use --env KEY=VAL (long form) rather than -e KEY=VAL.  On classic
+    # Singularity 3.x / Apptainer, `-e` is the boolean "pass all environment
+    # variables" flag and does NOT take a value; the value-taking form is
+    # `--env KEY=VAL`.  Using -e KEY=VALUE makes the runtime parse the
+    # KEY=VALUE token as the image path, producing:
+    #   "could not open image ...DATA_DIRECTORY_PATH=/hpc/..."
     EnvFlags=(
-      -e DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH"
-      -e NIFTI_DIRECTORY_PATH="$NIFTI_DIRECTORY_PATH"
-      -e RAS_DIRECTORY_PATH="$RAS_DIRECTORY_PATH"
-      -e COREG_DIRECTORY_PATH="$COREG_DIRECTORY_PATH"
-      -e INPUTS_DIRECTORY_PATH="$INPUTS_DIRECTORY_PATH"
-      -e LOG_DIR="/deployment/logs"
+      --env DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH"
+      --env NIFTI_DIRECTORY_PATH="$NIFTI_DIRECTORY_PATH"
+      --env RAS_DIRECTORY_PATH="$RAS_DIRECTORY_PATH"
+      --env COREG_DIRECTORY_PATH="$COREG_DIRECTORY_PATH"
+      --env INPUTS_DIRECTORY_PATH="$INPUTS_DIRECTORY_PATH"
+      --env LOG_DIR="/deployment/logs"
     )
 
     echo "Using ${RUNTIME} with image: $SIF_IMAGE"
