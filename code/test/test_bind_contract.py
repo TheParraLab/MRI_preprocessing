@@ -127,5 +127,66 @@ def test_two_launch_files_agree_on_data_paths(sc_targets, compose_targets):
     )
 
 
+# ---------------------------------------------------------------------------
+# Env-flag regression guard (root cause of the 'could not open image' failure)
+# ---------------------------------------------------------------------------
+#
+# Classic Singularity 3.x / Apptainer define two DIFFERENT flags:
+#   -e, --env            boolean: pass all host environment variables
+#   --env KEY=VALUE      value-taking: set one specific variable
+#
+# A value-taking call written as `-e KEY=VALUE` therefore causes the runtime
+# to parse KEY=VALUE as the image path, producing the user-visible error:
+#   "could not open image ...DATA_DIRECTORY_PATH=/hpc/..."
+#
+# Pin the launcher to the safe form --env KEY=VALUE and forbid the broken
+# short-form `-e KEY=VALUE` pattern so a future refactoring cannot silently
+# regress this.
+_SHORT_E_ENV_RE = re.compile(r"(^|\s)-e\s+[A-Za-z_][A-Za-z0-9_]*=")
+_LONG_E_ENV_RE = re.compile(r"--env\s+[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def test_start_control_uses_long_env_flag_not_short_e():
+    """start_control.sh must use --env KEY=VALUE, not -e KEY=VALUE."""
+    assert START_CONTROL.exists(), f"missing {START_CONTROL}"
+    text = START_CONTROL.read_text()
+    # Exclude comment lines — the comment block above the EnvFlags array
+    # explains the rule and legitimately mentions the `-e KEY=VALUE` pattern.
+    code_only = "\n".join(
+        ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+    )
+    bad_in_code = re.findall(_SHORT_E_ENV_RE, code_only)
+    assert not bad_in_code, (
+        "start_control.sh uses the short -e flag which is boolean on "
+        "classic Singularity 3.x / Apptainer. Use --env KEY=VALUE instead; "
+        "otherwise the runtime parses the KEY=VALUE token as the image path "
+        "and reports 'could not open image'."
+    )
+
+
+def test_start_control_has_env_flags_for_pipeline_vars():
+    """The pipeline variables must still be passed into the container via --env.
+
+    The pipeline inside the SIF currently relies on LOG_DIR (and, in the
+    future, on explicit *_DIRECTORY_PATH overrides for debugging); if these
+    are ever removed entirely, the SIF runs with host env unset and the
+    logger falls back silently, masking configuration errors.
+    """
+    assert START_CONTROL.exists(), f"missing {START_CONTROL}"
+    text = START_CONTROL.read_text()
+    code_only = "\n".join(
+        ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+    )
+    required = [
+        re.compile(r"--env\s+LOG_DIR="),
+    ]
+    for pat in required:
+        assert pat.search(code_only), (
+            f"start_control.sh must pass '{pat.pattern}' into the "
+            f"container; the container logger (toolbox.get_log_dir) expects "
+            f"a LOG_DIR env var."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

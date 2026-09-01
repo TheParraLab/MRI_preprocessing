@@ -36,12 +36,63 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 0
 fi
 
-# Source variables (each line must be KEY=VALUE with no surrounding whitespace)
-while IFS='=' read -r key value || [ -n "$key" ]; do
-  # Skip comments and blank lines
-  [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+# Source variables. Each line must be KEY=VALUE. Robust to:
+#   - Windows line endings (CRLF) — stripped before parsing.
+#   - Leading/trailing whitespace around key or value.
+#   - Inline ` # comment` (whitespace-prefixed) — stripped, but `KEY=a#b`
+#     keeps the `#b` literal (dotenv semantics: '#' is only a comment when
+#     preceded by whitespace).
+#   - A missing `=` or an invalid variable name.
+# On any malformed line we name the file + line number and abort before
+# the value can reach apptainer and produce an inscrutable "could not open
+# image <garbage>" error.
+env_malformed=0
+line_no=0
+while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+  line_no=$((line_no + 1))
+
+  # Strip CR (CRLF files) and surrounding whitespace.
+  line="${raw_line%$'\r'}"
+  while [[ -n "$line" && "${line:0:1}" == " " || "${line:0:1}" == $'\t' ]]; do line="${line:1}"; done
+  while [[ -n "$line" && "${line: -1}" == " " || "${line: -1}" == $'\t' ]];   do line="${line:0:${#line}-1}"; done
+
+  # Skip blank lines and full-line comments.
+  if [ -z "$line" ]; then continue; fi
+  if [ "${line:0:1}" = "#" ]; then continue; fi
+
+  # Inline comment: truncate at the first whitespace-preceded '#' (space or
+  # tab). `KEY=a#b` keeps `#b` (the '#' is not whitespace-preceded, so it is
+  # part of the value per dotenv semantics). ${line%%pat*} is a no-op when
+  # no match, so this line is safe either way.
+  line="${line%%[[:space:]]#*}"
+  while [[ "${line: -1}" == " " || "${line: -1}" == $'\t' ]]; do line="${line:0:${#line}-1}"; done
+  if [ -z "$line" ]; then continue; fi
+
+  # Must contain an '=' separator. A bare word on its own line is malformed.
+  if [[ "$line" != *"="* ]]; then
+    echo "ERROR: ${ENV_FILE}:${line_no}: expected KEY=VALUE, got: ${line}"
+    env_malformed=1
+    continue
+  fi
+
+  key="${line%%=*}"
+  value="${line#*=}"
+
+  # Key must be a valid shell identifier.
+  if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "ERROR: ${ENV_FILE}:${line_no}: invalid variable name '${key}'"
+    env_malformed=1
+    continue
+  fi
+
   export "${key}=${value}"
 done < "$ENV_FILE"
+
+if [ "${env_malformed}" -eq 1 ]; then
+  echo ""
+  echo "Aborting: fix the malformed .env line(s) above and re-run."
+  exit 1
+fi
 
 # ── Validate required paths ─────────────────────────────────────
 required_vars=(
@@ -298,18 +349,62 @@ case "$RUNTIME" in
     ;;
 
   singularity|apptainer)
+    # ── Validate the SIF path before attempting anything ───────────
+    # A malformed SIF_PATH (a directory, an empty string, one containing
+    # '=' or ' ' — the class of .env corruption that produced the
+    # 'could not open image <garbage>' error) is diagnosed locally with
+    # a readable message, not handed to apptainer to surface.
     SIF_IMAGE="${SIF_PATH:-./control_system/mri_preprocessing.sif}"
+    if [ -z "$SIF_IMAGE" ]; then
+      echo "ERROR: SIF_PATH is empty. Set SIF_PATH to the .sif file in .env"
+      echo "       (e.g. SIF_PATH=$PWD/control_system/mri_preprocessing.sif)."
+      exit 1
+    fi
+    if [ "${SIF_IMAGE: -1}" = "/" ]; then
+      echo "ERROR: SIF_PATH is a directory: ${SIF_IMAGE}"
+      echo "       Set SIF_PATH to a file path (…/mri_preprocessing.sif), not a directory."
+      exit 1
+    fi
+    if [[ "$SIF_IMAGE" == *" "* || "$SIF_IMAGE" == *"="* ]]; then
+      echo "ERROR: SIF_PATH contains whitespace or '=': ${SIF_IMAGE}"
+      echo "       It may have been corrupted by .env parsing (two values on one line)."
+      echo "       Check the SIF_PATH line in .env: it should be a single absolute path to a .sif file."
+      exit 1
+    fi
+    # If it exists, it must be a regular file (not a directory).
+    if [ -e "$SIF_IMAGE" ] && [ ! -f "$SIF_IMAGE" ]; then
+      echo "ERROR: SIF_PATH exists but is not a regular file: ${SIF_IMAGE}"
+      [ -d "$SIF_IMAGE" ] && echo "       It is a directory — that is not a valid .sif location."
+      exit 1
+    fi
+
     REGISTRY_REF="$(image_ref)"
 
     if [ ! -f "$SIF_IMAGE" ]; then
+      # Ensure the parent directory exists (so the pull actually lands somewhere).
+      sif_parent="$(dirname "$SIF_IMAGE")"
+      if [ ! -d "$sif_parent" ]; then
+        mkdir -p "$sif_parent" || { echo "ERROR: Cannot create ${sif_parent}/ for the .sif"; exit 1; }
+      fi
       echo "No local .sif found. Pulling from registry: ${REGISTRY_REF}"
+      echo "       (This can take a while for a large CUDA image — be patient.)"
       "${RUNTIME}" pull "$SIF_IMAGE" "docker://${REGISTRY_REF}" || {
         echo ""
         echo "ERROR: Failed to pull image from ${REGISTRY_REF}"
-        echo "Check that the registry URL is correct and accessible."
+        echo "Check that the registry URL is correct and accessible, and that"
+        echo "this node has outbound network access."
         exit 1
       }
       echo "Image cached at ${SIF_IMAGE}"
+    fi
+    # Final sanity: the file the exec command will reference must now be a
+    # non-empty regular file. This is the exact failure that produced the
+    # user's 'could not open image' error — catch it here with a clean message.
+    if [ ! -f "$SIF_IMAGE" ] || [ ! -s "$SIF_IMAGE" ] || [ ! -r "$SIF_IMAGE" ]; then
+      echo "ERROR: SIF image is not a readable, non-empty file: ${SIF_IMAGE}"
+      rm -f "$SIF_IMAGE" 2>/dev/null || true
+      echo "       Removed the partial/empty file; re-run to retry the pull."
+      exit 1
     fi
 
     # Writable base for /FL_system/data. The pipeline writes to the data
@@ -327,6 +422,36 @@ case "$RUNTIME" in
       echo "ERROR: Data base ${DATA_BASE_DIR} is not writable (check storage permissions/quota)."
       exit 1
     fi
+
+    # ── Validate every data path before it can reach apptainer ──────
+    # Each must be a non-empty absolute path, free of the .env-corruption
+    # signatures ('=' from a merged line, or leading/trailing whitespace).
+    _validate_path() {
+      local name="$1" val="$2"
+      if [ -z "$val" ]; then
+        echo "ERROR: ${name} is empty in .env."
+        return 1
+      fi
+      if [[ "$val" != /* ]]; then
+        echo "ERROR: ${name} must be an absolute path, got: ${val}"
+        return 1
+      fi
+      if [[ "$val" == *"="* ]]; then
+        echo "ERROR: ${name} contains '=' — looks like two assignments on one line in .env."
+        echo "       Current value: ${val}"
+        return 1
+      fi
+      if [[ "$val" == " "* || "$val" == *" " ]]; then
+        echo "WARNING: ${name} contains spaces: ${val}"
+      fi
+      if [ ! -d "$val" ]; then
+        echo "WARNING: ${name} does not exist yet (will be created): ${val}"
+      fi
+      return 0
+    }
+    for p in DATA_DIRECTORY_PATH NIFTI_DIRECTORY_PATH RAS_DIRECTORY_PATH COREG_DIRECTORY_PATH INPUTS_DIRECTORY_PATH; do
+      _validate_path "$p" "${!p}" || exit 1
+    done
 
     Binds=(
       "${DATA_BASE_DIR}:/FL_system/data"
@@ -352,7 +477,27 @@ case "$RUNTIME" in
       echo "Coregistration (step 05) will fall back to CPU if niftyreg/CUDA is not loaded."
     fi
 
-    bind_str=$(IFS=','; echo "${Binds[*]}")
+    # Use REPEATED --bind flags (one per mount) rather than a single
+    # comma-joined string: classic Singularity 2.x requires the repeated
+    # form, Apptainer/Singularity-CE accepts both. This also removes any
+    # ambiguity about which token is the image, which is what surfaced the
+    # user's 'could not open image …DATA_DIRECTORY_PATH=…' error.
+    BindFlags=( )
+    for b in "${Binds[@]}"; do BindFlags+=( --bind "$b" ); done
+    # Use --env KEY=VAL (long form) rather than -e KEY=VAL.  On classic
+    # Singularity 3.x / Apptainer, `-e` is the boolean "pass all environment
+    # variables" flag and does NOT take a value; the value-taking form is
+    # `--env KEY=VAL`.  Using -e KEY=VALUE makes the runtime parse the
+    # KEY=VALUE token as the image path, producing:
+    #   "could not open image ...DATA_DIRECTORY_PATH=/hpc/..."
+    EnvFlags=(
+      --env DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH"
+      --env NIFTI_DIRECTORY_PATH="$NIFTI_DIRECTORY_PATH"
+      --env RAS_DIRECTORY_PATH="$RAS_DIRECTORY_PATH"
+      --env COREG_DIRECTORY_PATH="$COREG_DIRECTORY_PATH"
+      --env INPUTS_DIRECTORY_PATH="$INPUTS_DIRECTORY_PATH"
+      --env LOG_DIR="/deployment/logs"
+    )
 
     echo "Using ${RUNTIME} with image: $SIF_IMAGE"
     echo "Registry reference: ${REGISTRY_REF}"
@@ -365,13 +510,21 @@ case "$RUNTIME" in
     echo "  bash code/preprocessing/00_preprocess.sh              (runs all steps)"
     echo ""
 
+    # Record the exact command into the deployment manifest for offline
+    # reproduction, then launch.
+    {
+      printf 'exec: '
+      for tok in ${RUNTIME} ${Additional[@]+"${Additional[@]}"} ${BindFlags[@]+"${BindFlags[@]}"} ${EnvFlags[@]+"${EnvFlags[@]}"} --pwd /FL_system "$SIF_IMAGE" bash; do
+        printf '%q ' "$tok"
+      done
+      printf '\n'
+    } >> "${DEPLOY_LOG_DIR}/manifest_exec.txt"
+
     ${RUNTIME} exec \
-      "${Additional[@]}" \
-      --bind "$bind_str" \
+      ${Additional[@]+"${Additional[@]}"} \
+      ${BindFlags[@]+"${BindFlags[@]}"} \
+      ${EnvFlags[@]+"${EnvFlags[@]}"} \
       --pwd /FL_system \
-      -e DATA_DIRECTORY_PATH="$DATA_DIRECTORY_PATH" \
-      -e NIFTI_DIRECTORY_PATH="$NIFTI_DIRECTORY_PATH" \
-      -e LOG_DIR="/deployment/logs" \
       "$SIF_IMAGE" bash
     ;;
 
