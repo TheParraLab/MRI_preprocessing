@@ -5,10 +5,11 @@ to a plain-text file (one session ID per line).
 Usage:
   python extract_sessions.py <scan_result.json> [-o OUTPUT.txt]
 """
-import json
 import os
 import sys
 from argparse import ArgumentParser
+
+import checksum_core as core
 
 parser = ArgumentParser(description="Extract session IDs from a scan result JSON into a plain-text file.")
 parser.add_argument("scan_file", help="Path to the scan result JSON file.")
@@ -19,10 +20,13 @@ if not os.path.isfile(args.scan_file):
     print(f"Error: {args.scan_file} not found.", file=sys.stderr)
     sys.exit(1)
 
-with open(args.scan_file, 'r') as f:
-    data = json.load(f)
+try:
+    _, results = core.load_scan(args.scan_file)
+except (ValueError, OSError) as e:
+    print(f"Error loading scan: {e}", file=sys.stderr)
+    sys.exit(1)
 
-sessions = sorted(data["results"].keys())
+sessions = sorted(results.keys())
 
 if not sessions:
     print("No sessions found in scan result.")
@@ -34,8 +38,5 @@ else:
     base = os.path.splitext(os.path.basename(args.scan_file))[0]
     output_path = os.path.join(os.path.dirname(args.scan_file) or ".", f"{base}_sessions.txt")
 
-with open(output_path, 'w') as f:
-    f.write("\n".join(sessions))
-    f.write("\n")
-
-print(f"Wrote {len(sessions)} session IDs to {output_path}")
+n = core.write_session_list(output_path, sessions)
+print(f"Wrote {n} session IDs to {output_path}")

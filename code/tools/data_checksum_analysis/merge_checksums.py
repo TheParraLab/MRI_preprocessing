@@ -8,10 +8,13 @@ JSON with statistics and per-session file listings.
 Usage:
   python merge_checksums.py <scan1.json> <scan2.json> [-o OUTPUT.json]
 """
-import json
 import os
+import sys
+import json
 from argparse import ArgumentParser
 from datetime import datetime, timezone
+
+import checksum_core as core
 
 parser = ArgumentParser(description="Merge two checksum scan result JSON files into a single comparison file.")
 parser.add_argument("scan1", help="Path to the first scan result JSON file (primary/source).")
@@ -21,81 +24,81 @@ args = parser.parse_args()
 
 start_time = datetime.now(timezone.utc)
 
-with open(args.scan1, 'r') as f:
-    scan1 = json.load(f)
-with open(args.scan2, 'r') as f:
-    scan2 = json.load(f)
+for path in (args.scan1, args.scan2):
+    if not os.path.isfile(path):
+        print(f"Error: {path} not found.", file=sys.stderr)
+        sys.exit(1)
 
-print(f"Loaded scan1: {args.scan1}  ({len(scan1['results'])} sessions, {sum(len(d['files']) for d in scan1['results'].values())} files)")
-print(f"Loaded scan2: {args.scan2}  ({len(scan2['results'])} sessions, {sum(len(d['files']) for d in scan2['results'].values())} files)")
+try:
+    primary_header, primary = core.load_scan(args.scan1)
+    secondary_header, secondary = core.load_scan(args.scan2)
+except (ValueError, OSError) as e:
+    print(f"Error loading scan: {e}", file=sys.stderr)
+    sys.exit(1)
 
-index1 = {}
-for session, data in scan1['results'].items():
-    for f in data['files']:
-        key = os.path.join(session, f['file_name'])
-        index1[key] = f['md5']
+n1 = sum(len(d["files"]) for d in primary.values())
+n2 = sum(len(d["files"]) for d in secondary.values())
+print(f"Loaded scan1: {args.scan1}  ({len(primary)} sessions, {n1} files)")
+print(f"Loaded scan2: {args.scan2}  ({len(secondary)} sessions, {n2} files)")
 
-index2 = {}
-for session, data in scan2['results'].items():
-    for f in data['files']:
-        key = os.path.join(session, f['file_name'])
-        index2[key] = f['md5']
-
+index1 = core.build_index(primary)
+index2 = core.build_index(secondary)
 all_paths = sorted(set(index1.keys()) | set(index2.keys()))
 
 merged_results = {}
-stats = {"identical": 0, "modified": 0, "primary_only": 0, "secondary_only": 0}
+stats = core.summarize_stats(index1, index2)
 
 for path in all_paths:
-    md5_1 = index1.get(path)
-    md5_2 = index2.get(path)
-
+    p = index1.get(path)
+    s = index2.get(path)
     session, file_name = os.path.split(path)
     file_entry = {"file_name": file_name}
 
-    if md5_1 is not None and md5_2 is not None:
-        if md5_1 == md5_2:
-            file_entry["md5"] = md5_1
+    if p is not None and s is not None:
+        if core._digest_match(p, s):
+            file_entry["md5"] = p.get("digest")
             file_entry["source"] = "both"
-            stats["identical"] += 1
         else:
-            file_entry["md5"] = md5_1
-            file_entry["md5_secondary"] = md5_2
+            file_entry["md5"] = p.get("digest")
+            file_entry["md5_secondary"] = s.get("digest")
             file_entry["source"] = "both_modified"
-            stats["modified"] += 1
-    elif md5_1 is not None:
-        file_entry["md5"] = md5_1
+    elif p is not None:
+        file_entry["md5"] = p.get("digest")
         file_entry["source"] = "primary"
-        stats["primary_only"] += 1
     else:
-        file_entry["md5"] = md5_2
+        file_entry["md5"] = s.get("digest")
         file_entry["source"] = "secondary"
-        stats["secondary_only"] += 1
 
-    if session not in merged_results:
-        merged_results[session] = {"files": []}
-    merged_results[session]["files"].append(file_entry)
+    key = session or ""
+    merged_results.setdefault(key, {"files": []})["files"].append(file_entry)
 
 stop_time = datetime.now(timezone.utc)
 
+summary = {k: v for k, v in stats.items() if k != "algorithm_mismatch"}
 output = {
     "header": {
-        "primary_scan": scan1["header"],
-        "secondary_scan": scan2["header"],
+        "primary_scan": primary_header,
+        "secondary_scan": secondary_header,
         "merged_at": stop_time.isoformat(),
-        "summary": stats,
+        "summary": summary,
+        "algorithm_mismatch": stats.get("algorithm_mismatch", False),
     },
     "results": merged_results,
 }
 
 output_path = args.output if args.output else "merged_comparison.json"
+out_dir = os.path.dirname(os.path.abspath(output_path))
+os.makedirs(out_dir, exist_ok=True)
 with open(output_path, 'w') as f:
     json.dump(output, f, indent=2)
 
 total_files = sum(len(d["files"]) for d in merged_results.values())
+elapsed = (stop_time - start_time).total_seconds()
 print(f"\nMerged {total_files} files ({len(merged_results)} sessions) -> {output_path}")
 print(f"  Identical:      {stats['identical']}")
 print(f"  Modified:       {stats['modified']}")
 print(f"  Primary only:   {stats['primary_only']}")
 print(f"  Secondary only: {stats['secondary_only']}")
-print(f"  Elapsed: {(stop_time - start_time).total_seconds():.1f}s")
+if stats.get("algorithm_mismatch"):
+    print("  WARNING: some files were compared across different hash algorithms.")
+print(f"  Elapsed: {elapsed:.1f}s")
