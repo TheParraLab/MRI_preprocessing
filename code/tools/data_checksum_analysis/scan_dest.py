@@ -1,10 +1,10 @@
 """
-Scan a directory tree, compute MD5 checksums for every file, and save
-the results as a JSON file in scan_results/.
+Scan a directory tree, compute checksums for every file, and save the
+results as a JSON file in scan_results/.
 
 Organizes files by parent session directory. Outputs a JSON file with
-metadata (scan directory, start/stop timestamps) and a checksum entry
-for each file found.
+metadata (scan directory, start/stop timestamps, algorithm, file counts)
+and a checksum entry for each file found.
 
 Usage:
   python scan_dest.py /path/to/scan [options]
@@ -13,19 +13,22 @@ Options:
   --skip DIR              Directory name(s) to skip (can be repeated).
   --skip-file FILE        Text file with session names to skip (one per line).
   --output FILE           Output filename (defaults to auto-generated).
+  --hash ALGO             Hash algorithm: sha256 (default) or md5.
+  --workers N             Number of worker threads for hashing.
 """
-import json
 import os
 import sys
 from argparse import ArgumentParser
-from datetime import datetime, timezone
-from hashlib import md5
 
-parser = ArgumentParser(description="Scan a directory tree and compute MD5 checksums for every file.")
+import checksum_core as core
+
+parser = ArgumentParser(description="Scan a directory tree and compute checksums for every file.")
 parser.add_argument("scan_dir", help="Root directory to scan. Session subdirectories will be checksummed.")
 parser.add_argument("--skip", action="append", default=[], help="Session directory names to skip (can be repeated).")
 parser.add_argument("--skip-file", help="Text file with session names to skip (one per line).")
 parser.add_argument("--output", help="Output filename in scan_results/ (defaults to auto-generated).")
+parser.add_argument("--hash", choices=["sha256", "md5"], default=core.DEFAULT_ALGO, help="Hash algorithm.")
+parser.add_argument("--workers", type=int, default=None, help="Number of hashing threads (default: cpu_count).")
 args = parser.parse_args()
 
 if not os.path.isdir(args.scan_dir):
@@ -40,73 +43,35 @@ if args.skip_file:
     with open(args.skip_file, 'r') as f:
         skip_list.extend(line.strip() for line in f if line.strip())
 
-def file_md5(file_path):
-    hash_md5 = md5()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
-
-start_time = datetime.now(timezone.utc)
-skip_set = set(skip_list)
 print(f'Scanning directory: {args.scan_dir}')
-if skip_set:
-    print(f'Skipping sessions: {sorted(skip_set)}')
+if skip_list:
+    print(f'Skipping sessions: {sorted(set(skip_list))}')
+print(f'Using hash algorithm: {args.hash}')
 
-results = {}
-
-for root, dirs, files in os.walk(args.scan_dir):
-    if root == args.scan_dir:
-        continue
-
-    session_id = os.path.basename(root)
-
-    if session_id in skip_set:
-        print(f'Skipping session: {session_id}')
-        continue
-
-    session_files = []
-
-    for file in sorted(files):
-        file_path = os.path.join(root, file)
-        try:
-            session_files.append({
-                'file_name': file,
-                'md5': file_md5(file_path),
-            })
-        except (OSError, PermissionError):
-            print(f'  Warning: could not read {file_path}, skipping.')
-
-    if session_files:
-        results[session_id] = {
-            'files': session_files,
-        }
-
-stop_time = datetime.now(timezone.utc)
+try:
+    header, results = core.scan_tree(
+        args.scan_dir, algo=args.hash, skip=skip_list, n_workers=args.workers
+    )
+except (OSError, NotADirectoryError) as e:
+    print(f"Error: {e}", file=sys.stderr)
+    sys.exit(1)
 
 output = {
-    'header': {
-        'scan_dir': args.scan_dir,
-        'start_time': start_time.isoformat(),
-        'stop_time': stop_time.isoformat(),
-        'skipped': sorted(skip_set),
-    },
-    'results': results
+    "header": header,
+    "results": results,
 }
 
 results_dir = os.path.join(os.getcwd(), 'scan_results')
 os.makedirs(results_dir, exist_ok=True)
 
 if args.output:
-    output_file = args.output
+    output_path = os.path.join(results_dir, os.path.basename(args.output))
 else:
-    output_file = 'scan_results_0.json'
-    if os.path.exists(os.path.join(results_dir, output_file)):
-        N = output_file.split('_')[-1].split('.')[0]
-        N = int(N)
-        output_file = f'scan_results_{N + 1}.json'
+    output_path = core.alloc_scan_name(results_dir, base="scan_results", ext="json")
 
-output_path = os.path.join(results_dir, output_file)
 with open(output_path, 'w', encoding='utf-8') as f:
+    import json
     json.dump(output, f, indent=2)
+
+print(f'Finished: {header["n_sessions"]} sessions, {header["n_files"]} files ({args.hash})')
 print(f'Saved JSON results to: {output_path}')
