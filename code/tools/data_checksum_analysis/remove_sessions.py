@@ -5,7 +5,7 @@ Reads session IDs (one per line) from a text file and deletes each
 corresponding directory from the target path.
 
 Usage:
-  python remove_sessions.py <sessions.txt> <target_dir> [--dry-run]
+  python remove_sessions.py <sessions.txt> <target_dir> [--dry-run] [--yes]
 """
 import os
 import sys
@@ -16,6 +16,7 @@ parser = ArgumentParser(description="Remove session directories listed in a plai
 parser.add_argument("session_file", help="Path to the text file containing session IDs (one per line).")
 parser.add_argument("target", help="Target base directory (parent of session directories to remove).")
 parser.add_argument("--dry-run", action="store_true", help="Print what would be removed without actually removing.")
+parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
 args = parser.parse_args()
 
 if not os.path.isfile(args.session_file):
@@ -32,6 +33,12 @@ with open(args.session_file, 'r') as f:
 if not sessions:
     print(f"No session IDs found in {args.session_file}.")
     sys.exit(0)
+
+if not args.dry_run and not args.yes:
+    answer = input(f"Remove {len(sessions)} session(s) from {args.target}? Type 'yes' to continue: ")
+    if answer.strip().lower() != "yes":
+        print("Aborted by user.")
+        sys.exit(0)
 
 total = len(sessions)
 removed = 0

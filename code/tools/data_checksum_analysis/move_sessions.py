@@ -5,7 +5,7 @@ Reads session IDs (one per line) from a text file and moves each
 corresponding directory from the source to the destination.
 
 Usage:
-  python move_sessions.py <sessions.txt> <source_dir> <dest_dir> [--dry-run]
+  python move_sessions.py <sessions.txt> <source_dir> <dest_dir> [--dry-run] [--yes]
 """
 import os
 import sys
@@ -17,6 +17,7 @@ parser.add_argument("session_file", help="Path to the text file containing sessi
 parser.add_argument("source", help="Source base directory (parent of session directories).")
 parser.add_argument("destination", help="Destination base directory to move sessions into.")
 parser.add_argument("--dry-run", action="store_true", help="Print what would be moved without actually moving.")
+parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
 args = parser.parse_args()
 
 if not os.path.isfile(args.session_file):
@@ -33,6 +34,12 @@ with open(args.session_file, 'r') as f:
 if not sessions:
     print(f"No session IDs found in {args.session_file}.")
     sys.exit(0)
+
+if not args.dry_run and not args.yes:
+    answer = input(f"Move {len(sessions)} session(s) from {args.source} to {args.destination}? Type 'yes' to continue: ")
+    if answer.strip().lower() != "yes":
+        print("Aborted by user.")
+        sys.exit(0)
 
 total = len(sessions)
 moved = 0
