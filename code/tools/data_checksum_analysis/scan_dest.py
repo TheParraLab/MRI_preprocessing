@@ -28,7 +28,7 @@ parser.add_argument("--skip", action="append", default=[], help="Session directo
 parser.add_argument("--skip-file", help="Text file with session names to skip (one per line).")
 parser.add_argument("--output", help="Output filename in scan_results/ (defaults to auto-generated).")
 parser.add_argument("--hash", choices=["sha256", "md5"], default=core.DEFAULT_ALGO, help="Hash algorithm.")
-parser.add_argument("--workers", type=int, default=None, help="Number of hashing threads (default: cpu_count).")
+parser.add_argument("--workers", type=int, default=None, help="Hashing threads (default: cpu_count; 1 = serial).")
 args = parser.parse_args()
 
 if not os.path.isdir(args.scan_dir):

@@ -256,6 +256,41 @@ def test_bounded_status_absent_session(tmp_path):
     assert status["details"]["K"]["status"] == "absent"
     assert all(f["local_digest"] is None for f in status["details"]["K"]["files"])
 
+def test_bounded_status_deterministic_across_workers(tmp_path):
+    root = str(tmp_path)
+    _write_session(root, "M", {"a": b"A", "b": b"B", "c": b"C", "d": b"D"})
+    _, manifest = checksum_core.scan_tree(root, algo="sha256")
+
+    local = str(tmp_path / "local")
+    _write_session(local, "M", {"a": b"A", "b": b"B", "c": b"C", "d": b"D"})
+
+    serial = checksum_core.bounded_status(manifest, local, n_workers=1)
+    parallel_a = checksum_core.bounded_status(manifest, local, n_workers=4)
+    parallel_b = checksum_core.bounded_status(manifest, local, n_workers=8)
+    default = checksum_core.bounded_status(manifest, local)
+
+    assert serial["details"] == parallel_a["details"]
+    assert parallel_a["details"] == parallel_b["details"]
+    assert parallel_a["details"] == default["details"]
+    # files stay in manifest order
+    names = [f["file_name"] for f in parallel_a["details"]["M"]["files"]]
+    assert names == ["a", "b", "c", "d"]
+    assert parallel_a["confirmed"] == ["M"]
+
+
+def test_hash_session_files_missing_file_reports_none(tmp_path):
+    # manifest lists 3 files, only 2 exist locally
+    files = [
+        {"file_name": "a", "digest": "aa" * 32, "algo": "sha256"},
+        {"file_name": "b", "digest": "bb" * 32, "algo": "sha256"},
+        {"file_name": "gone", "digest": "cc" * 32, "algo": "sha256"},
+    ]
+    out = checksum_core._hash_session_files(files, str(tmp_path), n_workers=8)
+    assert [f["file_name"] for f in out] == ["a", "b", "gone"]
+    assert all(f["local_digest"] is None for f in out)
+    assert all(f["match"] is False for f in out)
+
+
 def test_write_session_list(tmp_path):
     p = str(tmp_path / "out" / "sessions.txt")
     count = checksum_core.write_session_list(p, ["b", "a"])

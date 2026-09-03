@@ -42,6 +42,42 @@ def hash_file(path, algo=DEFAULT_ALGO, chunk=DEFAULT_CHUNK):
     return h.hexdigest()
 
 
+def _hash_session_files(files, session_dir, n_workers=None):
+    """Hash each manifest-listed file under session_dir and compare to its
+    manifest digest.
+
+    Returns one detail dict per input file, in input order:
+        {"file_name", "manifest_digest", "local_digest", "match"}
+    Missing local files and read failures are reported as local_digest=None.
+    Threaded by default (like scan_tree); pass n_workers=1 for serial.
+    """
+    if n_workers is None:
+        n_workers = os.cpu_count() or 1
+    def process(fi):
+        fname = fi.get("file_name")
+        manifest_digest = fi.get("digest")
+        local_path = os.path.join(session_dir, fname)
+        if os.path.isfile(local_path):
+            try:
+                local_digest = hash_file(local_path, algo=_file_algo(fi))
+            except (OSError, PermissionError):
+                local_digest = None
+        else:
+            local_digest = None
+        match = local_digest is not None and local_digest == manifest_digest
+        return {
+            "file_name": fname,
+            "manifest_digest": manifest_digest,
+            "local_digest": local_digest,
+            "match": match,
+        }
+
+    if (n_workers and n_workers > 1) and len(files) > 1:
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            return list(ex.map(process, files))
+    return [process(fi) for fi in files]
+
+
 def iter_session_files(root):
     for dirpath, dirnames, filenames in os.walk(root):
         if os.path.abspath(dirpath) == os.path.abspath(root):
@@ -89,8 +125,14 @@ def scan_tree(root, algo=DEFAULT_ALGO, skip=None, n_workers=None):
         session_name, file_path, file_name = item
         return session_name, _file_entry(file_name, file_path, algo)
 
-    workers = n_workers if (n_workers and n_workers > 1) else None
-    if workers is not None and len(entries) > 1:
+    if n_workers and n_workers > 1:
+        workers = n_workers
+    elif n_workers is None:
+        workers = os.cpu_count() or 1
+    else:
+        workers = max(n_workers, 1)
+
+    if workers > 1 and len(entries) > 1:
         with ThreadPoolExecutor(max_workers=min(workers, len(entries))) as ex:
             for session_name, entry in ex.map(process, entries):
                 results.setdefault(session_name, {"files": []})["files"].append(entry)
@@ -221,12 +263,15 @@ def classify_sessions(primary, secondary):
     }
 
 
-def bounded_status(manifest_results, local_root):
+def bounded_status(manifest_results, local_root, n_workers=None):
     """Compare a manifest (source truth) against a local directory, hashing only
     the sessions named in the manifest.
 
     Returns confirmed / stale / absent plus unlisted_present (sessions present
     on disk but absent from the manifest) and per-file details.
+
+    Passing ``n_workers`` parallelizes per-session hashing with a thread pool.
+    Default is cpu_count() (parallel); pass ``n_workers=1`` for serial.
     """
     confirmed, stale, absent = [], [], []
     details = {}
@@ -246,29 +291,8 @@ def bounded_status(manifest_results, local_root):
             }
             continue
 
-        file_details = []
-        all_match = bool(files)
-        for fi in files:
-            algo = fi.get("algo") or DEFAULT_ALGO
-            md = fi.get("digest")
-            local_path = os.path.join(sdir, fi["file_name"])
-            if os.path.isfile(local_path):
-                try:
-                    ld = hash_file(local_path, algo=algo)
-                except (OSError, PermissionError):
-                    ld = ERROR_DIGEST
-                match = md == ld
-            else:
-                ld = None
-                match = False
-            if not match:
-                all_match = False
-            file_details.append({
-                "file_name": fi["file_name"],
-                "manifest_digest": md,
-                "local_digest": ld,
-                "match": match,
-            })
+        file_details = _hash_session_files(files, sdir, n_workers=n_workers)
+        all_match = bool(files) and all(d["match"] for d in file_details)
 
         status = "confirmed" if all_match else "stale"
         if all_match:

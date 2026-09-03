@@ -24,7 +24,7 @@ def _default_outdir(manifest_path):
     return os.path.dirname(os.path.abspath(manifest_path)) or os.getcwd()
 
 
-def _verify(manifest_results, local_root, session_list_path, outdir):
+def _verify(manifest_results, local_root, session_list_path, outdir, n_workers=None):
     if not os.path.isfile(session_list_path):
         print(f"Error: {session_list_path} not found.", file=sys.stderr)
         return 2
@@ -55,28 +55,11 @@ def _verify(manifest_results, local_root, session_list_path, outdir):
             any_fail = True
             continue
 
-        files_detail = []
-        all_match = True
-        for mf in entry.get("files", []):
-            fname = mf.get("file_name")
-            if fname is None:
-                continue
-            manifest_digest = mf.get("digest")
-            local_path = os.path.join(session_dir, fname)
-            if not os.path.isfile(local_path):
-                files_detail.append({"file_name": fname, "manifest_digest": manifest_digest,
-                                     "local_digest": None, "match": False})
-                all_match = False
-                continue
-            try:
-                local_digest = checksum_core.hash_file(local_path, algo=checksum_core._file_algo(mf))
-            except (OSError, PermissionError):
-                local_digest = None
-            match = local_digest is not None and local_digest == manifest_digest
-            if not match:
-                all_match = False
-            files_detail.append({"file_name": fname, "manifest_digest": manifest_digest,
-                                 "local_digest": local_digest, "match": match})
+        files = entry.get("files", [])
+        # Drop manifest entries that lack a file_name (unhashable).
+        files = [mf for mf in files if mf.get("file_name") is not None]
+        files_detail = checksum_core._hash_session_files(files, session_dir, n_workers=n_workers)
+        all_match = bool(files) and all(d["match"] for d in files_detail)
         report[session] = {"match": all_match, "files": files_detail}
         if not all_match:
             any_fail = True
@@ -95,7 +78,7 @@ def _verify(manifest_results, local_root, session_list_path, outdir):
     return 3 if any_fail else 0
 
 
-def _status_manifest(manifest_path, local_dir, outdir, list_all, emit_details):
+def _status_manifest(manifest_path, local_dir, outdir, list_all, emit_details, n_workers=None):
     if not os.path.isfile(manifest_path):
         print(f"Error: manifest {manifest_path} not found.", file=sys.stderr)
         return 2
@@ -105,7 +88,7 @@ def _status_manifest(manifest_path, local_dir, outdir, list_all, emit_details):
 
     manifest_header, manifest_results = checksum_core.load_scan(manifest_path)
     try:
-        status = checksum_core.bounded_status(manifest_results, local_dir)
+        status = checksum_core.bounded_status(manifest_results, local_dir, n_workers=n_workers)
     except Exception as e:
         print(f"Error running bounded status: {e}", file=sys.stderr)
         return 1
@@ -157,6 +140,8 @@ def main(argv=None):
                         help="Also emit unlisted_present.txt (local sessions not in the manifest).")
     parser.add_argument("--emit-details", action="store_true",
                         help="Include per-file detail in manifest_status.json.")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Hashing threads per session (default: cpu_count; 1 = serial).")
     parser.add_argument("--verify", help="Verify mode: re-hash the sessions listed in this text "
                                          "file and emit a PASS/FAIL report (verify_report.json).")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -178,7 +163,7 @@ def main(argv=None):
         except Exception as e:
             print(f"Error loading manifest: {e}", file=sys.stderr)
             return 2
-        return _verify(manifest_results, args.local_dir, args.verify, outdir)
+        return _verify(manifest_results, args.local_dir, args.verify, outdir, n_workers=args.workers)
 
     if not os.path.isfile(args.manifest):
         print(f"Error: manifest {args.manifest} not found.", file=sys.stderr)
