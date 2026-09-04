@@ -29,6 +29,9 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data_checksum_analysis'))
+import checksum_core
+
 
 # ----- args -------------------------------------------------------------------
 
@@ -85,37 +88,8 @@ def _build_manifest(nifti_dir):
     if not os.path.isdir(nifti_dir):
         return {}, {}
 
-    results = {}
-    for sid in sorted(os.listdir(nifti_dir)):
-        sd = os.path.join(nifti_dir, sid)
-        if not os.path.isdir(sd):
-            continue
-        files = []
-        for fn in sorted(os.listdir(sd)):
-            fp = os.path.join(sd, fn)
-            try:
-                sz = os.path.getsize(fp)
-                checksum = _file_md5(fp)
-                files.append({
-                    'file_name': fn,
-                    'md5': checksum,
-                    'size_bytes': sz,
-                })
-            except (OSError, PermissionError):
-                files.append({
-                    'file_name': fn,
-                    'md5': 'ERROR_READING_FILE',
-                    'size_bytes': -1,
-                })
-        if files:
-            results[sid] = {'files': files}
-
-    header = {
-        'scan_dir': nifti_dir,
-        'start_time': datetime.now(timezone.utc).isoformat(),
-        'stop_time': datetime.now(timezone.utc).isoformat(),
-        'step': '03',
-    }
+    header, results = checksum_core.scan_tree(nifti_dir, algo='sha256')
+    header['step'] = '03'
     return results, header
 
 
@@ -129,53 +103,23 @@ def _compare_to_prior(current_results, prior_path):
         return {'skipped': True}
 
     try:
-        with open(prior_path) as f:
-            prior = json.load(f)
-    except Exception:
-        return {'skipped': True, 'error': f'Failed to load {prior_path}'}
+        _, prior_results = checksum_core.load_scan(prior_path)
+    except Exception as e:
+        return {'skipped': True, 'error': f'Failed to load {prior_path}: {e}'}
 
-    # Prior may be raw scan_dest output (has "results" key) or a nested header/results
-    prior_results = prior.get('results', prior)
+    idx_cur = checksum_core.build_index(current_results)
+    idx_pri = checksum_core.build_index(prior_results)
+    stats = checksum_core.summarize_stats(idx_cur, idx_pri)
 
-    idx_cur = {}  # session/filename -> md5
-    for sid, data in current_results.items():
-        for fi in data['files']:
-            idx_cur[f'{sid}/{fi["file_name"]}'] = fi['md5']
-
-    idx_pri = {}
-    for sid, data in prior_results.items():
-        for fi in data.get('files', []):
-            idx_pri[f'{sid}/{fi["file_name"]}'] = fi.get('md5', fi.get('digest', ''))
-
-    all_keys = set(idx_cur) | set(idx_pri)
-    identical = 0
-    modified = 0
-    new_only = []
-    dropped_only = []
-
-    for k in all_keys:
-        c_md5 = idx_cur.get(k)
-        p_md5 = idx_pri.get(k)
-        if c_md5 and p_md5 and c_md5 not in (None, ''):
-            if c_md5 == p_md5:
-                identical += 1
-            else:
-                modified += 1
-        elif c_md5 and not p_md5:
-            sid = k.split('/')[0]
-            if sid not in new_only:
-                new_only.append(sid)
-        elif p_md5 and not c_md5:
-            sid = k.split('/')[0]
-            if sid not in dropped_only:
-                dropped_only.append(sid)
+    new_sessions = sorted(set(current_results) - set(prior_results))
+    dropped_sessions = sorted(set(prior_results) - set(current_results))
 
     return {
         'skipped': False,
-        'identical_files': identical,
-        'modified_files': modified,
-        'new_sessions': sorted(new_only),
-        'dropped_sessions': sorted(dropped_only),
+        'identical_files': stats['identical'],
+        'modified_files': stats['modified'],
+        'new_sessions': new_sessions,
+        'dropped_sessions': dropped_sessions,
     }
 
 
@@ -260,12 +204,6 @@ def _naming_checks(timetable, nifti_dir):
             continue
         majors_csv = sorted(timetable.loc[timetable['SessionID'] == sid, 'Major'])
         expected_names = [f'{int(m):02d}' for m in majors_csv]
-        disk_nifs = sorted([f.replace('.nii.gz', '').replace('.nii', '')
-                           + '.json', f).split('.')[0]
-                          for f in os.listdir(sd)
-                          if f.endswith(('.nii.gz', '.nii'))])
-
-        # Rebuild cleanly
         disk_basenames = sorted([os.path.splitext(f)[0]
                                  for f in os.listdir(sd)
                                  if f.endswith(('.nii.gz', '.nii'))])

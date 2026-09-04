@@ -734,7 +734,7 @@ def _init_data_table(load_table: str, target: Optional[str],
         except Exception as e:
             logger.error(f'Error filtering data for target ID {target}: {e}')
             raise
-    data_table['SessionID'] = data_table['ID'] + '_' + data_table['DATE'].astype(str)
+    data_table['SessionID'] = data_table['ID'].astype(str) + '_' + data_table['DATE'].astype(str)
     removed_tables = defaultdict(pd.DataFrame)
     return data_table, removed_tables
 
