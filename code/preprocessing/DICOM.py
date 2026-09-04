@@ -155,31 +155,23 @@ class DICOMextract:
                     logging.warning(f'[DIAGNOSTIC Modality] RepetitionTime is None, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
                 return self.UNKNOWN
 
-            # Normalize to a float in milliseconds regardless of pydicom VR / scanner quirks
             try:
-                rep_time_ms = float(rep_time_raw)
-            except ValueError:
+                rep_time = float(rep_time_raw)
+            except (ValueError, TypeError):
                 if self.debug > 0:
                     logging.warning(f'[DIAGNOSTIC Modality] Could not convert TR to numeric, returning UNKNOWN | File: {getattr(self.metadata, "filepath", "N/A")}')
                 return self.UNKNOWN
 
-            # If the value looks like microseconds (>1e6), convert down
-            if rep_time_ms > 10**6:
-                rep_time_ms = rep_time_ms / 1000
-            # If it still looks suspiciously large for TR in ms (e.g. raw seconds stored as int)
-            elif rep_time_ms < 50:
-                rep_time_ms = rep_time_ms * 1000
-
             if self.debug > 0:
-                logging.debug(f'[DIAGNOSTIC Modality] Normalized TR = {rep_time_ms:.2f} ms | File: {getattr(self.metadata, "filepath", "N/A")}')
+                logging.debug(f'[DIAGNOSTIC Modality] TR = {rep_time:.2f} | File: {getattr(self.metadata, "filepath", "N/A")}')
 
-            if rep_time_ms >= 780:
+            if rep_time >= 780:
                 modality = 'T2'
             else:
                 modality = 'T1'
 
             if self.debug > 0:
-                logging.debug(f'[DIAGNOSTIC Modality] Final modality = {modality} (rep_time={rep_time_ms}) | File: {getattr(self.metadata, "filepath", "N/A")}')
+                logging.debug(f'[DIAGNOSTIC Modality] Final modality = {modality} (rep_time={rep_time}) | File: {getattr(self.metadata, "filepath", "N/A")}')
             return modality
         except Exception as e:
             self.log_error('Unable to read RepetitionTime', e)
