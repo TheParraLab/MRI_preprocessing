@@ -77,6 +77,7 @@ class ScanConfig:
     checkpoint_dir: Optional[str] = None
     profile_dir: Optional[str] = None
     resume: bool = False
+    debug: Optional[int] = None
     dir_idx: Optional[int] = None
     dir_list: str = 'dirs_to_process.pkl'
 
@@ -108,7 +109,23 @@ def build_config() -> ScanConfig:
                         help='Directory to store profiling output (default: <SAVE_DIR>/profiles/)')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from available checkpoints if present')
+    parser.add_argument('--debug', nargs='?', const=True, type=int,
+                        default=0,
+                        help='Enable verbose DEBUG logging in the saved log file. '
+                             'Optionally pass an integer level (e.g. --debug 2 for '
+                             'DICOMextract diagnostic level 2)')
     args = parser.parse_args()
+
+    # --debug (bare, -> True)  => 2 (most verbose; enables DICOMextract's
+    #                             `self.debug > 1` exception-detail branches)
+    # --debug N (explicit int) => N
+    # flag absent (0)          => 0 (no verbose diagnostic logging)
+    if not args.debug:
+        debug_level = 0
+    elif args.debug is True:
+        debug_level = 2
+    else:
+        debug_level = int(args.debug)
 
     cfg = ScanConfig(
         save_dir=args.save_dir,
@@ -123,6 +140,7 @@ def build_config() -> ScanConfig:
         checkpoint_dir=args.checkpoint_dir,
         profile_dir=args.profile_dir,
         resume=args.resume,
+        debug=debug_level,
         dir_idx=args.dir_idx,
         dir_list=args.dir_list,
     )
@@ -138,7 +156,16 @@ def build_config() -> ScanConfig:
 
 def create_logger(cfg: ScanConfig) -> logging.Logger:
     # Deployment-isolated logs; see toolbox.get_log_dir() for resolution order.
-    return get_logger('01_scanDicom')
+    logger = get_logger('01_scanDicom')
+    if cfg.debug:
+        # --debug: raise verbosity of the saved log to DEBUG.
+        # The named '01_scanDicom' logger already runs at DEBUG, but
+        # DICOMextract() emits bare logging.debug(...) via the root logger,
+        # which defaults to WARNING and would otherwise be dropped. Force
+        # root to DEBUG so those diagnostics reach the log file.
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
+    return logger
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +243,8 @@ def _has_dcm_magic(path: str) -> bool:
 # Pipeline functions
 # ---------------------------------------------------------------------------
 
-def _extractDicom_impl(f: str, slice_counts: Dict[str, int] = None) -> Optional[Dict[str, Any]]:
+def _extractDicom_impl(f: str, slice_counts: Dict[str, int] = None,
+                       debug_level: int = 0) -> Optional[Dict[str, Any]]:
     """Extract DICOM information from a specific file path."""
     logger = logging.getLogger('01_scanDicom')
     try:
@@ -225,7 +253,7 @@ def _extractDicom_impl(f: str, slice_counts: Dict[str, int] = None) -> Optional[
         num_slices = None
         if slice_counts is not None:
             num_slices = slice_counts.get(directory)
-        extract = DICOMextract(f, num_slices=num_slices)
+        extract = DICOMextract(f, debug=debug_level, num_slices=num_slices)
 
         result = {
             'PATH': f,
@@ -640,7 +668,8 @@ def main(cfg: ScanConfig, logger: logging.Logger, out_name: str = 'Data_table.cs
             info_list = None
 
     if info_list is None:
-        extract_partial = partial(_extractDicom_impl, slice_counts=slice_counts)
+        extract_partial = partial(_extractDicom_impl, slice_counts=slice_counts,
+                                  debug_level=cfg.debug or 0)
         info_list = run_function(
             logger, extract_partial, dicom_files,
             Parallel=cfg.parallel, P_type='hybrid', N_CPUS=cfg.n_cpus,
