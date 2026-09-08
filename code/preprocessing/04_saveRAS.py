@@ -11,7 +11,7 @@ import numpy as np
 import nibabel as nib
 from multiprocessing import cpu_count, Manager
 # Custom Imports
-from toolbox import run_function, get_logger
+from toolbox import run_function, get_logger, get_log_dir
 manager = Manager()
 stop_flag = manager.Event()
 
