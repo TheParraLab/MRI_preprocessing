@@ -10,7 +10,7 @@ import threading
 import signal
 
 from multiprocessing import Manager, cpu_count
-from toolbox import ProgressBar, get_logger, run_function
+from toolbox import ProgressBar, get_log_dir, get_logger, run_function
 
 BASE_PATH = '/FL_system'
 

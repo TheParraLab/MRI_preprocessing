@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
 import subprocess
 import threading
-from toolbox import ProgressBar, get_logger
+from toolbox import ProgressBar, get_log_dir, get_logger
 # Global variables for progress bar and lock
 Progress = None
 # Centralised log directory — resolves to /deployment/logs inside containers
