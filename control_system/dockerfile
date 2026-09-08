@@ -1,6 +1,9 @@
 # MRI preprocessing container image
 # Usage:
 #   docker build -t mri_preprocessing:tag -f control_system/dockerfile .
+# Variants (NiftyReg build):
+#   (default)            → CPU-only reg_f3d, runs on any node (no GPU driver needed)
+#   --build-arg USE_CUDA=ON → CUDA-linked reg_f3d, requires a GPU node at runtime
 #   docker run --gpus all \
 #     -v ${DATA_DIRECTORY_PATH}:/FL_system/data/raw \
 #     -v ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti \
@@ -29,28 +32,43 @@ WORKDIR /FL_system
 ARG IMAGE_VERSION=1.0.0
 ARG VCS_REVISION=unknown
 
+# NiftyReg build variant:
+#   OFF (default) → CPU-only reg_f3d. No DT_NEEDED entry for the host-provided
+#     libcuda.so.1, so it loads and runs on login nodes / CPU partitions.
+#   ON            → CUDA-linked reg_f3d. Toolkit libs are baked into this
+#     image, but libcuda.so.1 (the driver) is host-provided and only mapped
+#     in with --nv/--gpus — GPU nodes only.
+ARG USE_CUDA=OFF
+
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir --timeout 120 --retries 5 \
         -r requirements.txt -r requirements-dev.txt
 
-# NiftyReg with CUDA — compiled at BUILD time so the same image tag always
-# ships the same compiled binary (reproducible deploys, no per-run compile
-# cost, and Singularity/Apptainer pulls work on read-only container fs).
+# NiftyReg — compiled at BUILD time so the same image tag always ships the
+# same compiled binary (reproducible deploys, no per-run compile cost, and
+# Singularity/Apptainer pulls work on read-only container fs).
+#
+# USE_CUDA selects the variant (see ARG above): OFF builds a CPU-only reg_f3d
+# that loads on any node; ON builds the CUDA-linked reg_f3d for GPU nodes.
 #
 # CHECK_GPU=OFF skips niftyreg's configure-time probe that runs a CUDA binary
-# to detect a card; without it, the build fails in GPU-less containers (CI /
-# any docker build environment) because CMake silently turns USE_CUDA OFF.
+# to detect a card; without it, a CUDA build fails in GPU-less containers (CI
+# / any docker build environment) because CMake silently turns USE_CUDA OFF.
 # With the probe off, niftyreg compiles native code for sm_60..sm_86 plus PTX
 # for newer GPUs (V100/T4/A100/A40/RTX-30-class all covered).
 RUN git clone --branch v2.0.0 --depth 1 https://github.com/KCL-BMEIS/niftyreg.git /niftyreg-src && \
-    cmake -S /niftyreg-src -B /niftyreg-build -DUSE_CUDA=ON -DCHECK_GPU=OFF -DCMAKE_BUILD_TYPE=Release && \
+    cmake -S /niftyreg-src -B /niftyreg-build -DUSE_CUDA=${USE_CUDA} -DCHECK_GPU=OFF -DCMAKE_BUILD_TYPE=Release && \
     make -C /niftyreg-build -j"$(nproc)" && \
     make -C /niftyreg-build install && \
     ldconfig && \
-    if ldd /usr/local/bin/reg_f3d | grep -q cuda; then \
-        echo "NiftyReg build OK: CUDA libraries linked"; \
+    if [ "${USE_CUDA}" = "ON" ]; then \
+        if ldd /usr/local/bin/reg_f3d | grep -q cuda; then \
+            echo "NiftyReg build OK: CUDA libraries linked"; \
+        else \
+            echo "ERROR: reg_f3d built WITHOUT CUDA — this image is broken" && exit 1; \
+        fi; \
     else \
-        echo "ERROR: reg_f3d built WITHOUT CUDA — this image is broken" && exit 1; \
+        echo "NiftyReg build OK: CPU-only reg_f3d (USE_CUDA=OFF)"; \
     fi
 
 # Bake all project code into the image

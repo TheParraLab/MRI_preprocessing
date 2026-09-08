@@ -33,14 +33,19 @@ fi
 REGISTRY="${REGISTRY_URL:-registry.forgejo.local:5000}"
 REPO="${IMAGE_REPOSITORY:-mri_preprocessing}"
 TAG="${1:-latest}"
-FULL_NAME="${REGISTRY}/${REPO}:${TAG}"
+# Two variants per release:
+#   <tag>      → CPU-only reg_f3d (default, runs on any node)
+#   <tag>-gpu  → CUDA-linked reg_f3d (GPU nodes only)
+CPU_NAME="${REGISTRY}/${REPO}:${TAG}"
+GPU_NAME="${REGISTRY}/${REPO}:${TAG}-gpu"
 
 DOCKERFILE="${PROJECT_ROOT}/control_system/dockerfile"
 
 echo "Registry : ${REGISTRY}"
 echo "Repo     : ${REPO}"
 echo "Tag      : ${TAG}"
-echo "Image    : ${FULL_NAME}"
+echo "Images   : ${CPU_NAME} (CPU)"
+echo "           ${GPU_NAME} (GPU)"
 echo ""
 
 # ── Authenticate if credentials provided ───────────────────────────
@@ -49,35 +54,46 @@ if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASS:-}" ]; then
   echo "${REGISTRY_PASS}" | docker login -u "${REGISTRY_USER}" --password-stdin "${REGISTRY}"
 fi
 
-# ── Build ──────────────────────────────────────────────────────────
-echo ""
-echo "Building image..."
-docker build \
-  --tag "${FULL_NAME}" \
-  --file "${DOCKERFILE}" \
-  --progress=plain \
-  "${PROJECT_ROOT}"
+# ── Build + push one variant ───────────────────────────────────────
+# $1 = USE_CUDA (OFF|ON), $2 = tag suffix ("", "-gpu")
+build_and_push_variant() {
+  local use_cuda="$1" tag_suffix="$2"
+  local tag="${TAG}${tag_suffix}"
+  local full_name="${REGISTRY}/${REPO}:${tag}"
 
-# ── Tag with git commit hash for traceability ──────────────────────
+  echo ""
+  echo "Building image: ${full_name} (USE_CUDA=${use_cuda})..."
+  docker build \
+    --tag "${full_name}" \
+    --file "${DOCKERFILE}" \
+    --progress=plain \
+    --build-arg USE_CUDA="${use_cuda}" \
+    --build-arg VCS_REVISION="${GIT_HASH}" \
+    "${PROJECT_ROOT}"
+
+  echo ""
+  echo "Pushing ${full_name}..."
+  docker push "${full_name}"
+
+  # Tag with git commit hash for traceability (release tags only)
+  if [ "$TAG" != "latest" ]; then
+    local hash_name="${REGISTRY}/${REPO}:${GIT_HASH}${tag_suffix}"
+    docker tag "${full_name}" "${hash_name}"
+    docker push "${hash_name}"
+    echo "  Pushed: ${hash_name}"
+  fi
+}
+
 GIT_HASH=$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-if [ "$TAG" != "latest" ]; then
-  docker tag "${FULL_NAME}" "${REGISTRY}/${REPO}:${GIT_HASH}"
-fi
 
-# ── Push ───────────────────────────────────────────────────────────
-echo ""
-echo "Pushing image..."
-docker push "${FULL_NAME}"
-
-if [ "$TAG" != "latest" ]; then
-  docker push "${REGISTRY}/${REPO}:${GIT_HASH}"
-  echo "  Pushed: ${REGISTRY}/${REPO}:${GIT_HASH}"
-fi
+build_and_push_variant OFF ""
+build_and_push_variant ON "-gpu"
 
 # ── Verify on registry (optional dry-run check) ───────────────────
 echo ""
 echo "Build and push complete."
 echo "On your HPC, pull the image with:"
-echo "  singularity pull mri_preprocessing.sif docker://${FULL_NAME}"
+echo "  singularity pull mri_preprocessing.sif     docker://${CPU_NAME}"
+echo "  singularity pull mri_preprocessing-gpu.sif docker://${GPU_NAME}"
 echo ""
 echo "Or use start_control.sh with REGISTRY_URL=${REGISTRY}"

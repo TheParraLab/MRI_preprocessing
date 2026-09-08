@@ -473,8 +473,8 @@ case "$RUNTIME" in
       Additional+=( --nv )
       echo "GPU detected on host — passing --nv into the container."
     else
-      echo "No GPU detected on this host — launching without --nv (CPU-only)."
-      echo "Coregistration (step 05) will fall back to CPU if niftyreg/CUDA is not loaded."
+      echo "No GPU detected on this host — launching without --nv."
+      echo "The default (CPU) image runs fine here; a *-gpu image needs a GPU node (reg_f3d requires libcuda.so.1)."
     fi
 
     # Use REPEATED --bind flags (one per mount) rather than a single

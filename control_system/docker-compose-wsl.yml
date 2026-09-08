@@ -4,6 +4,10 @@ services:
     build:
       context: ..
       dockerfile: control_system/dockerfile
+      args:
+        # OFF (default) → CPU-only reg_f3d; set USE_CUDA=ON in .env for a
+        # CUDA-linked build (GPU node required at runtime).
+        USE_CUDA: ${USE_CUDA:-OFF}
     runtime: nvidia
     volumes:
       - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw

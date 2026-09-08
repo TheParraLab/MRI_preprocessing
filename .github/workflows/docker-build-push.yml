@@ -15,6 +15,17 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Two variants per push:
+    #   USE_CUDA=OFF → <tag>      (CPU-only reg_f3d, runs on any node)
+    #   USE_CUDA=ON  → <tag>-gpu  (CUDA-linked reg_f3d, GPU nodes only)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - use_cuda: "OFF"
+            tag_suffix: ""
+          - use_cuda: "ON"
+            tag_suffix: "-gpu"
     # Pull registry credentials into env vars so step `if:` (which cannot
     # reference `secrets.` directly) can still gate the push.
     env:
@@ -27,47 +38,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set tags
+      - name: Set base tag
         id: meta
         run: |
           if [[ "${{ github.ref_name }}" == "main" ]]; then
-            echo "MRI_TAG=latest" >> "$GITHUB_OUTPUT"
+            echo "BASE_TAG=latest" >> "$GITHUB_OUTPUT"
           else
-            echo "MRI_TAG=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "BASE_TAG=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build Docker image
         run: |
+          TAG="${{ steps.meta.outputs.BASE_TAG }}${{ matrix.tag_suffix }}"
           docker build \
-            --tag "mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" \
+            --tag "mri_preprocessing:${TAG}" \
             --file control_system/dockerfile . \
+            --build-arg USE_CUDA=${{ matrix.use_cuda }} \
             --build-arg VCS_REVISION=$(git rev-parse --short HEAD)
 
       - name: Push to Forgejo registry
         if: ${{ env.FOU_RDOU_URL != '' && env.FOU_RDOU_USER != '' && env.FOU_RDOU_PASS != '' }}
         run: |
+          TAG="${{ steps.meta.outputs.BASE_TAG }}${{ matrix.tag_suffix }}"
           echo "${FOU_RDOU_PASS}" | docker login -u "${FOU_RDOU_USER}" --password-stdin "${FOU_RDOU_URL}"
-          docker tag "mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" "${FOU_RDOU_URL}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
-          docker push "${FOU_RDOU_URL}/parra-lab/mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
+          docker tag "mri_preprocessing:${TAG}" "${FOU_RDOU_URL}/parra-lab/mri_preprocessing:${TAG}"
+          docker push "${FOU_RDOU_URL}/parra-lab/mri_preprocessing:${TAG}"
           IMAGE="${FOU_RDOU_URL}/parra-lab/mri_preprocessing"
           echo ""
           echo "✅ On the HPC, pull with:"
-          echo "   apptainer pull $IMAGE.sif docker://${IMAGE}:${{ steps.meta.outputs.MRI_TAG }}"
+          echo "   apptainer pull ${IMAGE}${{ matrix.tag_suffix }}.sif docker://${IMAGE}:${TAG}"
 
       - name: Push to DockerHub
         if: ${{ env.DHUB_USER != '' && env.DHUB_TOKEN != '' }}
         run: |
+          TAG="${{ steps.meta.outputs.BASE_TAG }}${{ matrix.tag_suffix }}"
           echo "${DHUB_TOKEN}" | docker login -u "${DHUB_USER}" --password-stdin
-          docker tag "mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" "nickl99/preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
-          docker tag "mri_preprocessing:${{ steps.meta.outputs.MRI_TAG }}" "nickl99/preprocessing:latest"
-          docker push "nickl99/preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
-          docker push "nickl99/preprocessing:latest"
+          docker tag "mri_preprocessing:${TAG}" "nickl99/preprocessing:${TAG}"
+          docker push "nickl99/preprocessing:${TAG}"
+          if [ "${TAG}" != "latest" ]; then
+            # CPU variant only: keep the floating "latest" tag fresh when a
+            # release tag is published. Never point latest at a -gpu build.
+            docker tag "mri_preprocessing:${TAG}" "nickl99/preprocessing:latest"
+            docker push "nickl99/preprocessing:latest"
+          fi
           echo ""
           echo "✅ Also on DockerHub:"
-          echo "   apptainer pull nickl99/preprocessing.sif docker://nickl99/preprocessing:${{ steps.meta.outputs.MRI_TAG }}"
+          echo "   apptainer pull nickl99/preprocessing${{ matrix.tag_suffix }}.sif docker://nickl99/preprocessing:${TAG}"
 
       - name: Fail if no registry was configured
-        if: ${{ env.FOU_RDOU_URL == '' && env.DHUB_USER == '' }}
+        if: ${{ matrix.tag_suffix == '' && env.FOU_RDOU_URL == '' && env.DHUB_USER == '' }}
         run: |
           echo "ERROR: Neither Forgejo (REGISTRY_URL/USERNAME/PASSWORD) nor DockerHub (DOCKERHUB_USERNAME/TOKEN) secrets are defined."
           echo "       Build succeeded but nothing was pushed. Set at least one set of secrets to publish this image."
