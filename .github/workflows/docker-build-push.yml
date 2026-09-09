@@ -10,6 +10,9 @@ on:
       - "control_system/**"
       - "code/**"
       - "requirements*.txt"
+      # Workflow changes (e.g. tag/push logic like this file's own aliases)
+      # must rebuild + republish, or a fix here would never take effect.
+      - ".github/workflows/**"
   workflow_dispatch:
 
 jobs:
@@ -75,9 +78,10 @@ jobs:
           echo "${DHUB_TOKEN}" | docker login -u "${DHUB_USER}" --password-stdin
           docker tag "mri_preprocessing:${TAG}" "nickl99/preprocessing:${TAG}"
           docker push "nickl99/preprocessing:${TAG}"
-          if [ "${TAG}" != "latest" ]; then
-            # CPU variant only: keep the floating "latest" tag fresh when a
-            # release tag is published. Never point latest at a -gpu build.
+          # ONLY the CPU leg may own the floating "latest" alias. The GPU leg
+          # must never alias latest (earlier it pushed its CUDA-linked image
+          # as "latest" whenever TAG=latest-gpu, racing the CPU leg).
+          if [ "${{ matrix.tag_suffix }}" = "" ] && [ "${TAG}" != "latest" ]; then
             docker tag "mri_preprocessing:${TAG}" "nickl99/preprocessing:latest"
             docker push "nickl99/preprocessing:latest"
           fi
