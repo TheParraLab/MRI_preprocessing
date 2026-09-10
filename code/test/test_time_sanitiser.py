@@ -90,15 +90,21 @@ def test_clean_time_binary_bytes_blob_returns_unknown():
     assert result == "Unknown"
 
 
-def test_clean_time_non_dict_string_returns_unknown():
+def test_clean_time_non_numeric_string_passes_through():
+    """_clean_time is a *coercion* helper (bytes→str, int→str, None→'Unknown'),
+    not a numeric validator. Non-numeric strings like 'hello' pass through as-is
+    because they may come from a legitimately non-numeric VR tag; the *consumer*
+    (DICOMorder.order, 06_genInputs._clean_timing) is the validator that maps
+    unparseable values to 'Unknown' / drops the row."""
     e = _make_extractor_stub()
-    assert e._clean_time("hello") == e.UNKNOWN
+    assert e._clean_time("hello") == "hello"
 
 
-def test_clean_time_float_input_returns_unknown():
-    """float inputs are not valid TM strings — we don't silently coerce."""
+def test_clean_time_float_input_captured_via_str():
+    """float inputs are coerced to str so a downstream float() sees the same
+    number. NaN/inf are routed to Unknown (they'd poison CSVs as 'nan')."""
     e = _make_extractor_stub()
-    assert e._clean_time(1234.0) == e.UNKNOWN
+    assert e._clean_time(1234.0) == "1234.0"
 
 
 def test_clean_time_float_nan_returns_unknown():

@@ -71,30 +71,40 @@ class DICOMextract:
         elif self.debug > 0:
             logging.error(message)
 
-    _TIME_RE = re.compile(r'^\d{6}(\.\d{1,6})?$')
-
     def _clean_time(self, value) -> str:
         """
-        Coerce a DICOM time value (TMime / UA blob / bytes / None) into a clean
-        'HHMMSS[.ffffff]' string, or self.UNKNOWN when it is missing or malformed.
+        Coerce a DICOM time value (TMime / raw-ms int / UA blob / bytes / None)
+        into a clean string, or self.UNKNOWN when it is missing or a non-ASCII
+        binary blob.
 
-        Rationale: certain clinical files carry non-ASCII / raw-blob bytes for
-        time elements. pydicom returns those as `bytes`; a naïve consumer then
-        writes it into the timing CSV as its repr (``b'\\x16\\xba\\xa2L'``) and
-        later `float()`s it, which raises. Normalising here (single choke-point)
-        makes every downstream time getter safe.
+        Rationale: certain clinical files carry non-ASCII raw-binary bytes for
+        time or duration elements. pydicom returns those as `bytes`; a naïve
+        consumer then writes their repr (``b'\\x16\\xba\\xa2L'``) into the
+        timing CSV and later `float()`s it, which raises. Normalising here
+        (single choke-point) makes every downstream time getter safe.
+
+        Accepted value types for a valid (non-Unknown) return:
+          - str:    any non-empty string (raw-ms "0", "87259" or HHMMSS "160141")
+          - int:    cast to str
+          - float:  cast to str (e.g. 161206.3875)
+          - bytes:  decoded as ASCII only; non-ASCII → Unknown
+        All other types (list, dict, None) → Unknown.
         """
         if value is None:
+            return self.UNKNOWN
+        if isinstance(value, float) and (value != value or value in (float('inf'), float('-inf'))):
             return self.UNKNOWN
         if isinstance(value, (bytes, bytearray)):
             try:
                 value = value.decode('ascii')
             except UnicodeDecodeError:
-                value = value.decode('utf-8', errors='replace')
-        if not isinstance(value, str) or not value.strip():
+                return self.UNKNOWN
+        if isinstance(value, (int, float)):
+            value = str(value)
+        if not isinstance(value, str):
             return self.UNKNOWN
         value = value.strip()
-        if self._TIME_RE.match(value) is None:
+        if not value:
             return self.UNKNOWN
         return value
 

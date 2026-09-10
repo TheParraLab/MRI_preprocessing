@@ -38,6 +38,49 @@ def _clean_timing(value):
         return 'Unknown'
 
 
+def _acq_seconds(value):
+    """Parse an AcqTime cell into seconds-of-day, or None if unusable.
+
+    Clinical AcqTime comes in two shapes:
+      - positional HHMMSS[.ffffff]  e.g. "155906", "161206.3875"
+      - colon HH:MM:SS[.ffffff]     e.g. "16:12:06.4"
+    Non-ASCII bytes blobs (the clinical bytes repr) and 'Unknown' return None.
+
+    A value only in the plausible time-of-day range (< 23:59:59) is read
+    positionally; larger numbers (e.g. a raw-ms leak) are returned as-is so
+    the caller can compare deltas.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:  # NaN
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode('ascii')
+        except UnicodeDecodeError:
+            return None
+    v = str(value).strip()
+    if not v or v.lower() == 'unknown':
+        return None
+    if ':' in v:
+        parts = v.split(':')
+        if len(parts) != 3:
+            return None
+        try:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        except ValueError:
+            return None
+    try:
+        n = float(v)
+    except ValueError:
+        return None
+    iv = int(n)
+    if 0 <= iv <= 235959:  # plausible HHMMSS time-of-day
+        s = str(iv).zfill(6)
+        return int(s[:2]) * 3600 + int(s[2:4]) * 60 + int(s[4:])
+    return n
+
+
 # Global variables for progress bar and lock
 Progress = None
 # Centralised log directory — resolves to /deployment/logs inside containers
@@ -166,69 +209,65 @@ def generate_slopes(SessionID):
     #LOGGER.debug(f'{SessionID} | Trigger Time | {Data["TriTime"].values}')
     #LOGGER.debug(f'{SessionID} | Scan Duration | {Data["ScanDur"].values}')
     
-    # Check trigger time is not unkown for any of the scans
-    Times = [_clean_timing(Data['TriTime'].iloc[ii]) for ii in sorting] #Loading Times in ms
-    Scan_Duration = [_clean_timing(Data['ScanDur'].iloc[ii]) for ii in sorting] #Loading Scan Duration in us
-    post_tritimes = Times[1:]
-    tri_all_unknown = 'Unknown' in post_tritimes
-    tri_all_identical = all(
-        t == post_tritimes[0] for t in post_tritimes
-    ) and all(t != 'Unknown' for t in post_tritimes) and len(post_tritimes) > 1
-    if tri_all_unknown:
-        LOGGER.error(f'{SessionID} | Trigger time is unknown for the post scan, cannot calculate slopes')
-        return
-    else:
-        # Check for scan duration us known for the pre scan
-        if Scan_Duration[0] == 'Unknown':
-            LOGGER.warning(f'{SessionID} | Scan duration is unknown for the pre scan, attempting to estimate from acquision times')
-            try:
-                AcqTime = [_clean_timing(Data['AcqTime'].iloc[ii]) for ii in sorting] #Loading AcqTime in hh:mm:ss
-                Times = [float(T)/1000 for T in Times] # Converting to seconds
-                AcqTime = [int(t.split(':')[0])*3600 + int(t.split(':')[1])*60 + int(t.split(':')[2]) for t in AcqTime] # Converting to seconds
-                Times[0] = float(AcqTime[0]) - (float(AcqTime[1])) # Estimating the time of the pre-scan
+    # Build a numeric time vector (seconds, relative) for every scan, index 0 = pre.
+    # Two independent clocks are available per scan:
+    #   TriTime  — Siemens raw-ms trigger time (0, 87259, 174108, ...) for posts;
+    #              the pre often reports 'Unknown' and ScanDur is a bytes blob.
+    #   AcqTime  — HHMMSS time-of-day, present (and ordered) even when TriTime is not.
+    # Strategy:
+    #   1. Prefer TriTime for the posts when they are all numeric (the true
+    #      trigger times). Resolve the pre via TriTime, else ScanDur, else the
+    #      AcqTime delta to the first post.
+    #   2. If the posts' TriTimes are missing OR all identical (no spread usable
+    #      for the regression), fall back to AcqTime for the whole session.
+    #   3. If neither clock yields a usable, ordered set, skip the session.
+    raw_tri = [Data['TriTime'].iloc[ii] for ii in sorting]
+    raw_dur = [Data['ScanDur'].iloc[ii] for ii in sorting]
+    raw_acq = [Data['AcqTime'].iloc[ii] for ii in sorting]
+    n = len(raw_tri)
 
-            except Exception as e:
-                LOGGER.error(f'{SessionID} | Error loading acquisition times')
-                LOGGER.error(f'{SessionID} | {e}')
-                return
+    tri_s = []
+    for t in raw_tri:
+        c = _clean_timing(t)
+        if c == 'Unknown':
+            tri_s.append(None)
         else:
             try:
-                ScanDuration = [Data['ScanDur'].iloc[ii] for ii in sorting] #Scan Duration in us
-                if Times[0] == 'Unknown':
-                    Times[0] = float(Times[1]) - (float(ScanDuration[0])/1000)
-                # Converting to seconds
-                Times = [float(T)/1000 for T in Times]
+                tri_s.append(float(c) / 1000.0)  # ms -> s
+            except (ValueError, TypeError):
+                tri_s.append(None)
+    acq_s = [_acq_seconds(a) for a in raw_acq]
+    dur_clean = [_clean_timing(d) for d in raw_dur]
 
-            except Exception as e:
-                LOGGER.error(f'{SessionID} | Error loading times')
-                LOGGER.error(f'{SessionID} | {e}')
-                return
-        
-        # Fallback: if post-scan trigger times are all identical, estimate from AcqTime
-        if tri_all_identical:
-            LOGGER.warning(
-                f'{SessionID} | Post-scan trigger times are all identical ({Times[1]}s), '
-                f'estimating relative times from AcqTime differences'
-            )
-            try:
-                AcqTime = [_clean_timing(Data['AcqTime'].iloc[ii]) for ii in sorting]
-                AcqTime_sec = []
-                for t in AcqTime:
-                    if isinstance(t, str) and ':' in t:
-                        parts = t.split(':')
-                        AcqTime_sec.append(int(parts[0])*3600 + int(parts[1])*60 + int(parts[2]))
-                    else:
-                        s = str(int(t)).zfill(6)
-                        AcqTime_sec.append(int(s[:2])*3600 + int(s[2:4])*60 + int(s[4:]))
-                first_post_acq = AcqTime_sec[1]
-                Times[1:] = [float(AcqTime_sec[i] - first_post_acq) for i in range(1, len(Times))]
-                LOGGER.warning(
-                    f'{SessionID} | Estimated post-scan times: {Times}'
-                )
-            except Exception as e:
-                LOGGER.error(f'{SessionID} | Failed to estimate post-scan times from AcqTime: {e}')
-                return
-            
+    tri_posts_usable = all(tri_s[i] is not None for i in range(1, n)) and n > 2 \
+        and len(set(round(x, 6) for x in tri_s[1:])) > 1
+    acq_usable = all(acq_s[i] is not None for i in range(n))
+
+    Times = None
+    if tri_posts_usable:
+        Times = list(tri_s)
+        if Times[0] is None:
+            if dur_clean[0] != 'Unknown':
+                try:
+                    Times[0] = float(Times[1]) - float(dur_clean[0]) / 1000.0
+                except (ValueError, TypeError):
+                    Times[0] = None
+        if Times[0] is None and (acq_s[0] is not None and acq_s[1] is not None):
+            Times[0] = float(acq_s[0]) - float(acq_s[1])
+        if any(Times[i] is None for i in range(n)):
+            Times = None
+        else:
+            LOGGER.debug(f'{SessionID} | times from TriTime (pre resolved) | {Times}')
+    elif acq_usable:
+        Times = [float(acq_s[i] - acq_s[0]) for i in range(n)]
+        LOGGER.info(f'{SessionID} | TriTime not usable for posts; using AcqTime deltas | {Times}')
+    else:
+        LOGGER.error(
+            f'{SessionID} | not enough timing info to calculate slopes '
+            f'(TriTime posts={tri_s[1:]}, AcqTime posts={acq_s[1:]}, ScanDur[0]={dur_clean[0]})'
+        )
+        return
+
     LOGGER.debug(f'{SessionID} | Times | {Times}')
     
     # Load the 01 scan
