@@ -13,6 +13,31 @@ from functools import partial
 import subprocess
 import threading
 from toolbox import ProgressBar, get_log_dir, get_logger
+
+
+def _clean_timing(value):
+    """Coerce a timing cell (TriTime/AcqTime/ScanDur) to a clean token.
+
+    Bad clinical files can carry a raw bytes blob in a time element; pydicom
+    returns it as `bytes` and it then lands in the timing CSV as its repr
+    ("b'\\x16\\xba\\xa2L'"). `float()`/`split(':')` on that raises and aborts the
+    whole session. Normalising here routes any non-numeric value to 'Unknown'
+    so 06's existing fallback path handles it.
+    """
+    if isinstance(value, float) and value != value:  # NaN
+        return 'Unknown'
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode('ascii')
+        except UnicodeDecodeError:
+            return 'Unknown'
+    try:
+        float(str(value).strip())
+        return value
+    except (ValueError, TypeError):
+        return 'Unknown'
+
+
 # Global variables for progress bar and lock
 Progress = None
 # Centralised log directory — resolves to /deployment/logs inside containers
@@ -142,8 +167,8 @@ def generate_slopes(SessionID):
     #LOGGER.debug(f'{SessionID} | Scan Duration | {Data["ScanDur"].values}')
     
     # Check trigger time is not unkown for any of the scans
-    Times = [Data['TriTime'].iloc[ii] for ii in sorting] #Loading Times in ms
-    Scan_Duration = [Data['ScanDur'].iloc[ii] for ii in sorting] #Loading Scan Duration in us
+    Times = [_clean_timing(Data['TriTime'].iloc[ii]) for ii in sorting] #Loading Times in ms
+    Scan_Duration = [_clean_timing(Data['ScanDur'].iloc[ii]) for ii in sorting] #Loading Scan Duration in us
     post_tritimes = Times[1:]
     tri_all_unknown = 'Unknown' in post_tritimes
     tri_all_identical = all(
@@ -157,7 +182,7 @@ def generate_slopes(SessionID):
         if Scan_Duration[0] == 'Unknown':
             LOGGER.warning(f'{SessionID} | Scan duration is unknown for the pre scan, attempting to estimate from acquision times')
             try:
-                AcqTime = [Data['AcqTime'].iloc[ii] for ii in sorting] #Loading AcqTime in hh:mm:ss 
+                AcqTime = [_clean_timing(Data['AcqTime'].iloc[ii]) for ii in sorting] #Loading AcqTime in hh:mm:ss
                 Times = [float(T)/1000 for T in Times] # Converting to seconds
                 AcqTime = [int(t.split(':')[0])*3600 + int(t.split(':')[1])*60 + int(t.split(':')[2]) for t in AcqTime] # Converting to seconds
                 Times[0] = float(AcqTime[0]) - (float(AcqTime[1])) # Estimating the time of the pre-scan
@@ -186,7 +211,7 @@ def generate_slopes(SessionID):
                 f'estimating relative times from AcqTime differences'
             )
             try:
-                AcqTime = [Data['AcqTime'].iloc[ii] for ii in sorting]
+                AcqTime = [_clean_timing(Data['AcqTime'].iloc[ii]) for ii in sorting]
                 AcqTime_sec = []
                 for t in AcqTime:
                     if isinstance(t, str) and ':' in t:

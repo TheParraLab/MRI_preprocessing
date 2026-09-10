@@ -71,6 +71,33 @@ class DICOMextract:
         elif self.debug > 0:
             logging.error(message)
 
+    _TIME_RE = re.compile(r'^\d{6}(\.\d{1,6})?$')
+
+    def _clean_time(self, value) -> str:
+        """
+        Coerce a DICOM time value (TMime / UA blob / bytes / None) into a clean
+        'HHMMSS[.ffffff]' string, or self.UNKNOWN when it is missing or malformed.
+
+        Rationale: certain clinical files carry non-ASCII / raw-blob bytes for
+        time elements. pydicom returns those as `bytes`; a naïve consumer then
+        writes it into the timing CSV as its repr (``b'\\x16\\xba\\xa2L'``) and
+        later `float()`s it, which raises. Normalising here (single choke-point)
+        makes every downstream time getter safe.
+        """
+        if value is None:
+            return self.UNKNOWN
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                value = value.decode('ascii')
+            except UnicodeDecodeError:
+                value = value.decode('utf-8', errors='replace')
+        if not isinstance(value, str) or not value.strip():
+            return self.UNKNOWN
+        value = value.strip()
+        if self._TIME_RE.match(value) is None:
+            return self.UNKNOWN
+        return value
+
     def Orientation(self) -> Union[int, str]:
         """
         Attempts to extract the orientation of the scan.MRI_preprocessing
@@ -182,7 +209,7 @@ class DICOMextract:
         """Attempts to extract the acquisition time of the scan"""
         # Acquisition Time isthe time when acquisition of the scans data occurred
         try:
-            return self.metadata.AcquisitionTime
+            return self._clean_time(self.metadata.AcquisitionTime)
         except Exception as e:
             self.log_error('Unable to read AcquisitionTime', e)
             return self.UNKNOWN
@@ -198,7 +225,7 @@ class DICOMextract:
     def Srs(self) -> str:
         """Attempts to extract the series time of the scan"""
         try:
-            return self.metadata.SeriesTime
+            return self._clean_time(self.metadata.SeriesTime)
         except Exception as e:
             self.log_error('Unable to read SeriesTime', e)
             return self.UNKNOWN
@@ -206,7 +233,7 @@ class DICOMextract:
     def Con(self) -> str:
         """Attempts to extract the content time of the scan"""
         try:
-            return self.metadata.ContentTime
+            return self._clean_time(self.metadata.ContentTime)
         except Exception as e:
             self.log_error('Unable to read ContentTime', e)
             return self.UNKNOWN
@@ -214,7 +241,7 @@ class DICOMextract:
     def Stu(self) -> str:
         """Attempts to extract the study time of the scan"""
         try:
-            return self.metadata.StudyTime
+            return self._clean_time(self.metadata.StudyTime)
         except Exception as e:
             self.log_error('Unable to read StudyTime', e)
             return self.UNKNOWN
@@ -222,7 +249,7 @@ class DICOMextract:
     def Tri(self) -> str:
         """Attempts to extract the trigger time of the scan"""
         try:
-            return self.metadata.TriggerTime
+            return self._clean_time(self.metadata.TriggerTime)
         except Exception as e:
             self.log_error('Unable to read TriggerTime', e)
             return self.UNKNOWN
@@ -230,7 +257,7 @@ class DICOMextract:
     def Inj(self) -> str:
         """Attempts to extract the injection time of the scan"""
         try:
-            return self.metadata.InjectionTime
+            return self._clean_time(self.metadata.InjectionTime)
         except Exception as e:
             self.log_error('Unable to read InjectionTime', e)
             return self.UNKNOWN
@@ -369,7 +396,15 @@ class DICOMextract:
     def ScanDur(self) -> Union[float, str]:
         """Attempts to extract the scan duration of the scan, in microseconds"""
         try:
-            return self.metadata[('0019','105A')].value
+            raw = self.metadata[('0019', '105A')].value
+            if raw is None:
+                return self.UNKNOWN
+            if isinstance(raw, (bytes, bytearray)):
+                try:
+                    raw = raw.decode('ascii')
+                except UnicodeDecodeError:
+                    return self.UNKNOWN
+            return float(str(raw).strip())
         except Exception as e:
             self.log_error('Unable to read AcquisitionDuration', e)
             return self.UNKNOWN
