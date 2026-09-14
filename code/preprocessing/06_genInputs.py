@@ -81,6 +81,28 @@ def _acq_seconds(value):
     return n
 
 
+def _linfit_slope(T, D):
+    """Per-voxel least-squares slope of D on T over the trailing time axis.
+
+    Dimension-generic: works for 2D (single-slice) and 3D (volume) inputs where
+    T and D have shape (..., n_times). Returns an array of shape (...) with the
+    per-voxel slope, or 0 where T is constant (denominator zero).
+
+    Equivalent to the previous axis==3-specific block, but uses ellipsis so it
+    is correct for any number of leading spatial dims.
+    """
+    T = np.asarray(T, dtype=np.float64)
+    D = np.asarray(D, dtype=np.float64)
+    Tmean = T.mean(axis=-1, keepdims=True)
+    Dmean = D.mean(axis=-1, keepdims=True)
+    dt = T - Tmean
+    dd = D - Dmean
+    denom = (dt * dt).sum(axis=-1)
+    num = (dt * dd).sum(axis=-1)
+    slope = np.divide(num, denom, out=np.zeros_like(denom), where=denom != 0)
+    return slope.astype(np.float32)
+
+
 # Global variables for progress bar and lock
 Progress = None
 # Centralised log directory — resolves to /deployment/logs inside containers
@@ -137,13 +159,34 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     # Pass the progress queue to the target function
     target = partial(progress_wrapper, target=target, progress_queue=progress_queue, *args, **kwargs)
 
+    def _safe(item):
+        """Isolate per-item failures: one bad session must not abort the batch."""
+        try:
+            result = target(item)
+        except Exception as e:
+            item_id = item
+            if isinstance(item, tuple):
+                item_id = item[0] if item else item
+            LOGGER.error(f'{item_id} | failed with exception: {e!r}')
+            LOGGER.exception(f'{item_id} | traceback')
+            result = None
+            if PROGRESS:
+                progress_queue.put((None, f'Processing {item_id} FAILED'))
+        return result
+
     # Run the target function with a progress bar
     if Parallel:
         with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
             futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-            results = [future.result() for future in futures]
+            results = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    LOGGER.error(f'worker raised: {e!r}')
+                    results.append(None)
     else:
-        results = [target(item) for item in items]
+        results = [_safe(item) for item in items]
 
     # Close the progress bar
     if PROGRESS:
@@ -292,37 +335,28 @@ def generate_slopes(SessionID):
     #new_img.header['cal_max'] = 0
     #new_img.header['cal_min'] = 0
 
-    # Building time matrix same shape as loaded data
-    T = np.zeros_like(data0, dtype=np.float32)
-    T = np.expand_dims(T, axis=-1)
-    T = np.repeat(T, len(Times), axis=-1)
-    for ii,jj in enumerate(Times):
-        T[:,:,:,ii] = jj
-    
+    # Building time matrix (spatial shape of the pre-scan + a trailing time axis)
+    # and the stacked data matrix. Data is expected to share the pre-scan's
+    # spatial shape across all files. Works for both 2D single-slice volumes
+    # and 3D volumes (time axis is always the last).
+    n_times = len(Times)
+    T = np.empty(data0.shape + (n_times,), dtype=np.float32)
+    for ii, jj in enumerate(Times):
+        T[..., ii] = jj
+
     # Loading all image data into single matrix
-    D = np.zeros_like(data0, dtype=np.float32)
-    D = np.expand_dims(D, axis=-1)
-    D = np.repeat(D, len(Times), axis=-1)
-    for ii,jj in enumerate(Fils):
-        img = nib.load(jj)
-        data0 = img.get_fdata().astype(np.float32)
-        data0[np.isnan(data0)] = 0
-        D[:,:,:,ii] = data0
+    D = np.empty(data0.shape + (n_times,), dtype=np.float32)
+    for ii, fj in enumerate(Fils):
+        img = nib.load(fj)
+        d = img.get_fdata().astype(np.float32)
+        d[np.isnan(d)] = 0
+        D[..., ii] = d
     D[np.isnan(D)] = 0
 
     ###################################
     # Calculating slope 1 (enhancement)
     LOGGER.debug(f'{SessionID} | Starting slope 1 calculation')
-    Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1).astype(np.float32)
-    Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,0:2], axis=3), axis=-1), 2, axis=-1).astype(np.float32)
-    denom1 = np.sum(np.square((T[:,:,:,0:2] - Tmean)), axis=3)
-    slope1 = np.divide(
-        np.sum((T[:,:,:,0:2] - Tmean) * (D[:,:,:,0:2] - Dmean), axis=3),
-        denom1,
-        out=np.zeros_like(denom1, dtype=np.float32),
-        where=denom1 != 0
-    ).astype(np.float32)
-    slope1 = slope1 / p95
+    slope1 = _linfit_slope(T[..., 0:2], D[..., 0:2]) / p95
 
     header['glmax'] = np.max(slope1)
     header['glmin'] = np.min(slope1)
@@ -337,16 +371,7 @@ def generate_slopes(SessionID):
     ###################################
     # Calculating slope 2 (washout)
     LOGGER.debug(f'{SessionID} | Starting slope 2 calculation')
-    Tmean = np.repeat(np.expand_dims(np.mean(T[:,:,:,1:], axis=3), axis=-1), len(Times)-1, axis=-1).astype(np.float32)
-    Dmean = np.repeat(np.expand_dims(np.mean(D[:,:,:,1:], axis=3), axis=-1), len(Times)-1, axis=-1).astype(np.float32)
-    denom2 = np.sum(np.square((T[:,:,:,1:] - Tmean)), axis=3)
-    slope2 = np.divide(
-        np.sum((T[:,:,:,1:] - Tmean) * (D[:,:,:,1:] - Dmean), axis=3),
-        denom2,
-        out=np.zeros_like(denom2, dtype=np.float32),
-        where=denom2 != 0
-    ).astype(np.float32)
-    slope2 = slope2 / p95
+    slope2 = _linfit_slope(T[..., 1:], D[..., 1:]) / p95
 
     header['glmax'] = np.max(slope2)
     header['glmin'] = np.min(slope2)
