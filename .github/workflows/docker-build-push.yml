@@ -37,6 +37,7 @@ jobs:
       FOU_RDOU_PASS:     ${{ secrets.REGISTRY_PASSWORD }}
       DHUB_USER:   ${{ secrets.DOCKERHUB_USERNAME }}
       DHUB_TOKEN:  ${{ secrets.DOCKERHUB_TOKEN }}
+      DHUB_REPO:   "nickl99/preprocessing"
 
     steps:
       - uses: actions/checkout@v4
@@ -76,18 +77,18 @@ jobs:
         run: |
           TAG="${{ steps.meta.outputs.BASE_TAG }}${{ matrix.tag_suffix }}"
           echo "${DHUB_TOKEN}" | docker login -u "${DHUB_USER}" --password-stdin
-          docker tag "mri_preprocessing:${TAG}" "nickl99/preprocessing:${TAG}"
-          docker push "nickl99/preprocessing:${TAG}"
+          docker tag "mri_preprocessing:${TAG}" "${DHUB_REPO}:${TAG}"
+          docker push "${DHUB_REPO}:${TAG}"
           # ONLY the CPU leg may own the floating "latest" alias. The GPU leg
           # must never alias latest (earlier it pushed its CUDA-linked image
           # as "latest" whenever TAG=latest-gpu, racing the CPU leg).
           if [ "${{ matrix.tag_suffix }}" = "" ] && [ "${TAG}" != "latest" ]; then
-            docker tag "mri_preprocessing:${TAG}" "nickl99/preprocessing:latest"
-            docker push "nickl99/preprocessing:latest"
+            docker tag "mri_preprocessing:${TAG}" "${DHUB_REPO}:latest"
+            docker push "${DHUB_REPO}:latest"
           fi
           echo ""
           echo "✅ Also on DockerHub:"
-          echo "   apptainer pull nickl99/preprocessing${{ matrix.tag_suffix }}.sif docker://nickl99/preprocessing:${TAG}"
+          echo "   apptainer pull ${DHUB_REPO}${{ matrix.tag_suffix }}.sif docker://${DHUB_REPO}:${TAG}"
 
       - name: Fail if no registry was configured
         if: ${{ matrix.tag_suffix == '' && env.FOU_RDOU_URL == '' && env.DHUB_USER == '' }}

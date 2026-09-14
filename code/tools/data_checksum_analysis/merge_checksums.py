@@ -14,6 +14,7 @@ import json
 from argparse import ArgumentParser
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import checksum_core as core
 
 parser = ArgumentParser(description="Merge two checksum scan result JSON files into a single comparison file.")

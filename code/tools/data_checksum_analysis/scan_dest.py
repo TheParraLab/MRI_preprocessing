@@ -20,6 +20,7 @@ import os
 import sys
 from argparse import ArgumentParser
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import checksum_core as core
 
 parser = ArgumentParser(description="Scan a directory tree and compute checksums for every file.")

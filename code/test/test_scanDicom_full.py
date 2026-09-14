@@ -80,6 +80,7 @@ import importlib.util
 import sys
 import os
 import random
+import tempfile
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -102,8 +103,7 @@ scan = importlib.util.module_from_spec(spec)
 
 sys.path.insert(0, str(proj_root / "code" / "preprocessing"))
 
-test_save_dir = proj_root / "tmp_test"
-test_save_dir.mkdir(parents=True, exist_ok=True)
+test_save_dir = Path(tempfile.mkdtemp(prefix="scan_full_save_"))
 _orig_argv = sys.argv
 sys.argv = [str(scan_path.name), "--save_dir", str(test_save_dir)]
 try:
