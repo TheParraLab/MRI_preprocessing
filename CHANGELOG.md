@@ -26,4 +26,4 @@ The pipeline turns breast MRI DICOM acquisitions into a coregistered, harmonized
 - `02_parseDicom.py --multi` hangs after logging futures completed under `ProcessPoolExecutor`; suspected logger contention (`FileHandlerWithLock` / `QueueListener`). Regression vs pre-rewrite behavior. Target: 1.1.
 - HPC Singularity/Apptainer: current documented path assumes manual `.def` builds (broken on modern clusters); move to pulling the pushed Docker image via Apptainer. Target: 1.1.
 
-[1.0.0]: https://github.com/parra-lab/MRI_preprocessing/compare/v0.0.0...v1.0.0  (placeholder link — adjust if the remote differs)
+[1.0.0]: https://github.com/TheParraLab/MRI_preprocessing/releases/tag/v1.0.0
