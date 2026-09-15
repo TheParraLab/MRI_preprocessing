@@ -28,6 +28,8 @@ RUN apt-get update && \
 # adds test + tooling extras used by code/test and code/tools (both are part
 # of the image so the in-image test suite matches what CI runs).
 WORKDIR /FL_system
+
+ENV LOG_DIR=/deployment/logs
 # Image identity (set by the CI release flow / build_and_push.sh on the CLI)
 ARG IMAGE_VERSION=1.0.0
 ARG VCS_REVISION=unknown
