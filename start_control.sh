@@ -506,7 +506,7 @@ case "$RUNTIME" in
     echo ""
     echo "Pipeline scripts are baked into the image."
     echo "Once the prompt appears, run:"
-    echo "  python code/preprocessing/01_scanDicom.py --scan-dir /FL_system/data/raw --save-dir /FL_system/data"
+    echo "  python code/preprocessing/01_scanDicom.py --scan_dir /FL_system/data/raw --save_dir /FL_system/data"
     echo "  bash code/preprocessing/00_preprocess.sh              (runs all steps)"
     echo ""
 
@@ -534,6 +534,32 @@ case "$RUNTIME" in
 
     # Host-local deployment log dir (no container mount for bare conda runs).
     export LOG_DIR="${DEPLOY_LOG_DIR}/logs"
+
+    # ── Export the pipeline contract (env vars read by code/preprocessing/0[1-6]*) ─
+    #   Native Conda: the /FL_system/data/* container-default is NOT present on the
+    #   HPC host, so resolve_dir() must find the *_DIR env vars to pick up the
+    #   user-supplied paths.  (Docker/Singularity leave these unset and rely on the
+    #   bind mounts + baked-in ENV LOG_DIR.)
+    #
+    #   DATA_DIR is the base directory that holds Data_table*.csv.  The .env's
+    #   DATA_DIRECTORY_PATH is the RAW DICOM directory; its parent is the base.
+    DATA_DIR="$(dirname "${DATA_DIRECTORY_PATH%/}")"
+    RAW_DIR="${DATA_DIRECTORY_PATH}"
+    NIFTI_DIR="${NIFTI_DIRECTORY_PATH}"
+    RAS_DIR="${RAS_DIRECTORY_PATH}"
+    COREG_DIR="${COREG_DIRECTORY_PATH}"
+    INPUTS_DIR="${INPUTS_DIRECTORY_PATH}"
+    export DATA_DIR RAW_DIR NIFTI_DIR RAS_DIR COREG_DIR INPUTS_DIR
+
+    echo "Pipeline contract for this Conda run:"
+    echo "  DATA_DIR   = ${DATA_DIR}"
+    echo "  RAW_DIR    = ${RAW_DIR}"
+    echo "  NIFTI_DIR  = ${NIFTI_DIR}"
+    echo "  RAS_DIR    = ${RAS_DIR}"
+    echo "  COREG_DIR  = ${COREG_DIR}"
+    echo "  INPUTS_DIR = ${INPUTS_DIR}"
+    echo "  LOG_DIR    = ${LOG_DIR}"
+    echo ""
 
     if [[ -n "${CONDA_DEFAULT_ENV:-}" && "${CONDA_DEFAULT_ENV}" == "${ENV_NAME}" ]]; then
       echo "Conda env ${ENV_NAME} already active."
@@ -576,9 +602,7 @@ case "$RUNTIME" in
     echo ""
 
     cd "${project_directory_path}"
-    bash code/preprocessing/00_preprocess.sh \
-      --scan-dir "${DATA_DIRECTORY_PATH}" \
-      --save-dir "${DATA_DIRECTORY_PATH}"
+    bash code/preprocessing/00_preprocess.sh
     ;;
 
   *)

@@ -260,6 +260,28 @@ class _LoggerProxy(logging.Logger):
 
 # ---- Public API ------------------------------------------------------------
 
+def resolve_dir(flag_value: Optional[str], env_name: str, default: str) -> str:
+    """Resolve a deployment directory path.
+
+    Order (first non-empty value wins):
+      1. ``flag_value``  — an explicit CLI argument for that directory.
+      2. ``env_name``    — an environment variable set by the launcher
+         (e.g. ``RAW_DIR``, ``NIFTI_DIR``); on a native Conda HPC run the
+         launcher exports the host-local path, while inside a container the
+         variable is left unset so the container default applies.
+      3. ``default``     — the container-stable path (``/FL_system/data/...``).
+
+    Returns the path verbatim (trailing-slash handling is left to the caller).
+    Empty strings are treated as "not provided".
+    """
+    if flag_value:
+        return flag_value
+    env_val = os.environ.get(env_name, '').strip()
+    if env_val:
+        return env_val
+    return default
+
+
 def get_log_dir() -> str:
     """Centralised log directory for the current deployment.
 
@@ -270,11 +292,8 @@ def get_log_dir() -> str:
       2. Fallback for manual/local runs: ``<repo_root>/logs`` so that log
          creation never requires write access to the filesystem root.
     """
-    env_log_dir = os.environ.get('LOG_DIR', '').strip()
-    if env_log_dir:
-        return env_log_dir
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(repo_root, 'logs')
+    return resolve_dir(None, 'LOG_DIR', os.path.join(repo_root, 'logs'))
 
 
 def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:

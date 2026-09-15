@@ -11,7 +11,7 @@ import numpy as np
 import nibabel as nib
 from multiprocessing import cpu_count, Manager
 # Custom Imports
-from toolbox import run_function, get_logger, get_log_dir
+from toolbox import run_function, get_logger, get_log_dir, resolve_dir
 manager = Manager()
 stop_flag = manager.Event()
 
@@ -22,12 +22,12 @@ def _check_stop():
 
 # Define command line arguments
 parser = argparse.ArgumentParser(description='Convert Nifti files to RAS orientation')
-parser.add_argument('--scan_dir', type=str, default='/FL_system/data/nifti/', help='Directory containing scans to process')
-parser.add_argument('--save_dir', type=str, default='/FL_system/data/RAS/', help='Directory to save the output')
+parser.add_argument('--scan_dir', type=str, default=None, help='Directory containing scans to process (default: $NIFTI_DIR or /FL_system/data/nifti/)')
+parser.add_argument('--save_dir', type=str, default=None, help='Directory to save the output (default: $RAS_DIR or /FL_system/data/RAS/)')
 parser.add_argument('--dir_idx', type=int, required=False, help='Index of the directory to process')
 parser.add_argument('--dir_list', type=str, default='list.txt', help='List of directories to process')
-parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
-parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
+parser.add_argument('--multi', action='store_true', help='Run with multiprocessing enabled')
+parser.add_argument('--profile', action='store_true', help='Run with profiler enabled')
 parser.add_argument('--test', nargs='?', type=int, const=10, help='Run in test mode, limit the number of directories to process')
 parser.add_argument('--test_stop', action='store_true', help='Randomly trip the disk space checker to simulate low disk space')
 parser.add_argument(
@@ -35,6 +35,8 @@ parser.add_argument(
     help='CSV/txt file containing one ID per line. If provided, only process directories whose name appears in this file.'
 )
 args = parser.parse_args()
+args.scan_dir = resolve_dir(args.scan_dir, 'NIFTI_DIR', '/FL_system/data/nifti/')
+args.save_dir = resolve_dir(args.save_dir, 'RAS_DIR', '/FL_system/data/RAS/')
 # Get script name
 script_name = os.path.basename(__file__).split('.')[0]
 
@@ -48,7 +50,7 @@ SAVE_DIR = args.save_dir #'/FL_system/data/RAS/'
 TEST = args.test is not None # If True, the script will run with a limited number of directories
 if TEST:
     N_TEST = args.test
-PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
+PARALLEL = args.multi # If True, the script will run with multiprocessing enabled
 DISK_SPACE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 100 GB
 #PROGRESS = False
 LOGGER = get_logger(script_name, LOG_DIR)

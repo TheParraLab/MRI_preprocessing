@@ -14,7 +14,7 @@ import time
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
-from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable
+from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir
 from DICOM import DICOMfilter, DICOMorder
 
 # Global variables for progress bar and lock
@@ -25,12 +25,14 @@ disk_space_lock = Lock()
 # Deployment-isolated logs; see toolbox.get_log_dir() for resolution order.
 LOGGER = get_logger('03_saveNifti')
 
-# Define necessary directories
-LOAD_DIR = '/FL_system/data/' # Location to load the constructed Data_table_timing.csv ['/FL_system/data/']
-SAVE_DIR = '/FL_system/data/nifti/' # Location to save the nifti files ['/FL_system/data/nifti/']
+# Define necessary directories (resolve: flag > env > container default)
 parser = argparse.ArgumentParser(description='Convert DICOM files to NIfTI format')
-parser.add_argument('--multi', '-m', action='store_true', help='Use multiprocessing')
+parser.add_argument('--multi', action='store_true', help='Use multiprocessing')
+parser.add_argument('--load_dir', type=str, default=None, help='Directory to load Data_table_timing.csv from (default: $DATA_DIR or /FL_system/data/)')
+parser.add_argument('--save_dir', type=str, default=None, help='Directory to save the NIfTI files (default: $NIFTI_DIR or /FL_system/data/nifti/)')
 args = parser.parse_args()
+LOAD_DIR = resolve_dir(args.load_dir, 'DATA_DIR', '/FL_system/data/')
+SAVE_DIR = resolve_dir(args.save_dir, 'NIFTI_DIR', '/FL_system/data/nifti/')
 
 DEBUG = 0
 TEST = False

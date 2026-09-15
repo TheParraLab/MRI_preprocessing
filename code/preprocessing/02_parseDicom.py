@@ -58,7 +58,7 @@ except ImportError:
     yappi = None
 
 # Custom imports
-from toolbox import get_log_dir, get_logger, run_function
+from toolbox import get_log_dir, get_logger, run_function, resolve_dir
 from DICOM import DICOMfilter, DICOMorder, DICOMsplit, classify_fs_series
 
 # Centralised log directory — resolves to /deployment/logs inside containers
@@ -105,12 +105,10 @@ class ParseConfig:
 def build_config() -> ParseConfig:
     """Parse CLI arguments and return a ParseConfig instance."""
     parser = argparse.ArgumentParser(description='Parse DICOM data: filter, split, and order scans')
-    parser.add_argument('--multi', '-m', action='store_true',
-                        help='DEPRECATED — ignored. Multiprocessing is currently disabled.')
-    parser.add_argument('--save_dir', type=str, default='/FL_system/data/',
-                        help='Directory to save the updated tables (default: /FL_system/data/)')
-    parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv',
-                        help='Path to the input Data_table.csv (default: /FL_system/data/Data_table.csv)')
+    parser.add_argument('--save_dir', type=str, default=None,
+                        help='Directory to save the updated tables (default: $DATA_DIR or /FL_system/data/)')
+    parser.add_argument('--load_table', type=str, default=None,
+                        help='Path to the input Data_table.csv (default: <$DATA_DIR>/Data_table.csv)')
     parser.add_argument('--dir_idx', type=int,
                         help='Index of the folder to process from dirs_to_process.txt (for HPC array jobs)')
     parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt',
@@ -130,6 +128,10 @@ def build_config() -> ParseConfig:
     parser.add_argument('--fully_removed', action='store_true',
                         help='Export fully removed sessions')
     args = parser.parse_args()
+
+    args.save_dir = resolve_dir(args.save_dir, 'DATA_DIR', '/FL_system/data/')
+    if args.load_table is None:
+        args.load_table = args.save_dir.rstrip('/') + '/Data_table.csv'
 
     cfg = ParseConfig(
         save_dir=args.save_dir,

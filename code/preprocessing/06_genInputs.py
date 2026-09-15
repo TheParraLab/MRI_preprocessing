@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
 import subprocess
 import threading
-from toolbox import ProgressBar, get_log_dir, get_logger
+from toolbox import ProgressBar, get_log_dir, get_logger, resolve_dir
 
 
 def _clean_timing(value):
@@ -113,22 +113,24 @@ LOGGER = get_logger('06_genInputs', LOG_DIR)
 
 # argparse configuration
 parser = argparse.ArgumentParser(description='Generate model inputs from coregistered scans')
-parser.add_argument('--load_dir', type=str, default='/FL_system/data/coreg/', help='Directory to load scans from')
-parser.add_argument('--save_dir', type=str, default='/FL_system/data/inputs/', help='Directory to save model inputs')
+parser.add_argument('--load_dir', type=str, default=None, help='Directory to load scans from (default: $COREG_DIR or /FL_system/data/coreg/)')
+parser.add_argument('--save_dir', type=str, default=None, help='Directory to save model inputs (default: $INPUTS_DIR or /FL_system/data/inputs/)')
 parser.add_argument('--test', nargs='?', type=int, const=40, help='Run in test mode, randomly sample N sessions (default: 40)')
-parser.add_argument('--parallel', action='store_true', help='Enable multiprocessing')
+parser.add_argument('--multi', action='store_true', help='Enable multiprocessing')
 parser.add_argument(
     '--ids_file', type=str, default=None,
     help='CSV/txt file containing one ID per line. If provided, only process sessions whose name appears in this file.'
 )
 args = parser.parse_args()
+args.load_dir = resolve_dir(args.load_dir, 'COREG_DIR', '/FL_system/data/coreg/')
+args.save_dir = resolve_dir(args.save_dir, 'INPUTS_DIR', '/FL_system/data/inputs/')
 
 LOAD_DIR = args.load_dir
 SAVE_DIR = args.save_dir
 DEBUG = 0
 TEST = args.test is not None
 N_TEST = args.test if TEST else 40
-PARALLEL = args.parallel
+PARALLEL = args.multi
 PROGRESS = False
 # This script is for generating the numpy files utilized for model training
 # Performs the calculation of the slope 1 (enhancement) for each scan

@@ -20,7 +20,8 @@ Arguments:
     --scan_dir (str): Path to the directory containing raw DICOM files.
     --save_dir (str): Path to the directory where the output CSV will be saved.
     --test (int): Run in test mode with a limited number of directories.
-    --multi (int): Number of CPUs to use for parallel processing.
+    --multi: Enable multiprocessing (flag).
+    --cpus (int): Number of CPUs for parallel workers (default: all available).
     --profile: Enable profiling with yappi.
     --dir_idx (int): Index of the directory to process (for HPC array jobs).
     --dir_list (str): Path to the list of directories (for HPC array jobs).
@@ -58,7 +59,7 @@ import pandas as pd
 # Function imports
 from multiprocessing import cpu_count
 # Custom imports
-from toolbox import get_logger, run_function
+from toolbox import get_logger, resolve_dir, run_function
 from DICOM import DICOMextract
 
 
@@ -87,14 +88,16 @@ def build_config() -> ScanConfig:
     parser = argparse.ArgumentParser(description='Extract DICOM data to build Data_table.csv')
     parser.add_argument('--test', nargs='?', const=100, type=int,
                         help='Run in test mode with an optional number of dicom directories to scan (default: 100)')
-    parser.add_argument('--multi', '-m', nargs='?', const=max(1, cpu_count()-1), type=int,
-                        help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
-    parser.add_argument('-p', '--profile', action='store_true',
+    parser.add_argument('--multi', action='store_true',
+                        help='Run with multiprocessing enabled')
+    parser.add_argument('--cpus', type=int, default=None,
+                        help='Number of CPUs for multiprocessing workers (default: all available)')
+    parser.add_argument('--profile', action='store_true',
                         help='Run with profiler enabled')
-    parser.add_argument('--save_dir', nargs='?', default='/FL_system/data/', type=str,
-                        help='Location to save the constructed Data_table.csv (default: /FL_system/data/)')
-    parser.add_argument('--scan_dir', nargs='?', default='/FL_system/data/raw/', type=str,
-                        help='Location to recursively scan for dicom files (default: /FL_system/data/raw/)')
+    parser.add_argument('--save_dir', type=str, default=None,
+                        help='Location to save the constructed Data_table.csv (default: $DATA_DIR or /FL_system/data/)')
+    parser.add_argument('--scan_dir', type=str, default=None,
+                        help='Location to recursively scan for dicom files (default: $RAW_DIR or /FL_system/data/raw/)')
     parser.add_argument('--dir_idx', type=int,
                         help='Index of the folder to process from dirs_to_process.pkl (for HPC array jobs)')
     parser.add_argument('--dir_list', type=str, default='dirs_to_process.pkl',
@@ -116,6 +119,9 @@ def build_config() -> ScanConfig:
                              'DICOMextract diagnostic level 2)')
     args = parser.parse_args()
 
+    args.save_dir = resolve_dir(args.save_dir, 'DATA_DIR', '/FL_system/data/')
+    args.scan_dir = resolve_dir(args.scan_dir, 'RAW_DIR', '/FL_system/data/raw/')
+
     # --debug (bare, -> True)  => 2 (most verbose; enables DICOMextract's
     #                             `self.debug > 1` exception-detail branches)
     # --debug N (explicit int) => N
@@ -132,8 +138,8 @@ def build_config() -> ScanConfig:
         scan_dir=args.scan_dir,
         test=args.test,
         n_test=args.test if args.test is not None else 100,
-        parallel=args.multi is not None,
-        n_cpus=args.multi if args.multi is not None else cpu_count() - 1,
+        parallel=args.multi,
+        n_cpus=args.cpus if args.cpus is not None else max(1, cpu_count() - 1),
         profile=args.profile,
         sample_pct=args.sample_pct,
         sample_seed=args.sample_seed,

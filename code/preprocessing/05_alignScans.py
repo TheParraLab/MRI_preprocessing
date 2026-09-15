@@ -10,9 +10,8 @@ import threading
 import signal
 
 from multiprocessing import Manager, cpu_count
-from toolbox import ProgressBar, get_log_dir, get_logger, run_function
-
-BASE_PATH = '/FL_system'
+from toolbox import (
+    ProgressBar, get_log_dir, get_logger, run_function, resolve_dir)
 
 _GPU_CHECK_INTERVAL = 10
 _gpu_calls_since_check = 0
@@ -21,11 +20,11 @@ _gpu_calls_since_check = 0
 parser = argparse.ArgumentParser(
     description='Align scans to the first post scan')
 parser.add_argument(
-    '--load_dir', type=str, default=f'{BASE_PATH}/data/RAS/',
-    help='Directory to load scans from')
+    '--load_dir', type=str, default=None,
+    help='Directory to load scans from (default: $RAS_DIR or /FL_system/data/RAS/)')
 parser.add_argument(
-    '--save_dir', type=str, default=f'{BASE_PATH}/data/coreg/',
-    help='Directory to save aligned scans')
+    '--save_dir', type=str, default=None,
+    help='Directory to save aligned scans (default: $COREG_DIR or /FL_system/data/coreg/)')
 parser.add_argument(
     '--multi', '-m', action='store_true', help='Use multiprocessing')
 parser.add_argument(
@@ -35,7 +34,7 @@ parser.add_argument(
     '--dir_list', type=str, default='dirs_to_process.txt',
     help='Path to the directory list file')
 parser.add_argument(
-    '--prune', '-p', action='store_true',
+    '--prune', action='store_true',
     help='Enable the deletion of the original scans once aligned')
 parser.add_argument(
     '--test', nargs='?', type=int, const=10,
@@ -45,6 +44,9 @@ parser.add_argument(
     help='CSV/txt file containing one ID per line. If provided, only process directories whose name appears in this file.'
 )
 args = parser.parse_args()
+
+args.load_dir = resolve_dir(args.load_dir, 'RAS_DIR', '/FL_system/data/RAS/')
+args.save_dir = resolve_dir(args.save_dir, 'COREG_DIR', '/FL_system/data/coreg/')
 
 # Centralised log directory — resolves to /deployment/logs inside containers
 # (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
