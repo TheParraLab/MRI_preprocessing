@@ -5,6 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The pipeline turns breast MRI DICOM acquisitions into a coregistered, harmonized NIfTI dataset in six steps (`01_scanDicom` → `02_parseDicom` → `03_saveNifti` → `04_saveRAS` → `05_alignScans` → `06_genInputs`), deployable via Docker, conda (`environment.yml`), or a native HPC path.
 
+## [1.0.1] - 2026-09-15
+
+### Fixed
+- Docker/Singularity: step logs (02_parseDicom, 03_saveNifti, etc.) now persist to `deployments/<id>/logs/` instead of writing to the ephemeral container layer. `LOG_DIR=/deployment/logs` is now baked into the image via `ENV` — no longer dependent on compose environment forwarding.
+
 ## [1.0.0] - 2026-08-27
 
 ### Added
@@ -27,3 +32,4 @@ The pipeline turns breast MRI DICOM acquisitions into a coregistered, harmonized
 - HPC Singularity/Apptainer: current documented path assumes manual `.def` builds (broken on modern clusters); move to pulling the pushed Docker image via Apptainer. Target: 1.1.
 
 [1.0.0]: https://github.com/TheParraLab/MRI_preprocessing/releases/tag/v1.0.0
+[1.0.1]: https://github.com/TheParraLab/MRI_preprocessing/releases/tag/v1.0.1
