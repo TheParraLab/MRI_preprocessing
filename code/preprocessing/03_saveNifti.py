@@ -14,7 +14,7 @@ import time
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
-from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir
+from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir, _collect_future_map, _terminate_executors, WORKER_TIMEOUT
 from DICOM import DICOMfilter, DICOMorder
 
 # Global variables for progress bar and lock
@@ -106,48 +106,32 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     if Parallel:
         max_workers = cpu_count() - 1
         LOGGER.info(f'Running {len(items)} tasks through ProcessPoolExecutor ({max_workers} workers)')
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            pending = {}
-            next_idx = 0
-
-            while pending or next_idx < len(items):
-                if stop_flag.is_set():
-                    for f in pending.values():
-                        f.cancel()
-                    pending.clear()
-                    break
-
-                # Submit up to max_workers worth of pending tasks
-                while next_idx < len(items) and len(pending) < max_workers:
-                    fut = executor.submit(target, items[next_idx], *args, **kwargs)
-                    pending[fut] = next_idx
-                    next_idx += 1
-
-                if not pending:
-                    break
-
-                time.sleep(0.5)
-
-                # Collect any finished futures
-                done_futs = [f for f in pending if f.done()]
-                for f in done_futs:
-                    idx = pending.pop(f)
-                    try:
-                        result = f.result(timeout=1800)
-                        results.append(result)
-                        results_len = idx + 1
-                        if results_len % 50 == 0 or results_len == len(items):
-                            elapsed = time.time() - t_start
-                            LOGGER.info(f'[{target_name}] Progress: {results_len}/{len(items)} ({elapsed:.0f}s)')
-                    except Exception as e:
-                        LOGGER.error(f'[ERROR] Item {idx} failed: {e}', exc_info=True)
-
-            for f in pending.values():
-                f.cancel()
+        deadline = time.monotonic() + WORKER_TIMEOUT
+        executor = ProcessPoolExecutor(max_workers=max_workers)
+        try:
+            future_map = {executor.submit(target, items[i], *args, **kwargs): i
+                          for i in range(len(items))}
+            ordered = _collect_future_map(future_map, deadline, LOGGER)
+            results = [r for r in ordered if r is not None]
+        except KeyboardInterrupt:
+            LOGGER.info('Interrupted. Terminating workers...')
+            _terminate_executors(executor)
+            raise
+        finally:
+            if time.monotonic() < deadline:
+                try:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                except Exception as e:
+                    LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
+                    _terminate_executors(executor)
+            else:
+                LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                _terminate_executors(executor)
     else:
+        deadline = time.monotonic() + WORKER_TIMEOUT
         for items_index, item in enumerate(items):
-            if stop_flag.is_set():
-                LOGGER.info(f'[STOP] Stop flag set after processing {items_index+1}/{len(items)} items')
+            if stop_flag.is_set() or time.monotonic() >= deadline:
+                LOGGER.info(f'[STOP] Stop flag set or deadline exceeded after processing {items_index+1}/{len(items)} items')
                 break
             try:
                 result = target(item)

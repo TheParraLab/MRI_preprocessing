@@ -9,7 +9,7 @@ import sys
 from typing import Callable, List, Any, Optional, Literal
 from functools import partial
 from multiprocessing import cpu_count
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait
 from logging.handlers import QueueHandler, QueueListener
 
 
@@ -433,6 +433,64 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
 
 # ---- Parallel runner -------------------------------------------------------
 
+# Max seconds to wait for workers before force-terminating. Override per run via env MRI_WORKER_TIMEOUT.
+import os as _os
+WORKER_TIMEOUT = float(_os.environ.get('MRI_WORKER_TIMEOUT', '1800'))
+
+
+def _terminate_executors(*executors) -> None:
+    import signal, logging
+    _log = logging.getLogger(__name__)
+    for ex in executors:
+        procs = getattr(ex, '_processes', None)
+        if procs:
+            for p in list(procs):
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            for p in list(procs):
+                try:
+                    p.join(timeout=3)
+                    if p.is_alive():
+                        p.kill()
+                except Exception:
+                    pass
+        try:
+            ex.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:
+            _log.warning(f'Failed to shut down executor gracefully: {e!r}')
+
+
+def _collect_future_map(future_map, deadline, LOGGER):
+    pending = dict(future_map)
+    ordered = [None] * len(future_map)
+    while pending:
+        remaining = max(0.0, deadline - time.monotonic())
+        remap = dict()
+        done, not_done = wait(list(pending.keys()), timeout=min(5.0, remaining if remaining > 0 else 0.0))
+        for fut in done:
+            idx = future_map[fut]
+            try:
+                ordered[idx] = fut.result(timeout=0.1)
+            except Exception as e:
+                LOGGER.error(f'Error processing item {idx}: {e}', exc_info=True)
+                ordered[idx] = None
+            pending.pop(fut, None)
+        if time.monotonic() >= deadline:
+            break
+    for fut in list(pending.keys()):
+        idx = future_map[fut]
+        pending.pop(fut, None)
+        if ordered[idx] is None:
+            LOGGER.error(f'Item {idx} timed out (worker exceeded deadline) and was cancelled.')
+        try:
+            fut.cancel()
+        except Exception:
+            pass
+    return ordered
+
+
 def run_function(
     LOGGER: Any,                          # can be a Logger or _LoggerProxy
     target: Callable[..., Any], items: List[Any],
@@ -482,6 +540,8 @@ def run_function(
 
     results: List[Any] = []
     try:
+        deadline = time.monotonic() + WORKER_TIMEOUT
+
         # ───────── process mode ─────────
         if Parallel and P_type == 'process':
             effective = _effective_workers(N_CPUS, role=P_role)
@@ -489,68 +549,54 @@ def run_function(
             LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             init_args = (LOGGER.name, LOGGER._log_level,
                          LOGGER._file_path, LOGGER._formatter_str)
-
-            with ProcessPoolExecutor(max_workers=max_workers,
-                                     initializer=_init_child_logger,
-                                     initargs=init_args) as executor:
+            executor = ProcessPoolExecutor(max_workers=max_workers,
+                                           initializer=_init_child_logger,
+                                           initargs=init_args)
+            try:
                 future_map = {executor.submit(_process_worker, target, item, *args, **kwargs): i
                               for i, item in enumerate(items)}
-                ordered: List[Optional[Any]] = [None] * len(future_map)
-
-                try:
-                    for fut in as_completed(future_map):
-                        idx = future_map.pop(fut)
-                        if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
-                            LOGGER.info('Stopping parallel processing (stop flag).')
-                            break
-                        try:
-                            result = fut.result()         # fast path for already-completed work
-                            ordered[idx] = result
-                            LOGGER.debug(f'Future {idx} completed successfully')
-                        except Exception as e:
-                            LOGGER.error(
-                                f'Error parallel processing item {idx}: {e}', exc_info=True)
-                            ordered[idx] = None
-                except KeyboardInterrupt:
-                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                    for remaining_fut in list(future_map.keys()):
-                        remaining_fut.cancel()
-                    executor.shutdown(wait=True, cancel_futures=True)
-                    raise
-
+                ordered = _collect_future_map(future_map, deadline, LOGGER)
                 results = list(ordered)
+            except KeyboardInterrupt:
+                LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
+                _terminate_executors(executor)
+                raise
+            finally:
+                if time.monotonic() < deadline:
+                    try:
+                        executor.shutdown(wait=True, cancel_futures=True)
+                    except Exception as e:
+                        LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
+                        _terminate_executors(executor)
+                else:
+                    LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                    _terminate_executors(executor)
 
         # ───────── thread mode ────────────────
         elif Parallel and P_type == 'thread':
             effective = _effective_workers(N_CPUS, role=P_role)
             max_workers = min(32, 2 * effective)
             LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 future_map = {executor.submit(target, item, *args, **kwargs): i
                               for i, item in enumerate(items)}
-                ordered = [None] * len(future_map)
-
-                try:
-                    for fut in as_completed(future_map):
-                        idx = future_map.pop(fut)
-                        if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
-                            LOGGER.info('Stopping parallel processing (stop flag).')
-                            break
-                        try:
-                            result = fut.result()
-                            ordered[idx] = result
-                            LOGGER.debug(f'Future {idx} completed successfully')
-                        except Exception as e:
-                            LOGGER.error(f'Error parallel processing item {idx}: {e}', exc_info=True)
-                            ordered[idx] = None
-                except KeyboardInterrupt:
-                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                    for remaining_fut in list(future_map.keys()):
-                        remaining_fut.cancel()
-                    executor.shutdown(wait=True, cancel_futures=True)
-                    raise
-
+                ordered = _collect_future_map(future_map, deadline, LOGGER)
                 results = list(ordered)
+            except KeyboardInterrupt:
+                LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
+                _terminate_executors(executor)
+                raise
+            finally:
+                if time.monotonic() < deadline:
+                    try:
+                        executor.shutdown(wait=True, cancel_futures=True)
+                    except Exception as e:
+                        LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
+                        _terminate_executors(executor)
+                else:
+                    LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                    _terminate_executors(executor)
 
         # ───────── hybrid: processes chunk + threads reuse I/O per-chunk ────
         elif Parallel and P_type == 'hybrid':
@@ -564,8 +610,6 @@ def run_function(
             init_args = (LOGGER.name, LOGGER._log_level,
                          LOGGER._file_path, LOGGER._formatter_str)
 
-
-
             # Create evenly-sized chunks and track global indices in parent.
             n_workers = min(max_workers, len(items)) if items else 0
             workers: List[Any] = []
@@ -578,46 +622,54 @@ def run_function(
 
             results: List[Optional[Any]] = [None] * len(items)
 
-            with ProcessPoolExecutor(
-                max_workers=max_workers,
-                initializer=_init_child_logger,
-                initargs=init_args,
-            ) as pexecutor:
-                future_to_chunk = {
-                    pexecutor.submit(_chunk_target, start, chunk, target, args, kwargs,
-                                     threads_per_worker): (start, end)
-                    for start, chunk in workers
-                }
-
+            if workers:
+                pexecutor = ProcessPoolExecutor(
+                    max_workers=max_workers,
+                    initializer=_init_child_logger,
+                    initargs=init_args,
+                )
                 try:
-                    for fut in as_completed(future_to_chunk):
-                        idx_range = future_to_chunk.pop(fut)
-                        try:
-                            global_start, ordered_list = fut.result()
-                            if not isinstance(ordered_list, list):
-                                ordered_list = list(ordered_list)
-                            for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
-                                               ordered_list):
-                                if k < len(results):
-                                    results[k] = val
-                        except Exception as e:
-                            root = logging.getLogger()
-                            root.error(f'Hybrid worker error at chunk {idx_range}: {e}', exc_info=True)
+                    futures = [
+                        pexecutor.submit(_chunk_target, start, chunk, target, args, kwargs,
+                                         threads_per_worker)
+                        for start, chunk in workers
+                    ]
+                    chunk_meta = [(start, start + len(chunk)) for start, chunk in workers]
+                    future_map = dict(zip(futures, range(len(futures))))
+                    ordered = _collect_future_map(future_map, deadline, LOGGER)
+                    for (global_start, end_pos), chunk_result in zip(chunk_meta, ordered):
+                        if not chunk_result:
+                            continue
+                        global_start, ordered_list = chunk_result
+                        if not isinstance(ordered_list, list):
+                            ordered_list = list(ordered_list)
+                        for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
+                                         ordered_list):
+                            if k < len(results):
+                                results[k] = val
                 except KeyboardInterrupt:
-                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                    for remaining_fut in list(future_to_chunk.keys()):
-                        remaining_fut.cancel()
-                    pexecutor.shutdown(wait=True, cancel_futures=True)
+                    LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
+                    _terminate_executors(pexecutor)
                     raise
+                finally:
+                    if time.monotonic() < deadline:
+                        try:
+                            pexecutor.shutdown(wait=True, cancel_futures=True)
+                        except Exception as e:
+                            LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
+                            _terminate_executors(pexecutor)
+                    else:
+                        LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                        _terminate_executors(pexecutor)
 
-                results = list(results)
+            results = list(results)
 
         # ───────── fallback serial ─────────────
         else:
             if Parallel and P_type not in ('thread', 'process'):
                 LOGGER.error(f'Unknown P_type={P_type}, falling back to serial.')
             for i, item in enumerate(items):
-                if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
+                if (stop_flag and getattr(stop_flag, 'is_set', lambda: False)()) or (time.monotonic() >= deadline):
                     break
                 try:
                     results.append(target(item, *args, **kwargs))

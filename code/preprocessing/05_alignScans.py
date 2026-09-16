@@ -74,10 +74,13 @@ def _check_stop():
 
 def _check_gpu_health():
     """Verify GPU is still accessible. Raises RuntimeError if not."""
-    _res = subprocess.run(
-        ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True)
+    try:
+        _res = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('nvidia-smi timed out')
     if _res.returncode != 0 or not _res.stdout.strip():
         raise RuntimeError(
             f'GPU health check failed (exit {_res.returncode}): '
@@ -136,12 +139,20 @@ def align(session_dir: str, save_dir: str):
             subprocess.run(
                 ['reg_f3d', '-ref', reference, '-flo', f, '-res', out_file,
                  '-be', '0.1', '-platf', '1'],
-                check=True)
+                check=True, timeout=1800)
             LOGGER.info(f'Coregistered: {os.path.basename(f)}')
         except subprocess.CalledProcessError as e:
             LOGGER.error(
                 f'Error during coregistration of '
                 f'{os.path.basename(f)}: {e}')
+            if os.path.exists(out_file):
+                os.remove(out_file)
+            session_failed = True
+            break
+        except subprocess.TimeoutExpired:
+            LOGGER.error(
+                f'Coregistration of {os.path.basename(f)} timed out '
+                f'(exceeded 1800s). Treating session as failed.')
             if os.path.exists(out_file):
                 os.remove(out_file)
             session_failed = True
@@ -176,7 +187,7 @@ def align(session_dir: str, save_dir: str):
     # Copy reference scan into output directory unchanged
     reference_dst = os.path.join(out_dir, os.path.basename(reference))
     if not os.path.exists(reference_dst):
-        subprocess.run(['cp', reference, reference_dst], check=True)
+        subprocess.run(['cp', reference, reference_dst], check=True, timeout=600)
         LOGGER.info(
             f'Copied reference: {os.path.basename(reference)}')
 
@@ -252,9 +263,9 @@ if __name__ == '__main__':
         _res = subprocess.run(
             ['reg_f3d', '--version'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, check=True)
+            text=True, check=True, timeout=30)
         LOGGER.info(f'NiftyReg version: {_res.stdout.strip()}')
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
         LOGGER.error(f'Error checking NiftyReg version: {e}')
 
     # ---- Signal handler for graceful shutdown -----------------
@@ -324,7 +335,7 @@ if __name__ == '__main__':
             p = d if os.path.isabs(d) else os.path.join(LOAD_DIR, d)
             if os.path.exists(p):
                 try:
-                    subprocess.run(['rm', '-rf', p], check=True)
+                    subprocess.run(['rm', '-rf', p], check=True, timeout=120)
                     LOGGER.info(f'Deleted: {p}')
                 except Exception as e:
                     LOGGER.error(f'Error deleting directory {p}: {e}')
