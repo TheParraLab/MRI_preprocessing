@@ -9,6 +9,8 @@ services:
         # CUDA-linked build (GPU node required at runtime).
         USE_CUDA: ${USE_CUDA:-OFF}
     runtime: nvidia
+    # host networking → no bridge/veth/iptables rules on host (NFS traffic looks like host traffic)
+    network_mode: host
     volumes:
       - ${DATA_DIRECTORY_PATH}:/FL_system/data/raw
       - ${NIFTI_DIRECTORY_PATH}:/FL_system/data/nifti
