@@ -4,7 +4,7 @@ import glob
 import pickle
 import numpy as np
 import pandas as pd
-from multiprocessing import Queue, Manager, cpu_count, Lock
+from multiprocessing import Queue, cpu_count, Lock, Event
 import threading
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import signal
@@ -14,12 +14,11 @@ import time
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
-from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir, _collect_future_map, _terminate_executors, WORKER_TIMEOUT
+from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir, _collect_future_map, _terminate_executors, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti
 from DICOM import DICOMfilter, DICOMorder
 
 # Global variables for progress bar and lock
 #Progress = None
-manager = Manager()
 disk_space_lock = Lock()
 #progress_queue = manager.Queue()
 # Deployment-isolated logs; see toolbox.get_log_dir() for resolution order.
@@ -39,7 +38,7 @@ TEST = False
 N_TEST = 200
 PARALLEL = args.multi
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
-stop_flag = manager.Event()
+stop_flag = Event()
 
 #### Preprocessing | Step 3: Save Nifti Files ####
 # This script is for generating the nifti files for the selected scans
@@ -170,9 +169,11 @@ def run_cmd(command, commands):
     file_name = command[4]
     input_file = command[-1]
     input_dir = '/'.join(input_file.split('/')[:-1])
-    LOGGER.info(f'[START] {file_name} | input: {input_file} | output: {output_dir}{os.sep}{file_name}.nii')
+    # output will be a .nii.gz now; only reference the stem in the log
+    LOGGER.info(f'[START] {file_name} | input: {input_file} | output: {output_dir}{os.sep}{file_name}.nii.gz')
 
-    if os.path.exists(f'{output_dir}{os.sep}{file_name}.nii'):
+    # accept either existing format (backcompat with older runs)
+    if os.path.exists(f'{output_dir}{os.sep}{file_name}.nii') or os.path.exists(f'{output_dir}{os.sep}{file_name}.nii.gz'):
         LOGGER.info(f'[SKIP] Nifti file already exists: {file_name}')
         commands.remove(command)
         return
@@ -238,17 +239,25 @@ def makeNifti(Data_subset):
 
     commands = []
     for i in range(len(Data_subset)):
-        commands.append(['dcm2niix', '-o', f'{SAVE_DIR}{SessionID}', '-f', Descriptor[i], LoadPATH[i]])
+        commands.append(['dcm2niix', '-o', f'{SAVE_DIR}{SessionID}', '-f', Descriptor[i], '-z y', LoadPATH[i]])
     return commands
 
 def split_table(ID):
     return Data_table[Data_table['SessionID'] == ID].reset_index(drop=True)
 
+def _stemish(name: str) -> str:
+    n = name
+    for s in ('.nii.gz', '.nii'):
+        if n.endswith(s):
+            n = n[:-len(s)]
+            break
+    return n
+
 def audit_nifti_directory():
     """Audit the NIfTI directory against Data_table_timing.csv (post-conversion).
 
     Per session: expected files derive from the table's Major column
-    ('{Major:02}.nii'), compared with what is actually on disk. Catches (a)
+    ('{Major:02}.nii' or .nii.gz), compared with what is actually on disk. Catches (a)
     rows with no file (conversion failed / timed out but step 03 moved on),
     (b) files with no row (leftovers from a previous run — 'unrequested
     data' that a later alignment would be tempted to pair), (c) duplicate
@@ -300,9 +309,9 @@ def audit_nifti_directory():
             continue
 
         majors = expected_by_session[sid]
-        exp_names = sorted(set(f'{m:02d}.nii' for m in majors))
-        on_disk = set(f for f in os.listdir(sdir)
-                      if f.endswith('.nii') and not f.endswith('_RAS.nii'))
+        exp_names = sorted({f'{m:02d}' for m in majors})
+        on_disk = set(_stemish(f) for f in os.listdir(sdir)
+                      if is_nifti_file(f) and not (f.endswith('_RAS.nii') or f.endswith('_RAS.nii.gz')))
 
         missing = [f for f in exp_names if f not in on_disk]
         extra = sorted(f for f in on_disk if f not in set(exp_names))
@@ -381,7 +390,7 @@ if __name__ == '__main__':
     progress = load_progress('saveNifti_progress.pkl')
     if progress:
         LOGGER.info(f'Progress file found. {len(progress)} items remaining')
-        commands = manager.list(progress)
+        commands = list(progress)
     else:
         LOGGER.info('No progress file found. Starting from scratch')
         if not os.path.exists(SAVE_DIR):
@@ -405,16 +414,16 @@ if __name__ == '__main__':
         commands = run_with_progress(makeNifti, Data_subsets, Parallel=PARALLEL)
         LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: flattening commands list')
         flat_commands = [item for sublist in commands for item in sublist]
-        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Created {len(flat_commands)} commands, transferring to manager.list()...')
-        commands = manager.list(flat_commands)
+        LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Created {len(flat_commands)} commands, converting to list...')
+        commands = list(flat_commands)
         LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Number of commands: {len(commands)}')
     LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Step: separating priority (raw) from redirected commands')
     raw_cmds = [item for item in commands if 'raw' in item[-1]]
     LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Found {len(raw_cmds)} priority commands')
-    commands_priority = manager.list(raw_cmds)
+    commands_priority = list(raw_cmds)
     redirected_cmds = [item for item in commands if 'raw' not in item[-1]]
     LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Found {len(redirected_cmds)} redirected commands')
-    commands_redirected = manager.list(redirected_cmds)
+    commands_redirected = list(redirected_cmds)
     if len(commands_priority) > 0:
         LOGGER.debug(f'Number of priority commands: {len(commands_priority)}')
         run_with_progress(partial(run_cmd, commands=commands), commands_priority, Parallel=PARALLEL)

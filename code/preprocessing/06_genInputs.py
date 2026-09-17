@@ -14,7 +14,7 @@ from functools import partial
 import subprocess
 import threading
 import queue
-from toolbox import ProgressBar, get_log_dir, get_logger, resolve_dir, _terminate_executors, WORKER_TIMEOUT
+from toolbox import ProgressBar, get_log_dir, get_logger, resolve_dir, _terminate_executors, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti
 
 
 def _clean_timing(value):
@@ -264,8 +264,7 @@ def generate_slopes(SessionID):
 
     LOGGER.debug(f'Generating slopes for session: {SessionID}')
     
-    Fils = glob.glob(f'{LOAD_DIR}/{SessionID}/*.nii')
-    Fils.sort()
+    Fils = glob_nifti(f'{LOAD_DIR}/{SessionID}', '*')
     LOGGER.debug(f'{SessionID} | Files | {Fils} ')
     Data = Data_table[Data_table['SessionID'] == SessionID]
     if np.min([len(Data), len(Fils)]) < 3:

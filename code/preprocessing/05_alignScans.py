@@ -9,9 +9,11 @@ import subprocess
 import threading
 import signal
 
-from multiprocessing import Manager, cpu_count
+from multiprocessing import cpu_count, Event
 from toolbox import (
-    ProgressBar, get_log_dir, get_logger, run_function, resolve_dir)
+    ProgressBar, get_log_dir, get_logger, run_function, resolve_dir,
+    nifti_stem, is_nifti_file, glob_nifti,
+)
 
 _GPU_CHECK_INTERVAL = 10
 _gpu_calls_since_check = 0
@@ -63,8 +65,7 @@ N_TEST = args.test if TEST else 10
 PROGRESS = False
 PRUNE = args.prune
 
-manager = Manager()
-stop_flag = manager.Event()
+stop_flag = Event()
 
 
 def _check_stop():
@@ -100,8 +101,8 @@ def align(session_dir: str, save_dir: str):
         LOGGER.warning('Directory has trailing slash. Removing it.')
         session_dir = session_dir[:-1]
 
-    src_files = glob.glob(f'{session_dir}/*_RAS.nii')
-    src_files.sort()
+    src_files = sorted(glob.glob(f'{session_dir}/*_RAS.nii') + glob.glob(f'{session_dir}/*_RAS.nii.gz'),
+                       key=lambda p: nifti_stem(p))
     if len(src_files) < 3:
         LOGGER.error(
             f'Not enough scans in {session_dir}. '
@@ -110,9 +111,9 @@ def align(session_dir: str, save_dir: str):
 
     out_dir = os.path.join(save_dir, session_dir.split(os.sep)[-1])
 
-    # Skip if every output already exists
+    # Skip if every output already exists (output is <stem>_RAS.nii.gz)
     if all(
-        os.path.exists(os.path.join(out_dir, os.path.basename(f)))
+        os.path.exists(os.path.join(out_dir, f'{nifti_stem(f)}_RAS.nii.gz'))
         for f in src_files
     ):
         LOGGER.info(f'All files already exist, skipping: {session_dir}')
@@ -129,8 +130,9 @@ def align(session_dir: str, save_dir: str):
     session_failed = False
     for f in src_files[:1] + src_files[2:]:
         _check_stop()
-        dest = os.path.join(out_dir, os.path.basename(f)).replace('.nii', '')
-        out_file = f'{dest}.nii'
+        out_stem  = nifti_stem(f)                    # already strips _RAS
+        out_name  = f'{out_stem}_RAS.nii.gz'        # emit .nii.gz
+        out_file  = os.path.join(out_dir, out_name)
         if os.path.exists(out_file):
             LOGGER.info(
                 f'Skipping (already exists): {os.path.basename(f)}')
@@ -184,12 +186,15 @@ def align(session_dir: str, save_dir: str):
             LOGGER.info(f'Deleted: {out_dir}')
         return 'failed'
 
-    # Copy reference scan into output directory unchanged
-    reference_dst = os.path.join(out_dir, os.path.basename(reference))
+    # reference name may already be .nii or .nii.gz; emit as .nii.gz so
+    # downstream steps see a consistent extension.
+    reference_out_stem = nifti_stem(reference)
+    reference_dst = os.path.join(out_dir, f'{reference_out_stem}_RAS.nii.gz')
     if not os.path.exists(reference_dst):
         subprocess.run(['cp', reference, reference_dst], check=True, timeout=600)
-        LOGGER.info(
-            f'Copied reference: {os.path.basename(reference)}')
+        LOGGER.info(f'Copied reference: {reference_out_stem}_RAS.nii.gz')
+    else:
+        LOGGER.info(f'REFERENCE ALREADY PRESENT: {reference_dst}')
 
     return 'completed'
 
