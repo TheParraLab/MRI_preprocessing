@@ -5,6 +5,8 @@ import fcntl
 import queue
 import atexit as _atexit
 import sys
+import multiprocessing
+import threading
 
 from typing import Callable, List, Any, Optional, Literal
 from functools import partial
@@ -115,47 +117,85 @@ def _init_child_logger(
     logger_level: int,
     file_path: str,
     formatter_str: str,
+    mp_log_queue: Optional[Any] = None,
 ) -> None:
     """Called once per spawned child process.
 
-    Installs a direct FileHandlerWithLock (no queue needed in an isolated process)."""
+    If ``mp_log_queue`` is given, attach a :class:`~logging.handlers.QueueHandler`
+    for it and route every log record through that queue.  The parent
+    process has a :func:`_drain_mp_log_to_parent` thread consuming from
+    the queue and forwarding into its own file + stream pipeline (see
+    ``get_logger``).  Worker logs therefore land in the SAME file as
+    parent logs, all written by one single thread in the parent —
+    no N-way shared-file write contention on NFS.
+
+    No ``StreamHandler`` is attached in this branch (would double-print
+    to stdout; the parent's stream handler already surfaces the record
+    once it drains from the queue).
+
+    If ``mp_log_queue`` is ``None`` (legacy / caller that didn't pass one),
+    fall back to console-only stdout for this child.
+    """
     lgr = logging.getLogger(logger_name)
     lgr.handlers.clear()
     lgr.setLevel(logger_level)
     lgr._log_level = logger_level          # so run_function can read it back.
     lgr._formatter_str = formatter_str
-    file_path_abs = os.path.abspath(file_path) if file_path else ''
-    lgr._file_path = file_path_abs
+    lgr._file_path = ''                    # child never opens its own file
 
     fmt = logging.Formatter(formatter_str)
 
-    # Empty file_path means the parent ran console-only (log dir was not
-    # writable, e.g. on a read-only SIF) — mirror that here instead of trying
-    # to open an empty path.
-    if file_path:
-        fh = FileHandlerWithLock(file_path, mode='a')
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(fmt)
-        lgr.addHandler(fh)
+    if mp_log_queue is not None:
+        qh = QueueHandler(mp_log_queue)
+        lgr.addHandler(qh)
+    else:
+        ch_stream = logging.StreamHandler()
+        ch_stream.setLevel(logging.INFO)
+        ch_stream.setFormatter(fmt)
+        lgr.addHandler(ch_stream)
 
-    ch_stream = logging.StreamHandler()
-    ch_stream.setLevel(logging.INFO)
-    ch_stream.setFormatter(fmt)
-    lgr.addHandler(ch_stream)
-
-    # Prevent every log line from double-writing via propagation to root handler
     lgr.propagate = False
 
-    # Give the root logger a handler for bare logging calls from library code.
     root = logging.getLogger()
     if not root.handlers:
-        if file_path:
-            root_fh = FileHandlerWithLock(file_path, mode='a')
+        if mp_log_queue is not None:
+            root.addHandler(QueueHandler(mp_log_queue))
         else:
             root_fh = logging.StreamHandler()
-        root_fh.setLevel(logger_level)
-        root_fh.setFormatter(fmt)
-        root.addHandler(root_fh)
+            root_fh.setLevel(logger_level)
+            root_fh.setFormatter(fmt)
+            root.addHandler(root_fh)
+
+
+def _drain_mp_log_to_parent(mp_q: Any, parent_logger: Any, stop_event: Any) -> None:
+    """Thread target. Runs in the PARENT process.
+
+    Drains a ``multiprocessing.Queue`` of ``logging.LogRecord`` objects
+    (put there by workers via ``QueueHandler``) and forwards each record
+    into the parent logger's normal pipeline.  The parent already owns
+    the file handler and ``QueueListener`` (see ``get_logger``), so
+    forwarding via ``parent_logger.handle(record)`` ultimately writes to
+    the SAME single log file the parent's own records use.
+
+    Runs until ``stop_event`` is set AND the queue is drained (any
+    records that were already queued still get processed — no silent
+    log loss on shutdown).
+    """
+    while True:
+        try:
+            record = mp_q.get(timeout=0.25)
+        except queue.Empty:
+            if stop_event is not None and stop_event.is_set():
+                break
+            continue
+        except (EOFError, OSError) as _e:
+            # Queue closed / pipe dead — normal on shutdown
+            break
+        try:
+            parent_logger.handle(record)
+        except Exception:
+            # Never let a broken log record drop the whole drain
+            pass
 
 
 # ---- Hybrid chunk worker (module-level so it is picklable) -----------
@@ -582,6 +622,23 @@ def run_function(
     LOGGER.debug(f'Number of items: {len(items)}')
 
     results: List[Any] = []
+
+    # Cross-process log routing: workers push records to _mp_q;
+    # parent drain thread forwards them into the logger's file+stream pipeline.
+    _use_mp_q = Parallel and P_type in ('process', 'hybrid')
+    _mp_q: Optional[multiprocessing.SimpleQueue | multiprocessing.Queue] = None
+    _mp_q_thread: Optional[threading.Thread] = None
+    _mp_q_stop: Optional[threading.Event] = None
+    if _use_mp_q:
+        _mp_q = multiprocessing.Queue(maxsize=10000)
+        _mp_q_stop = threading.Event()
+        _mp_q_thread = threading.Thread(
+            target=_drain_mp_log_to_parent,
+            args=(_mp_q, LOGGER, _mp_q_stop),
+            daemon=False,
+        )
+        _mp_q_thread.start()
+
     try:
         deadline = time.monotonic() + WORKER_TIMEOUT
 
@@ -591,7 +648,8 @@ def run_function(
             max_workers = min(32, 2 * effective)
             LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             init_args = (LOGGER.name, LOGGER._log_level,
-                         LOGGER._file_path, LOGGER._formatter_str)
+                         LOGGER._file_path, LOGGER._formatter_str,
+                         _mp_q)
             executor = ProcessPoolExecutor(max_workers=max_workers,
                                            initializer=_init_child_logger,
                                            initargs=init_args)
@@ -614,6 +672,15 @@ def run_function(
                 else:
                     LOGGER.error('Worker deadline exceeded — force-terminating workers.')
                     _terminate_executors(executor)
+            # Tear down mp log queue: signal stop, wait for drain, close pipe
+            if _use_mp_q and _mp_q is not None:
+                _mp_q_stop.set()
+                _mp_q_thread.join(timeout=5)
+                try:
+                    _mp_q.close()
+                    _mp_q.join_thread()
+                except Exception:
+                    pass
 
         # ───────── thread mode ────────────────
         elif Parallel and P_type == 'thread':
@@ -651,7 +718,8 @@ def run_function(
             LOGGER.debug(f'Using {P_type}: ~{max_workers} process workers, ~{threads_per_worker} threads each')
 
             init_args = (LOGGER.name, LOGGER._log_level,
-                         LOGGER._file_path, LOGGER._formatter_str)
+                         LOGGER._file_path, LOGGER._formatter_str,
+                         _mp_q)
 
             # Create evenly-sized chunks and track global indices in parent.
             n_workers = min(max_workers, len(items)) if items else 0
@@ -704,6 +772,14 @@ def run_function(
                     else:
                         LOGGER.error('Worker deadline exceeded — force-terminating workers.')
                         _terminate_executors(pexecutor)
+            if _use_mp_q and _mp_q is not None:
+                _mp_q_stop.set()
+                _mp_q_thread.join(timeout=5)
+                try:
+                    _mp_q.close()
+                    _mp_q.join_thread()
+                except Exception:
+                    pass
 
             results = list(results)
 
