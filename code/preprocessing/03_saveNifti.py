@@ -201,26 +201,29 @@ def run_cmd(command, commands):
 
     LOGGER.info(f'[RUN] Executing dcm2niix for {file_name}')
     t0 = time.time()
+    proc = None
     try:
-        if DEBUG == 0:
-            result = subprocess.run(command, check=True, timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            result = subprocess.run(command, check=True, timeout=600, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            print(result.stdout.decode())
+        proc = subprocess.run(command, timeout=600,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
         elapsed = time.time() - t0
-        LOGGER.info(f'[DONE] {file_name} completed in {elapsed:.1f}s from {command[-1]}')
+        out_path = f'{output_dir}{os.sep}{file_name}.nii.gz'
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            reason = (proc.stderr or proc.stdout or '').strip()[-500:]
+            LOGGER.error(f'[FAIL] {file_name}: dcm2niix returned rc={proc.returncode}, '
+                         f'output file present={os.path.exists(out_path)}. '
+                         f'dcm2niix reported: {reason if reason else "no output captured"}')
+            return
+        LOGGER.info(f'[DONE] {file_name} completed in {elapsed:.1f}s')
         try:
             commands.remove(command)
         except ValueError:
             LOGGER.warning(f'  Command for {file_name} not in commands list (already removed)')
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         elapsed = time.time() - t0
-        LOGGER.error(f'[TIMEOUT] {file_name} exceeded 600s after {elapsed:.1f}s. Command: {" ".join(command)}')
-    except subprocess.CalledProcessError as e:
-        elapsed = time.time() - t0
-        LOGGER.error(f'[FAIL] {file_name} failed after {elapsed:.1f}s')
-        error_message = e.stderr.decode() if e.stderr else 'No error message available'
-        LOGGER.error(f'  Error converting {command[-1]}: {error_message[:500]}')
+        partial = (e.stderr or '').strip()[-500:]
+        LOGGER.error(f'[TIMEOUT] {file_name} exceeded 600s. Command: {" ".join(command)}. '
+                     f'dcm2niix reported so far: {partial if partial else "no output captured"}')
     
 def makeNifti(Data_subset):
     # Convert all dicom files to nifti files
