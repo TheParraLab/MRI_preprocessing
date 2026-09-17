@@ -163,11 +163,41 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
  #       except:
  #           continue
 
-def run_cmd(command, commands):
-    SessionID = command[2].split(os.sep)[-1]
-    output_dir = command[2]
-    file_name = command[4]
+def _parse_dcm2niix(command):
+    """Extract (output_dir, file_name, input_file) from a dcm2niix argv list.
+
+    Parses by flag (-o -> output dir, -f -> output name) rather than by
+    positional index, so the result is independent of flag order or the number
+    of flags (e.g. the '-z y' compression flag). The final element is always
+    the input DICOM path per dcm2niix convention.
+    """
+    out_dir = None
+    file_name = None
+    n = len(command)
+    i = 0
+    while i < n - 1:
+        tok = command[i]
+        if tok == '-o' and i + 1 < n:
+            out_dir = command[i + 1]
+            i += 2
+        elif tok == '-f' and i + 1 < n:
+            file_name = command[i + 1]
+            i += 2
+        else:
+            i += 1
     input_file = command[-1]
+    return out_dir, file_name, input_file
+
+def run_cmd(command, commands):
+    output_dir, file_name, input_file = _parse_dcm2niix(command)
+    if output_dir is None or file_name is None:
+        LOGGER.error(f'[SKIP] Cannot parse dcm2niix command (missing -o or -f): {command}')
+        try:
+            commands.remove(command)
+        except ValueError:
+            pass
+        return
+    SessionID = output_dir.split(os.sep)[-1]
     input_dir = '/'.join(input_file.split('/')[:-1])
     # output will be a .nii.gz now; only reference the stem in the log
     LOGGER.info(f'[START] {file_name} | input: {input_file} | output: {output_dir}{os.sep}{file_name}.nii.gz')
@@ -208,12 +238,21 @@ def run_cmd(command, commands):
                               text=True)
         elapsed = time.time() - t0
         out_path = f'{output_dir}{os.sep}{file_name}.nii.gz'
-        if proc.returncode != 0 or not os.path.exists(out_path):
+        ok_files = sorted(
+            f for f in os.listdir(output_dir)
+            if (f.startswith(file_name + '.') or f.startswith(file_name + '_') or f == file_name)
+            and (f.endswith('.nii') or f.endswith('.nii.gz'))
+        ) if os.path.isdir(output_dir) else []
+        if proc.returncode != 0 or (not os.path.exists(out_path) and not ok_files):
             reason = (proc.stderr or proc.stdout or '').strip()[-500:]
+            listing = f'existing nifti-like files in {output_dir}: {ok_files}'
             LOGGER.error(f'[FAIL] {file_name}: dcm2niix returned rc={proc.returncode}, '
-                         f'output file present={os.path.exists(out_path)}. '
-                         f'dcm2niix reported: {reason if reason else "no output captured"}')
+                         f'expected {out_path} present={os.path.exists(out_path)}. '
+                         f'{listing}. dcm2niix reported: {reason if reason else "no output captured"}')
             return
+        if not os.path.exists(out_path):
+            LOGGER.info(f'[DONE-SUFFIX] {file_name}: dcm2niix wrote {ok_files} instead of the exact '
+                        f'{out_path} (name suffix). Continuing.')
         LOGGER.info(f'[DONE] {file_name} completed in {elapsed:.1f}s')
         try:
             commands.remove(command)
