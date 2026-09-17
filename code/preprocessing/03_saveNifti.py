@@ -79,7 +79,7 @@ def load_progress(filename):
 
 
 
-def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
+def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *_extra_args, **_extra_kwargs) -> List[Any]:
     """Run a function with a progress bar"""
     # Initialize using a manager to allow for shared progress queue
     #manager = Manager()
@@ -109,7 +109,7 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
         deadline = time.monotonic() + WORKER_TIMEOUT
         executor = ProcessPoolExecutor(max_workers=max_workers)
         try:
-            future_map = {executor.submit(target, items[i], *args, **kwargs): i
+            future_map = {executor.submit(target, items[i], *_extra_args, **_extra_kwargs): i
                           for i in range(len(items))}
             ordered = _collect_future_map(future_map, deadline, LOGGER)
             results = [r for r in ordered if r is not None]
