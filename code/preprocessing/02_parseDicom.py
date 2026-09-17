@@ -907,6 +907,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 batch_results, batch_removed, batch_temp_rels = run_function(
                     logger, filter_fn, batch,
                     Parallel=cfg.parallel, P_type='process',
+                    N_CPUS=cfg.n_cpus,
                 )
 
                 batch_results = [df for df in batch_results if not df.empty]
@@ -1004,7 +1005,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
         save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir, log_dir=LOG_DIR)
         run_function(logger, save_fn, list(removed_tables.items()),
-                    Parallel=cfg.parallel, P_type='process')
+                    Parallel=cfg.parallel, P_type='process',
+                    N_CPUS=cfg.n_cpus)
 
         if cfg.export_fully_removed:
             logger.info('Compiling fully removed sessions...')
@@ -1081,6 +1083,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 batch_results, batch_removed, batch_redirects = run_function(
                     logger, split_fn, batch,
                     Parallel=cfg.parallel, P_type='process',
+                    N_CPUS=cfg.n_cpus,
                 )
 
                 batch_results = [df for df in batch_results if not df.empty]
@@ -1242,6 +1245,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 new_ordered, new_removed = run_function(
                     logger, order_fn, batch,
                     Parallel=cfg.parallel, P_type='process',
+                    N_CPUS=cfg.n_cpus,
                 )
                 order_results.extend(new_ordered)
                 order_removed.extend(new_removed)
