@@ -258,6 +258,49 @@ class _LoggerProxy(logging.Logger):
             object.__getattribute__(self, '_wrapped').__setattr__(name, value)
 
 
+# ---- NIfTI name helpers (shared across 03/04/05/06) -------------------
+# NIfTI files are `.nii` or `.nii.gz`. dcm2niix emits plain `.nii` but
+# we now pass `-z y` so it emits `.nii.gz`.  nibabel is transparent to
+# either.  These helpers give every pipeline step one source of truth
+# for name comparisons so `.nii` / `.nii.gz` / `00a.nii` / `00a.nii.gz`
+# all collapse to the same stem ('00', '01', '00a', ...).
+def nifti_stem(path: str) -> str:
+    """Reduce a NIfTI basename to its stem: '01.nii'->'01',
+    '05.nii.gz'->'05', '00a.nii'->'00a', '00a.nii.gz'->'00a'.
+    Also strips a `_RAS` suffix so '01_RAS.nii.gz'->'01'.
+    """
+    name = os.path.basename(path)
+    for suffix in ('.nii.gz', '.nii'):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    if name.endswith('_RAS'):
+        name = name[:-4]
+    return name
+
+
+def is_nifti_file(name: str) -> bool:
+    """True if *name* is a NIfTI file (`.nii` or `.nii.gz`)."""
+    b = os.path.basename(name)
+    return b.endswith('.nii') or b.endswith('.nii.gz')
+
+
+def glob_nifti(directory: str, pattern: str = '*') -> list:
+    """Glob NIfTI files in *directory* matching *pattern* (prefix of stem).
+    Returns an absolute sorted list of paths.  Matches both `.nii` and
+    `.nii.gz`.  Example: glob_nifti(d, '*.nii') is the legacy call;
+    glob_nifti(d, '*') returns every NIfTI in the directory.
+    """
+    import glob as _glob
+    cands = (
+        _glob.glob(os.path.join(directory, pattern + '.nii')) +
+        _glob.glob(os.path.join(directory, pattern + '.nii.gz'))
+    )
+    # de-dup (in case pattern is already '*.nii' etc.) and sort by stem
+    uniq = sorted({os.path.realpath(p) for p in cands}, key=lambda p: (nifti_stem(p), p))
+    return uniq
+
+
 # ---- Public API ------------------------------------------------------------
 
 def resolve_dir(flag_value: Optional[str], env_name: str, default: str) -> str:
