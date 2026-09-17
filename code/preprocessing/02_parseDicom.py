@@ -18,7 +18,8 @@ Usage:
 Arguments:
     --save_dir (str): Directory to save output tables and logs.
     --load_table (str): Path to the input Data_table.csv from Step 01.
-    --multi (int): Enable multiprocessing with specified CPU count (default: max-1).
+    --multi: enable in-script multiprocessing.
+    --cpus (int): cap worker count (default: cores - 1).
     --filter-only: Run only the filtering step, skip ordering.
     --force: Overwrite existing output files without prompting.
     --profile: Enable yappi profiling.
@@ -127,9 +128,16 @@ def build_config() -> ParseConfig:
                         help='Minimum free disk space in GB to proceed (default: 50)')
     parser.add_argument('--fully_removed', action='store_true',
                         help='Export fully removed sessions')
+    parser.add_argument('--multi', action='store_true',
+                        help='Enable in-script multiprocessing (default off).')
+    parser.add_argument('--cpus', type=int, default=None,
+                        help='Cap worker count (0 or unset = all cores - 1).')
     args = parser.parse_args()
 
     args.save_dir = resolve_dir(args.save_dir, 'DATA_DIR', '/FL_system/data/')
+    if args.cpus is None:
+        from multiprocessing import cpu_count as _cpu
+        args.cpus = max(1, _cpu() - 1)
     if args.load_table is None:
         args.load_table = args.save_dir.rstrip('/') + '/Data_table.csv'
 
@@ -140,8 +148,8 @@ def build_config() -> ParseConfig:
         dir_idx=args.dir_idx,
         filter_only=args.filter_only,
         force=args.force,
-        parallel=False,
-        n_cpus=0,
+        parallel=args.multi,
+        n_cpus=args.cpus,
         profile=args.profile,
         resume=args.resume,
         filter_batch_size=args.batch_size,
