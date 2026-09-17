@@ -242,7 +242,7 @@ def makeNifti(Data_subset):
 
     commands = []
     for i in range(len(Data_subset)):
-        commands.append(['dcm2niix', '-o', f'{SAVE_DIR}{SessionID}', '-f', Descriptor[i], '-z', 'y', LoadPATH[i]])
+        commands.append(['dcm2niix', '-z', 'y', '-o', f'{SAVE_DIR}{SessionID}', '-f', Descriptor[i], LoadPATH[i]])
     return commands
 
 def split_table(ID):
