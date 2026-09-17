@@ -27,6 +27,7 @@ LOGGER = get_logger('03_saveNifti')
 # Define necessary directories (resolve: flag > env > container default)
 parser = argparse.ArgumentParser(description='Convert DICOM files to NIfTI format')
 parser.add_argument('--multi', action='store_true', help='Use multiprocessing')
+parser.add_argument('--cpus', type=int, default=0, help='Number of parallel workers (ProcessPoolExecutor). 0 = cpu_count()-1. Lower it if dcm2niix stalls over NFS.')
 parser.add_argument('--load_dir', type=str, default=None, help='Directory to load Data_table_timing.csv from (default: $DATA_DIR or /FL_system/data/)')
 parser.add_argument('--save_dir', type=str, default=None, help='Directory to save the NIfTI files (default: $NIFTI_DIR or /FL_system/data/nifti/)')
 args = parser.parse_args()
@@ -103,8 +104,8 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
     t_start = time.time()
     items_index = 0
     if Parallel:
-        max_workers = cpu_count() - 1
-        LOGGER.info(f'Running {len(items)} tasks through ProcessPoolExecutor ({max_workers} workers)')
+        max_workers = args.cpus if args.cpus > 0 else (cpu_count() - 1)
+        LOGGER.info(f'Running {len(items)} tasks through ProcessPoolExecutor ({max_workers} workers; --cpus={args.cpus})')
         deadline = time.monotonic() + WORKER_TIMEOUT
         executor = ProcessPoolExecutor(max_workers=max_workers)
         try:
