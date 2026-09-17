@@ -43,8 +43,10 @@ def test_worker_stall_diagnostic_self():
     assert isinstance(info['open_files'], list)
 
 
-def test_collect_future_map_logs_stall_diagnostic(monkeypatch):
+def test_collect_future_map_logs_stall_diagnostic(monkeypatch, tmp_path):
     monkeypatch.setattr(toolbox, 'STALL_TIMEOUT', 1.0)
+    dump_file = str(tmp_path / 'stall.log')
+    monkeypatch.setattr(toolbox, 'STALL_DUMP_FILE', dump_file)
     rec = _Rec()
     fut = Future()
     ex = types.SimpleNamespace(_processes={os.getpid(): None})
@@ -56,6 +58,10 @@ def test_collect_future_map_logs_stall_diagnostic(monkeypatch):
     assert 'state=' in joined
     assert 'wchan=' in joined
     assert 'open_files=' in joined
+    with open(dump_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    assert 'stalled' in content
+    assert 'state=' in content
 
 
 def test_terminate_executors_uses_process_objects():

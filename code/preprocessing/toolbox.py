@@ -523,6 +523,10 @@ WORKER_TIMEOUT = float(_os.environ.get('MRI_WORKER_TIMEOUT', '1800'))
 # Seconds of zero completed futures before the parent logs a per-worker /proc stall diagnostic.
 STALL_TIMEOUT = float(_os.environ.get('MRI_STALL_TIMEOUT', '120'))
 
+# Container-local (non-NFS) fallback file for the stall dump: the main log file
+# is on an NFS mount and can itself block, which would swallow the diagnostic.
+STALL_DUMP_FILE = _os.environ.get('MRI_STALL_DUMP_FILE', '/tmp/mri_stall_diagnostic.log')
+
 
 def _terminate_executors(*executors) -> None:
     import signal, logging
@@ -584,22 +588,37 @@ def _worker_stall_diagnostic(pid: int) -> dict:
 
 
 def _log_worker_stall_diagnostic(executor: Any, stalled_secs: float, LOGGER: Any) -> None:
-    """Log one /proc line per worker so a stall is diagnosable from the log alone."""
+    """Log one /proc line per worker so a stall is diagnosable from the log alone.
+
+    Fans out to three channels because the main log file sits on an NFS mount
+    and the parent's QueueListener can block on it, swallowing LOGGER output:
+    (1) the normal logger, (2) stdout directly, (3) a container-local file.
+    """
+    lines = [f'Workers stalled for {int(stalled_secs)}s with no completed items — dumping per-worker /proc state:']
     procs = getattr(executor, '_processes', None)
-    LOGGER.warning(f'Workers stalled for {int(stalled_secs)}s with no completed items — dumping per-worker /proc state:')
     if not procs:
-        LOGGER.warning('  (no worker pids found on executor._processes)')
-        return
-    for pid, _proc in sorted(procs.items()):
-        info = _worker_stall_diagnostic(pid)
-        files = info['open_files']
-        shown = files[:15]
-        if len(files) > 15:
-            shown = shown + [f'... (+{len(files) - 15} more)']
-        LOGGER.warning(
-            f'  worker pid={pid}: state={info["state"]} wchan={info["wchan"]} '
-            f'io={info["io"]} open_files={shown}'
-        )
+        lines.append('  (no worker pids found on executor._processes)')
+    else:
+        for pid, _proc in sorted(procs.items()):
+            info = _worker_stall_diagnostic(pid)
+            files = info['open_files']
+            shown = files[:15]
+            if len(files) > 15:
+                shown = shown + [f'... (+{len(files) - 15} more)']
+            lines.append(
+                f'  worker pid={pid}: state={info["state"]} wchan={info["wchan"]} '
+                f'io={info["io"]} open_files={shown}'
+            )
+    for line in lines:
+        LOGGER.warning(line)
+    for line in lines:
+        print(line, flush=True)
+    try:
+        with open(STALL_DUMP_FILE, 'a', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+            f.flush()
+    except OSError:
+        pass
 
 
 def _collect_future_map(future_map, deadline, LOGGER, executor: Any = None):
