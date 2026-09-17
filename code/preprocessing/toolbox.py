@@ -520,6 +520,9 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
 import os as _os
 WORKER_TIMEOUT = float(_os.environ.get('MRI_WORKER_TIMEOUT', '1800'))
 
+# Seconds of zero completed futures before the parent logs a per-worker /proc stall diagnostic.
+STALL_TIMEOUT = float(_os.environ.get('MRI_STALL_TIMEOUT', '120'))
+
 
 def _terminate_executors(*executors) -> None:
     import signal, logging
@@ -527,12 +530,12 @@ def _terminate_executors(*executors) -> None:
     for ex in executors:
         procs = getattr(ex, '_processes', None)
         if procs:
-            for p in list(procs):
+            for p in list(procs.values()):
                 try:
                     p.terminate()
                 except Exception:
                     pass
-            for p in list(procs):
+            for p in list(procs.values()):
                 try:
                     p.join(timeout=3)
                     if p.is_alive():
@@ -545,9 +548,65 @@ def _terminate_executors(*executors) -> None:
             _log.warning(f'Failed to shut down executor gracefully: {e!r}')
 
 
-def _collect_future_map(future_map, deadline, LOGGER):
+def _worker_stall_diagnostic(pid: int) -> dict:
+    """Best-effort /proc snapshot of one worker process (Linux; no ptrace)."""
+    info: dict = {'state': '?', 'wchan': '?', 'io': {}, 'open_files': []}
+    try:
+        with open(f'/proc/{pid}/stat', 'rb') as f:
+            data = f.read()
+        info['state'] = data.split(b')', 1)[1].split()[0].decode('ascii', 'replace')
+    except (OSError, IndexError, UnicodeDecodeError):
+        pass
+    try:
+        with open(f'/proc/{pid}/wchan', 'r') as f:
+            info['wchan'] = f.read().strip() or '-'
+    except OSError:
+        pass
+    try:
+        with open(f'/proc/{pid}/io', 'r') as f:
+            for line in f:
+                if line.startswith(('read_bytes:', 'write_bytes:')):
+                    key, val = line.split(':', 1)
+                    info['io'][key] = int(val.strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        for fd in sorted(os.listdir(f'/proc/{pid}/fd')):
+            try:
+                tgt = os.readlink(f'/proc/{pid}/fd/{fd}')
+            except OSError:
+                continue
+            if tgt.startswith('/'):
+                info['open_files'].append(tgt)
+    except OSError:
+        pass
+    return info
+
+
+def _log_worker_stall_diagnostic(executor: Any, stalled_secs: float, LOGGER: Any) -> None:
+    """Log one /proc line per worker so a stall is diagnosable from the log alone."""
+    procs = getattr(executor, '_processes', None)
+    LOGGER.warning(f'Workers stalled for {int(stalled_secs)}s with no completed items — dumping per-worker /proc state:')
+    if not procs:
+        LOGGER.warning('  (no worker pids found on executor._processes)')
+        return
+    for pid, _proc in sorted(procs.items()):
+        info = _worker_stall_diagnostic(pid)
+        files = info['open_files']
+        shown = files[:15]
+        if len(files) > 15:
+            shown = shown + [f'... (+{len(files) - 15} more)']
+        LOGGER.warning(
+            f'  worker pid={pid}: state={info["state"]} wchan={info["wchan"]} '
+            f'io={info["io"]} open_files={shown}'
+        )
+
+
+def _collect_future_map(future_map, deadline, LOGGER, executor: Any = None):
     pending = dict(future_map)
     ordered = [None] * len(future_map)
+    last_progress = time.monotonic()
+    last_dump = 0.0
     while pending:
         remaining = max(0.0, deadline - time.monotonic())
         remap = dict()
@@ -560,7 +619,12 @@ def _collect_future_map(future_map, deadline, LOGGER):
                 LOGGER.error(f'Error processing item {idx}: {e}', exc_info=True)
                 ordered[idx] = None
             pending.pop(fut, None)
-        if time.monotonic() >= deadline:
+            last_progress = time.monotonic()
+        now = time.monotonic()
+        if executor is not None and pending and now - last_progress >= STALL_TIMEOUT and now - last_dump >= STALL_TIMEOUT:
+            last_dump = now
+            _log_worker_stall_diagnostic(executor, now - last_progress, LOGGER)
+        if now >= deadline:
             break
     for fut in list(pending.keys()):
         idx = future_map[fut]
@@ -656,7 +720,7 @@ def run_function(
             try:
                 future_map = {executor.submit(_process_worker, target, item, *args, **kwargs): i
                               for i, item in enumerate(items)}
-                ordered = _collect_future_map(future_map, deadline, LOGGER)
+                ordered = _collect_future_map(future_map, deadline, LOGGER, executor=executor)
                 results = list(ordered)
             except KeyboardInterrupt:
                 LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
@@ -747,7 +811,7 @@ def run_function(
                     ]
                     chunk_meta = [(start, start + len(chunk)) for start, chunk in workers]
                     future_map = dict(zip(futures, range(len(futures))))
-                    ordered = _collect_future_map(future_map, deadline, LOGGER)
+                    ordered = _collect_future_map(future_map, deadline, LOGGER, executor=pexecutor)
                     for (global_start, end_pos), chunk_result in zip(chunk_meta, ordered):
                         if not chunk_result:
                             continue
