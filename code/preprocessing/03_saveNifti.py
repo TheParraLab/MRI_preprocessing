@@ -3,6 +3,7 @@ import os
 import glob
 import pickle
 import numpy as np
+import nibabel as nib
 import pandas as pd
 from multiprocessing import Queue, cpu_count, Lock, Event
 import threading
@@ -189,6 +190,56 @@ def _parse_dcm2niix(command):
     input_file = command[-1]
     return out_dir, file_name, input_file
 
+def _cleanup_partial(output_dir: str, file_name: str):
+    """Remove an incomplete/truncated NIfTI output so a resumed run retries
+    this conversion instead of skipping it.
+
+    Called from `run_cmd` in the dcm2niix-failure, timeout, and
+    invalid-output code paths. Safe to call repeatedly: it only removes
+    files belonging to the currently-failed command.
+    """
+    for ext in ('.nii.gz', '.nii'):
+        p = f'{output_dir}{os.sep}{file_name}{ext}'
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+                LOGGER.info(f'[CLEAN] Removed partial output: {p}')
+            except Exception as exc:
+                # Do not block the retry on a delete that fails (e.g. file
+                # already gone, permissions). The next run will retry either way.
+                LOGGER.warning(f'[CLEAN] Could not remove partial output {p}: {exc!r}')
+
+
+def _validate_nifti(path: str, file_name: str) -> bool:
+    """Open a freshly-written NIfTI and confirm it is complete and readable.
+
+    Guards against the failure modes that slip past dcm2niix's exit code:
+      - zero-byte output
+      - truncated gzip (dcm2niix wrote but the process was killed mid-write)
+      - degenerate/near-empty volumes (max dimension < 4 voxels)
+    Returns True if the file passed all checks. False otherwise (and the
+    caller is expected to invoke `_cleanup_partial`).
+    """
+    base = os.path.basename(path)
+    try:
+        if not os.path.exists(path):
+            LOGGER.error(f'[INVALID] {file_name}: {base} not found')
+            return False
+        if os.path.getsize(path) == 0:
+            LOGGER.error(f'[INVALID] {file_name}: {base} is zero-byte')
+            return False
+        img = nib.load(path)
+        if max(img.shape) < 4:
+            LOGGER.error(f'[INVALID] {file_name}: {base} degenerate shape {img.shape} (max dim < 4)')
+            return False
+        # Force a pixel read. This catches a truncated gzip where the gzip
+        # header is present but the compressed stream ends mid-write.
+        img.get_fdata()
+        return True
+    except Exception as exc:
+        LOGGER.error(f'[INVALID] {file_name}: {base} unreadable: {exc!r}')
+        return False
+
 def run_cmd(command, commands):
     output_dir, file_name, input_file = _parse_dcm2niix(command)
     if output_dir is None or file_name is None:
@@ -203,11 +254,24 @@ def run_cmd(command, commands):
     # output will be a .nii.gz now; only reference the stem in the log
     LOGGER.info(f'[START] {file_name} | input: {input_file} | output: {output_dir}{os.sep}{file_name}.nii.gz')
 
-    # accept either existing format (backcompat with older runs)
-    if os.path.exists(f'{output_dir}{os.sep}{file_name}.nii') or os.path.exists(f'{output_dir}{os.sep}{file_name}.nii.gz'):
-        LOGGER.info(f'[SKIP] Nifti file already exists: {file_name}')
-        commands.remove(command)
-        return
+    # accept either existing format (backcompat with older runs). Before
+    # treating it as "done", validate the bytes — a pre-existing file may
+    # be a leftover corrupt volume from an interrupted prior run.
+    existing = None
+    for ext in ('.nii.gz', '.nii'):
+        candidate = f'{output_dir}{os.sep}{file_name}{ext}'
+        if os.path.exists(candidate):
+            existing = candidate
+            break
+    if existing is not None:
+        if _validate_nifti(existing, file_name):
+            LOGGER.info(f'[SKIP] Nifti file already exists and is valid: {file_name}')
+            commands.remove(command)
+            return
+        else:
+            LOGGER.warning(f'[OVERWRITE] {file_name}: existing file failed validation; '
+                           f'will re-run dcm2niix to replace it.')
+            _cleanup_partial(output_dir, file_name)
 
     if stop_flag.is_set():
         LOGGER.info(f'[ABORT] Stop flag set before starting {file_name}')
@@ -250,10 +314,19 @@ def run_cmd(command, commands):
             LOGGER.error(f'[FAIL] {file_name}: dcm2niix returned rc={proc.returncode}, '
                          f'expected {out_path} present={os.path.exists(out_path)}. '
                          f'{listing}. dcm2niix reported: {reason if reason else "no output captured"}')
+            _cleanup_partial(output_dir, file_name)
             return
         if not os.path.exists(out_path):
             LOGGER.info(f'[DONE-SUFFIX] {file_name}: dcm2niix wrote {ok_files} instead of the exact '
                         f'{out_path} (name suffix). Continuing.')
+        # Pick which file actually exists (exact-name preferred; else the
+        # suffix variant dcm2niix may have written) and validate it.
+        validate_path = out_path if os.path.exists(out_path) else (f'{output_dir}/{ok_files[0]}' if ok_files else out_path)
+        if not _validate_nifti(validate_path, file_name):
+            LOGGER.warning(f'[RETRY] {file_name}: output failed validation; it will remain in '
+                           f'`commands` and be retried on resume.')
+            _cleanup_partial(output_dir, file_name)
+            return
         LOGGER.info(f'[DONE] {file_name} completed in {elapsed:.1f}s')
         try:
             commands.remove(command)
@@ -261,6 +334,7 @@ def run_cmd(command, commands):
             LOGGER.warning(f'  Command for {file_name} not in commands list (already removed)')
     except subprocess.TimeoutExpired as e:
         elapsed = time.time() - t0
+        _cleanup_partial(output_dir, file_name)
         partial = (e.stderr or '').strip()[-500:]
         LOGGER.error(f'[TIMEOUT] {file_name} exceeded 600s. Command: {" ".join(command)}. '
                      f'dcm2niix reported so far: {partial if partial else "no output captured"}')
