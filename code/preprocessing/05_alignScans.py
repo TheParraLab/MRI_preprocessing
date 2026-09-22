@@ -214,6 +214,20 @@ def _progress_updater(update_queue, progress):
             update_queue.task_done()
 
 
+def _align_wrapper(item, target, save_dir, update_queue=None):
+    """Module-level progress wrapper, picklable under any start method.
+
+    ``concurrent.futures`` pickles the submitted callable and its arguments
+    into the worker call queue, so the old nested closure raised
+    ``AttributeError: Can't pickle local object`` and failed every item in
+    process mode.  ``target`` / ``save_dir`` / ``update_queue`` now travel
+    through ``run_function``'s *args, keeping everything picklable."""
+    result = target(item, save_dir)
+    if update_queue is not None:
+        update_queue.put((None, 'Processing'))
+    return result
+
+
 def run_with_progress(
     target, items, parallel=True, P_type='process',
     P_role='compute', save_dir: str = SAVE_DIR
@@ -236,17 +250,8 @@ def run_with_progress(
             daemon=True)
         updater_thread.start()
 
-    # Module-level wrapper so it is picklable for spawn mode.
-    # ``align`` already takes (session_dir, save_dir), so we just need to
-    # inject the progress marker without creating a non-picklable closure.
-    def _align_wrapper(item):
-        result = target(item, save_dir)
-        if update_queue is not None:
-            update_queue.put((None, 'Processing'))
-        return result
-
     results = run_function(
-        LOGGER, _align_wrapper, list(items),
+        LOGGER, _align_wrapper, list(items), target, save_dir, update_queue,
         Parallel=parallel, P_type=P_type, P_role=P_role,
         stop_flag=stop_flag)
 
