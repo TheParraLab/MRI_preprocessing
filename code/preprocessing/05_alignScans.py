@@ -46,6 +46,11 @@ parser.add_argument(
     '--ids_file', type=str, default=None,
     help='CSV/txt file containing one ID per line. If provided, only process directories whose name appears in this file.'
 )
+parser.add_argument(
+    '--cpus', type=int, default=0,
+    help='Cap on parallel worker processes for --multi: exactly N reg_f3d jobs '
+         'run concurrently (0 = auto: min(32, 2×(cores-1)))'
+)
 args = parser.parse_args()
 
 args.load_dir = resolve_dir(args.load_dir, 'RAS_DIR', '/FL_system/data/RAS/')
@@ -231,7 +236,7 @@ def _align_wrapper(item, target, save_dir, update_queue=None):
 
 def run_with_progress(
     target, items, parallel=True, P_type='process',
-    P_role='compute', save_dir: str = SAVE_DIR
+    P_role='compute', save_dir: str = SAVE_DIR, n_workers: int = 0
 ):
     """Run *target* over *items* with an optional progress bar.
 
@@ -257,7 +262,7 @@ def run_with_progress(
                 update_queue=update_queue),
         list(items),
         Parallel=parallel, P_type=P_type, P_role=P_role,
-        stop_flag=stop_flag)
+        stop_flag=stop_flag, N_WORKERS=n_workers)
 
     if PROGRESS:
         if update_queue is not None:
@@ -338,7 +343,8 @@ if __name__ == '__main__':
     # ---- Run coregistration ----------------------------------
     try:
         results = run_with_progress(
-            align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR) or []
+            align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR,
+            n_workers=args.cpus) or []
     except KeyboardInterrupt:
         LOGGER.info('Interrupted. Completed directories are safe to resume.')
         raise
