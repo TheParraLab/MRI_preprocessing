@@ -9,6 +9,7 @@ import subprocess
 import threading
 import signal
 
+from functools import partial
 from multiprocessing import cpu_count, Event
 from toolbox import (
     ProgressBar, get_log_dir, get_logger, run_function, resolve_dir,
@@ -220,8 +221,8 @@ def _align_wrapper(item, target, save_dir, update_queue=None):
     ``concurrent.futures`` pickles the submitted callable and its arguments
     into the worker call queue, so the old nested closure raised
     ``AttributeError: Can't pickle local object`` and failed every item in
-    process mode.  ``target`` / ``save_dir`` / ``update_queue`` now travel
-    through ``run_function``'s *args, keeping everything picklable."""
+    process mode.  The wrapper is module-level and is bound at the
+    call site via ``functools.partial``, which is itself picklable."""
     result = target(item, save_dir)
     if update_queue is not None:
         update_queue.put((None, 'Processing'))
@@ -251,7 +252,10 @@ def run_with_progress(
         updater_thread.start()
 
     results = run_function(
-        LOGGER, _align_wrapper, list(items), target, save_dir, update_queue,
+        LOGGER,
+        partial(_align_wrapper, target=target, save_dir=save_dir,
+                update_queue=update_queue),
+        list(items),
         Parallel=parallel, P_type=P_type, P_role=P_role,
         stop_flag=stop_flag)
 
