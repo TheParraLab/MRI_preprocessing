@@ -871,7 +871,7 @@ def run_function(
             if Parallel and P_type not in ('thread', 'process'):
                 LOGGER.error(f'Unknown P_type={P_type}, falling back to serial.')
             for i, item in enumerate(items):
-                if (stop_flag and getattr(stop_flag, 'is_set', lambda: False)()) or (time.monotonic() >= deadline):
+                if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
                     break
                 try:
                     results.append(target(item, *args, **kwargs))
