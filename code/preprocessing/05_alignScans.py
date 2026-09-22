@@ -328,10 +328,20 @@ if __name__ == '__main__':
 
     # ---- Run coregistration ----------------------------------
     try:
-        run_with_progress(align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR)
+        results = run_with_progress(
+            align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR) or []
     except KeyboardInterrupt:
         LOGGER.info('Interrupted. Completed directories are safe to resume.')
         raise
+
+    n_aligned = sum(1 for r in results if r == 'completed')
+    n_done = sum(1 for r in results if r == 'already done')
+    n_insufficient = sum(1 for r in results if r == 'Not enough scans')
+    n_failed = sum(1 for r in results if r in ('failed', None))
+    LOGGER.info(
+        f'Run summary: {n_aligned} aligned, {n_done} already done, '
+        f'{n_insufficient} insufficient scans, {n_failed} failed '
+        f'of {len(dirs)} sessions')
 
     # ---- Prune original scans if requested --------------------
     if PRUNE:
@@ -349,5 +359,8 @@ if __name__ == '__main__':
                     f'Directory {p} does not exist. Skipping deletion.')
 
     LOGGER.info('Completed alignScans: Step 05')
-    LOGGER.info('All files saved to coreg directory')
+    if n_failed:
+        LOGGER.warning(f'{n_failed} sessions incomplete - re-run step 05 to process them')
+    else:
+        LOGGER.info('All files saved to coreg directory')
     LOGGER.info('Exiting alignScans: Step 05')
