@@ -521,7 +521,9 @@ import os as _os
 WORKER_TIMEOUT = float(_os.environ.get('MRI_WORKER_TIMEOUT', '1800'))
 
 # Seconds of zero completed futures before the parent logs a per-worker /proc stall diagnostic.
-STALL_TIMEOUT = float(_os.environ.get('MRI_STALL_TIMEOUT', '120'))
+# Sized above a single 05_alignScans item (up to 4 reg_f3d scans, ~4-10 min under GPU
+# contention) so healthy parallel runs do not trip the diagnostic. Keep < WORKER_TIMEOUT.
+STALL_TIMEOUT = float(_os.environ.get('MRI_STALL_TIMEOUT', '900'))
 
 # Container-local (non-NFS) fallback file for the stall dump: the main log file
 # is on an NFS mount and can itself block, which would swallow the diagnostic.
