@@ -31,6 +31,8 @@ parser.add_argument('--multi', action='store_true', help='Use multiprocessing')
 parser.add_argument('--cpus', type=int, default=0, help='Number of parallel workers (ProcessPoolExecutor). 0 = cpu_count()-1. Lower it if dcm2niix stalls over NFS.')
 parser.add_argument('--load_dir', type=str, default=None, help='Directory to load Data_table_timing.csv from (default: $DATA_DIR or /FL_system/data/)')
 parser.add_argument('--save_dir', type=str, default=None, help='Directory to save the NIfTI files (default: $NIFTI_DIR or /FL_system/data/nifti/)')
+parser.add_argument('--ids_file', type=str, default=None,
+                    help='CSV/txt file containing one ID per line. If provided, only process sessions whose name appears in this file.')
 args = parser.parse_args()
 LOAD_DIR = resolve_dir(args.load_dir, 'DATA_DIR', '/FL_system/data/')
 SAVE_DIR = resolve_dir(args.save_dir, 'NIFTI_DIR', '/FL_system/data/nifti/')
@@ -129,10 +131,9 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
                 LOGGER.error('Worker deadline exceeded — force-terminating workers.')
                 _terminate_executors(executor)
     else:
-        deadline = time.monotonic() + WORKER_TIMEOUT
         for items_index, item in enumerate(items):
-            if stop_flag.is_set() or time.monotonic() >= deadline:
-                LOGGER.info(f'[STOP] Stop flag set or deadline exceeded after processing {items_index+1}/{len(items)} items')
+            if stop_flag.is_set():
+                LOGGER.info(f'[STOP] Stop flag set before item {items_index+1}/{len(items)} — stopping serial run')
                 break
             try:
                 result = target(item)
@@ -517,7 +518,15 @@ if __name__ == '__main__':
         Data_table = pd.read_csv(f'{LOAD_DIR}Data_table_timing.csv')
         SessionIDs = Data_table['SessionID']
         Iden_uniq = np.unique(SessionIDs)
-
+        # Load IDs to filter by (if --ids_file provided)
+        if args.ids_file is not None:
+            with open(args.ids_file, 'r') as f:
+                ids_to_process = set(line.strip() for line in f if line.strip())
+            LOGGER.info(f'Loaded {len(ids_to_process)} IDs from {args.ids_file}')
+            Iden_uniq = [s for s in Iden_uniq if s in ids_to_process]
+            LOGGER.info(f'Filtered to {len(Iden_uniq)} sessions matching IDs')
+            if len(Iden_uniq) == 0:
+                LOGGER.warning('[IDS] No sessions from --ids_file found in Data_table_timing.csv — nothing to do')
         # In testing mode, only process the first N_TEST sessions
         if TEST:
             Iden_uniq = Iden_uniq[:N_TEST]
