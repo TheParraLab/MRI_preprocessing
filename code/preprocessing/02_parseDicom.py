@@ -1130,6 +1130,11 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
             all_split_redirections = leftover_redir + all_split_redirections
             results = [df for df in all_split_results if df is not None and not df.empty]
             Data_table = pd.concat(results).reset_index(drop=True) if results else pd.DataFrame()
+            # Boolean hygiene (ISSUE-001 / S1): split rows carry Post_scan=1
+            # (int), and the filter-stage normalization above runs before the
+            # split concat. Re-normalize so the final CSV holds real booleans.
+            if not Data_table.empty:
+                Data_table = _normalize_bool_cols(Data_table)
             temporary_relocation = list(all_split_redirections)
             Iden_uniq_after = Data_table['SessionID'].unique()
 
