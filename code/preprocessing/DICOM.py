@@ -1532,10 +1532,74 @@ class DICOMsplit():
             self.scan_results.to_csv(f'{self.tmp_save}/directory_scan/{self.Session_ID}.csv', index=False)
             return 
     
+    def _fill_split_row_metadata(self):
+        """Populate 01-schema columns on the post rows added by sort_scans.
+
+        The added rows come from scan_all() (9 timing columns only), so
+        Series_desc/Modality/ID/Series/NumSlices are NaN on them. Re-extract
+        from one readable file in the split directory and NumSlices from the
+        group size (the true per-phase slice count).
+        """
+        post_mask = self.dicom_table['Pre_scan'] != 1
+        if not post_mask.any() or self.scan_results is None or self.scan_results.empty:
+            return
+        ext = None
+        for candidate in self.scan_results['PATH'].tolist():
+            try:
+                ext = DICOMextract(candidate)
+                break
+            except Exception as e:
+                self.logger.warning(f'Cannot re-extract metadata from {candidate}: {e} | [{self.Session_ID}]')
+        if ext is None:
+            self.logger.warning(f'No file in split directory could be re-extracted for metadata | [{self.Session_ID}]')
+            return
+        self.dicom_table.loc[post_mask, 'Series_desc'] = ext.Desc()
+        self.dicom_table.loc[post_mask, 'Modality'] = ext.Modality()
+        self.dicom_table.loc[post_mask, 'ID'] = ext.ID()
+        self.dicom_table.loc[post_mask, 'Series'] = ext.Series()
+        # Per-phase slice count: each split phase holds pre_slices files.
+        self.dicom_table.loc[post_mask, 'NumSlices'] = int(self.pre_slices)
+        del ext
+
+    def _parse_slice(self, path) -> int:
+        """Slice index from the second-to-last dash token of the path.
+
+        MSKCC_16-328 / RIA_19-093 filenames embed the slice index as the
+        second-to-last dash-delimited token of the path. Returns -1 when no
+        digits can be parsed. Note: for dash-free filenames the only dashes in
+        the path are path components (e.g. the archive id), so every file
+        parses to the same value — sort_scans detects that via a uniqueness
+        check and falls back to a per-file rank.
+        """
+        token = str(path).split('-')[-2]
+        digits = ''.join(filter(str.isdigit, token))
+        return int(digits) if digits else -1
+
+    def _fallback_slices_if_degenerate(self):
+        """Guard (ISSUE-001): when the filename convention does not encode the
+        slice index (e.g. RIA_20-425 underscore naming — every file parsed to
+        the same value), re-derive Slice as a deterministic per-file rank
+        (1..n by PATH order) within each TriTime group so each phase still
+        yields exactly one representative row. No-op when Slice is already
+        unique (the healthy dash-suffixed convention)."""
+        if self.scan_results is None or self.scan_results.empty:
+            return
+        if self.scan_results['Slice'].nunique() < len(self.scan_results):
+            self.logger.warning(
+                f'Slice values derived from filenames are not unique '
+                f'(nunique={self.scan_results["Slice"].nunique()} of {len(self.scan_results)}); '
+                f'using per-file rank within each TriTime group | [{self.Session_ID}]')
+            self.scan_results['Slice'] = (
+                self.scan_results.sort_values('PATH', kind='stable')
+                .groupby('TriTime', group_keys=False)['PATH']
+                .rank(method='first')
+                .astype(int)
+            )
+
     def sort_scans(self, scan_results: pd.DataFrame = None):
         """Sorts the scans based on the Series number"""
-        self.scan_results['Slice'] = self.scan_results['PATH'].apply(lambda x: str(x).split('-')[-2])
-        self.scan_results['Slice'] = self.scan_results['Slice'].apply(lambda x: int(''.join(filter(str.isdigit, x))) if any(char.isdigit() for char in str(x)) else -1)
+        self.scan_results['Slice'] = self.scan_results['PATH'].apply(self._parse_slice)
+        self._fallback_slices_if_degenerate()
         self.temporary_relocations = []
         original_table = self.dicom_table.copy()
         self.dicom_table = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1]
@@ -1555,7 +1619,20 @@ class DICOMsplit():
                     self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
                     return
                 # Add new row to the dicom table
-                self.dicom_table = pd.concat([self.dicom_table, self.scan_results.loc[(self.scan_results['TriTime'] == i)&(self.scan_results['Slice'] == slices[0])]], ignore_index=True)
+                # Exactly-one guard (ISSUE-001): with a healthy (unique) Slice
+                # value exactly one file matches. If more than one matches the
+                # Slice derivation is degenerate — fail loud and scope-limited
+                # instead of appending one row per file (the old fan-out).
+                rep_mask = (self.scan_results['TriTime'] == i) & (self.scan_results['Slice'] == slices[0])
+                n_rep = int(rep_mask.sum())
+                if n_rep != 1:
+                    self.logger.error(
+                        f'{n_rep} files match the representative Slice {slices[0]} '
+                        f'for trigger time {i}; expected exactly 1 — dropping session | [{self.Session_ID}]')
+                    self.removed['Split_Slice_Count_Mismatch'].append(original_table)
+                    self.dicom_table = pd.DataFrame(columns=self.dicom_table.columns)
+                    return
+                self.dicom_table = pd.concat([self.dicom_table, self.scan_results.loc[rep_mask]], ignore_index=True)
                 self.dicom_table.loc[(self.dicom_table['TriTime'] == i)&(self.dicom_table['Slice'] == slices[0]), 'PATH'] = f"{self.tmp_save}/dicom/{self.Session_ID}/{i}/{str(slices[0]).zfill(3)}.dcm"
                 self.logger.debug(f'{len(slices)} files found for trigger time {i} | [{self.Session_ID}]')
                 for j in slices:
@@ -1566,6 +1643,12 @@ class DICOMsplit():
                     self.temporary_relocations.append([initial, destination])
             self.dicom_table['SessionID'] = self.Session_ID
             self.dicom_table.loc[self.dicom_table['Pre_scan'] != 1, 'Post_scan'] = 1
+            # Metadata parity (ISSUE-001 / S1): rows added by this stage come
+            # from scan_all() and only carry the 9 timing columns, so
+            # Series_desc/Modality/ID/NumSlices (and other 01 columns) were
+            # NaN on every split phase. Re-extract them from one representative
+            # file of the split directory.
+            self._fill_split_row_metadata()
         else:
             self.logger.warning(f'Cannot identify scan grouping (Series={self.scan_results["Series"].nunique()}, TriTime={self.scan_results["TriTime"].nunique()}, expected={self.num_post_scans}) | [{self.Session_ID}]')
             self.removed['Split_Unknown_Grouping'].append(original_table)

@@ -250,6 +250,16 @@ def makeNifti(Data_subset):
     Descriptor = [f'{int(M):02}' for M in Data_subset['Major']]
     LoadPATH = Data_subset['PATH']
 
+    # Dedup guard (ISSUE-001): a fan-out in an upstream stage can list the same
+    # file under multiple Majors. Converting the identical file N times wastes
+    # runs and pollutes the output dir — collapse to one row per PATH and warn.
+    dup_mask = Data_subset.duplicated(subset=['PATH'], keep='first')
+    if dup_mask.any():
+        LOGGER.warning(
+            f'[DEDUP] Dropping {int(dup_mask.sum())} duplicate PATH rows for '
+            f'{SessionID} (same file listed for multiple Majors)')
+        Data_subset = Data_subset[~dup_mask].reset_index(drop=True)
+
     commands = []
     for i in range(len(Data_subset)):
         commands.append(['dcm2niix', '-o', f'{SAVE_DIR}{SessionID}', '-f', Descriptor[i], LoadPATH[i]])
