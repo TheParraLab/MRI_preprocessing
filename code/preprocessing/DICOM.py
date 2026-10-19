@@ -1081,7 +1081,32 @@ class DICOMfilter():
             if cumulative:
                 self.dicom_table.loc[self.dicom_table['Post_scan'] == 1, 'Post_scan'] = self.dicom_table.loc[self.dicom_table['Pre_scan'] == 1, 'TriTime'].str.lower() != 'unknown'
             else:
-                self.dicom_table['Post_scan'] = self.dicom_table['TriTime'].str.lower() != 'unknown'
+                tt = self.dicom_table['TriTime'].astype(str).str.strip().str.lower()
+                post_mask = tt != 'unknown'
+                # ISSUE-002: TriTime == 0 denotes the pre-contrast BASELINE when
+                # the vendor explicitly names the series pre-contrast (pure-pre
+                # description: contains 'pre', not 'post'). In this corpus the
+                # same TriTime==0 value is most often a genuine post phase
+                # (e.g. 'Ph1/Axial T1 POST FS'), so the exception is
+                # description-conditional, not blanket. Excluding the baseline
+                # here lets post_series_desc()/pre_series_desc() classify it
+                # via the description (it then lands in the Post_scan==0 pool
+                # where pre_series_desc finds it).
+                # RIA protocols stamp TriTime=0 on the WHOLE session and name
+                # the DCE dynamic 'pre' in the template. Two template variants
+                # produce a TriTime==0 series whose description says 'pre' but
+                # is actually the bolus (phase-0 of the post-contrast dynamic)
+                # and must stay post:
+                #   (a) a phase marker (Ph<digit>): 'Ph1/...pre'
+                #   (b) a numbered post dynamic present in the session:
+                #       'Axial T1 pre' + 'Axial T1 post 1..N'
+                # A standalone FS baseline (no phase marker, no numbered post
+                # dynamic in the session) is the genuine pre-contrast baseline.
+                sd = self.dicom_table['Series_desc'].astype(str).str.lower()
+                has_numbered_post = bool(sd.str.contains(r'post\s*\d', na=False, regex=True).any())
+                phase_or_dynamic = sd.str.contains(r'ph\s*\d', na=False, regex=True) | has_numbered_post
+                baseline_zero = (tt == '0') & sd.str.contains('pre', na=False) & (~sd.str.contains('post', na=False)) & (~phase_or_dynamic)
+                self.dicom_table['Post_scan'] = post_mask & ~baseline_zero
             post_found = self.dicom_table['Post_scan'].to_numpy()
             if action.lower() == 'check': self.logger.debug(f'Trigger time post scan detection found {post_found.sum()} post scans | {self.Session_ID}')
             return post_found
