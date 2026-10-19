@@ -14,7 +14,7 @@ import time
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
-from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir, _collect_future_map, _terminate_executors, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti
+from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir, get_log_dir, _collect_future_map, _terminate_executors, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti
 from DICOM import DICOMfilter, DICOMorder
 
 # Global variables for progress bar and lock
@@ -58,23 +58,42 @@ def check_source_files(source_path: str) -> bool:
     """Check if the source path file exists contains files."""
     return (len(glob.glob(f'{source_path}/*')) > 0) or (len(glob.glob(f'{source_path}/*/*')) > 0)
 
-def save_progress(data, filename):
-    """Save progress to a file."""
-    LOGGER.info(f'Saving progress to {filename}')
-    dest = f'{LOAD_DIR}{filename}'
-    ensure_dir_writable(os.path.dirname(dest), context='progress file location')
-    if os.path.exists(dest):
-        os.remove(dest)
-    with open(dest, 'wb') as f:
-        pickle.dump(data, f)
+# Checkpoint location: the deployment log dir (same home as the run log and
+# nifti_audit.json) so all deployment-specific files live together.
+# Path is computed lazily (get_log_dir() may create dirs) — never at import.
+PROGRESS_FILENAME = 'saveNifti_progress.pkl'
 
-def load_progress(filename):
-    """Load progress from a file."""
-    if os.path.exists(f'{LOAD_DIR}{filename}'):
-        LOGGER.info(f'Loading progress from {filename}')
-        with open(f'{LOAD_DIR}{filename}', 'rb') as f:
+def save_progress(data, filename=PROGRESS_FILENAME):
+    """Atomically save the remaining-commands checkpoint to the deployment
+    log dir. Writes a temp file + os.replace so a mid-write kill can never
+    leave a truncated pickle that the next run fails to load."""
+    dest = f'{get_log_dir()}/{filename}'
+    ensure_dir_writable(os.path.dirname(dest), context='progress file location')
+    LOGGER.info(f'Saving progress to {dest}')
+    tmp = f'{dest}.tmp'
+    with open(tmp, 'wb') as f:
+        pickle.dump(data, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dest)
+
+def load_progress(filename=PROGRESS_FILENAME):
+    """Load the remaining-commands checkpoint from the deployment log dir."""
+    dest = f'{get_log_dir()}/{filename}'
+    if os.path.exists(dest):
+        LOGGER.info(f'Loading progress from {dest}')
+        with open(dest, 'rb') as f:
             return pickle.load(f)
     return None
+
+def remove_progress(filename=PROGRESS_FILENAME):
+    """Remove the checkpoint if present (consistent path — the old code
+    checked a CWD-relative name, so a saved checkpoint could silently
+    survive a clean run and change the next run's behaviour)."""
+    dest = f'{get_log_dir()}/{filename}'
+    if os.path.exists(dest):
+        os.remove(dest)
+        LOGGER.info(f'Removed progress file {dest}')
 
 
 
@@ -390,7 +409,8 @@ if __name__ == '__main__':
     #else:
     #    os.mkdir(SAVE_DIR)
         # Load progress if available
-    progress = load_progress('saveNifti_progress.pkl')
+    LOGGER.info(f'Checkpoint file: {get_log_dir()}/{PROGRESS_FILENAME}')
+    progress = load_progress()
     if progress:
         LOGGER.info(f'Progress file found. {len(progress)} items remaining')
         commands = list(progress)
@@ -427,40 +447,59 @@ if __name__ == '__main__':
     redirected_cmds = [item for item in commands if 'raw' not in item[-1]]
     LOGGER.info(f'[{time.strftime("%H:%M:%S")}] Found {len(redirected_cmds)} redirected commands')
     commands_redirected = list(redirected_cmds)
-    if len(commands_priority) > 0:
-        LOGGER.debug(f'Number of priority commands: {len(commands_priority)}')
-        run_with_progress(partial(run_cmd, commands=commands), commands_priority, Parallel=PARALLEL)
-        if not stop_flag.is_set():
-            LOGGER.info('Priority commands complete without stop flag')
-            LOGGER.info('Running non-priority from temporary files')
-            if len(commands_redirected) > 0:
-                LOGGER.debug(f'Number of redirected commands: {len(commands_redirected)}')
-                run_with_progress(partial(run_cmd, commands=commands), commands_redirected, Parallel=PARALLEL)
-                if not stop_flag.is_set():
-                    LOGGER.info('Nifti conversion complete without stop flag')
-                    LOGGER.info('Removing progress file')
-                    if os.path.exists('saveNifti_progress.pkl'):
-                        os.remove('saveNifti_progress.pkl')
-                else:
-                    LOGGER.info('Nifti conversion complete with stop flag')
-                    save_progress(list(commands), 'saveNifti_progress.pkl')
-                    LOGGER.info('checkpoint file saved')
-        else:
-            LOGGER.info('Nifti conversion complete with stop flag')
-            save_progress(list(commands), 'saveNifti_progress.pkl')
+    # `commands` is the live remaining list (run_cmd removes each entry as it
+    # completes), so checkpointing it captures exactly the unfinished work.
+    # On resume, run_cmd's existing-output skip check makes re-running an
+    # in-flight conversion harmless (partial dcm2niix output is redone).
+    def _convert():
+        if len(commands_priority) > 0:
+            LOGGER.debug(f'Number of priority commands: {len(commands_priority)}')
+            run_with_progress(partial(run_cmd, commands=commands), commands_priority, Parallel=PARALLEL)
+            if not stop_flag.is_set():
+                LOGGER.info('Priority commands complete without stop flag')
+                LOGGER.info('Running non-priority from temporary files')
+                if len(commands_redirected) > 0:
+                    LOGGER.debug(f'Number of redirected commands: {len(commands_redirected)}')
+                    run_with_progress(partial(run_cmd, commands=commands), commands_redirected, Parallel=PARALLEL)
+                    if not stop_flag.is_set():
+                        LOGGER.info('Nifti conversion complete without stop flag')
+                        LOGGER.info('Removing progress file')
+                        remove_progress()
+                    else:
+                        LOGGER.info('Nifti conversion complete with stop flag')
+                        save_progress(list(commands))
+                        LOGGER.info('checkpoint file saved')
+            else:
+                LOGGER.info('Nifti conversion complete with stop flag')
+                save_progress(list(commands))
+                LOGGER.info('checkpoint file saved')
+        elif len(commands_redirected) > 0:
+            LOGGER.debug(f'Number of redirected commands: {len(commands_redirected)}')
+            run_with_progress(partial(run_cmd, commands=commands), commands_redirected, Parallel=PARALLEL)
+            if not stop_flag.is_set():
+                LOGGER.info('Nifti conversion complete without stop flag')
+                LOGGER.info('Removing progress file')
+                remove_progress()
+            else:
+                LOGGER.info('Nifti conversion complete with stop flag')
+                save_progress(list(commands))
+                LOGGER.info('checkpoint file saved')
+
+    try:
+        _convert()
+    except KeyboardInterrupt:
+        # Ctrl-C: persist the remaining-commands checkpoint before dying so
+        # the next run resumes from here instead of rebuilding the table and
+        # re-scanning every produced file. (The stop-flag branch above already
+        # checkpoints; this covers the interrupt path, which previously
+        # exited the script before save_progress() could run.)
+        LOGGER.warning(f'[SIGINT] Saving checkpoint with {len(commands)} remaining commands before exit')
+        try:
+            save_progress(list(commands))
             LOGGER.info('checkpoint file saved')
-    elif len(commands_redirected) > 0:
-        LOGGER.debug(f'Number of redirected commands: {len(commands_redirected)}')
-        run_with_progress(partial(run_cmd, commands=commands), commands_redirected, Parallel=PARALLEL)
-        if not stop_flag.is_set():
-            LOGGER.info('Nifti conversion complete without stop flag')
-            LOGGER.info('Removing progress file')
-            if os.path.exists('saveNifti_progress.pkl'):
-                os.remove('saveNifti_progress.pkl')
-        else:
-            LOGGER.info('Nifti conversion complete with stop flag')
-            save_progress(list(commands), 'saveNifti_progress.pkl')
-            LOGGER.info('checkpoint file saved')
+        except Exception as e:
+            LOGGER.error(f'[SIGINT] Failed to save checkpoint: {e!r} - next run will restart from scratch')
+        raise
 
     # Post-conversion audit: compare what step 02 said we needed (Major column)
     # with what dcm2niix actually produced. Surfaces missed conversions,
