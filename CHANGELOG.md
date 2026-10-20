@@ -5,6 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The pipeline turns breast MRI DICOM acquisitions into a coregistered, harmonized NIfTI dataset in six steps (`01_scanDicom` → `02_parseDicom` → `03_saveNifti` → `04_saveRAS` → `05_alignScans` → `06_genInputs`), deployable via Docker, conda (`environment.yml`), or a native HPC path.
 
+## [Unreleased]
+
+### Added
+- `start_control.sh --resume`: re-attach to the most recent existing deployment directory (`deployments/<YYYYMMDD_HHMMSS>/`) instead of minting a new one. Reuses its configuration (`.env.snapshot` + `manifest.json`) and log files and leaves the directory intact, so the container can be restarted — picking up newly built code — without losing the deployment's state. The original `manifest.json` / `.env.snapshot` are preserved (the EXIT-time `runtime` section is still updated).
+
 ## [1.0.1] - 2026-09-15
 
 ### Fixed
