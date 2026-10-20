@@ -9,6 +9,7 @@ import subprocess
 import threading
 import signal
 
+from functools import partial
 from multiprocessing import cpu_count, Event
 from toolbox import (
     ProgressBar, get_log_dir, get_logger, run_function, resolve_dir,
@@ -44,6 +45,11 @@ parser.add_argument(
 parser.add_argument(
     '--ids_file', type=str, default=None,
     help='CSV/txt file containing one ID per line. If provided, only process directories whose name appears in this file.'
+)
+parser.add_argument(
+    '--cpus', type=int, default=0,
+    help='Cap on parallel worker processes for --multi: exactly N reg_f3d jobs '
+         'run concurrently (0 = auto: min(32, 2×(cores-1)))'
 )
 args = parser.parse_args()
 
@@ -214,9 +220,23 @@ def _progress_updater(update_queue, progress):
             update_queue.task_done()
 
 
+def _align_wrapper(item, target, save_dir, update_queue=None):
+    """Module-level progress wrapper, picklable under any start method.
+
+    ``concurrent.futures`` pickles the submitted callable and its arguments
+    into the worker call queue, so the old nested closure raised
+    ``AttributeError: Can't pickle local object`` and failed every item in
+    process mode.  The wrapper is module-level and is bound at the
+    call site via ``functools.partial``, which is itself picklable."""
+    result = target(item, save_dir)
+    if update_queue is not None:
+        update_queue.put((None, 'Processing'))
+    return result
+
+
 def run_with_progress(
     target, items, parallel=True, P_type='process',
-    P_role='compute', save_dir: str = SAVE_DIR
+    P_role='compute', save_dir: str = SAVE_DIR, n_workers: int = 0
 ):
     """Run *target* over *items* with an optional progress bar.
 
@@ -236,19 +256,13 @@ def run_with_progress(
             daemon=True)
         updater_thread.start()
 
-    # Module-level wrapper so it is picklable for spawn mode.
-    # ``align`` already takes (session_dir, save_dir), so we just need to
-    # inject the progress marker without creating a non-picklable closure.
-    def _align_wrapper(item):
-        result = target(item, save_dir)
-        if update_queue is not None:
-            update_queue.put((None, 'Processing'))
-        return result
-
     results = run_function(
-        LOGGER, _align_wrapper, list(items),
+        LOGGER,
+        partial(_align_wrapper, target=target, save_dir=save_dir,
+                update_queue=update_queue),
+        list(items),
         Parallel=parallel, P_type=P_type, P_role=P_role,
-        stop_flag=stop_flag)
+        stop_flag=stop_flag, N_WORKERS=n_workers)
 
     if PROGRESS:
         if update_queue is not None:
@@ -328,10 +342,21 @@ if __name__ == '__main__':
 
     # ---- Run coregistration ----------------------------------
     try:
-        run_with_progress(align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR)
+        results = run_with_progress(
+            align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR,
+            n_workers=args.cpus) or []
     except KeyboardInterrupt:
         LOGGER.info('Interrupted. Completed directories are safe to resume.')
         raise
+
+    n_aligned = sum(1 for r in results if r == 'completed')
+    n_done = sum(1 for r in results if r == 'already done')
+    n_insufficient = sum(1 for r in results if r == 'Not enough scans')
+    n_failed = sum(1 for r in results if r in ('failed', None))
+    LOGGER.info(
+        f'Run summary: {n_aligned} aligned, {n_done} already done, '
+        f'{n_insufficient} insufficient scans, {n_failed} failed '
+        f'of {len(dirs)} sessions')
 
     # ---- Prune original scans if requested --------------------
     if PRUNE:
@@ -349,5 +374,8 @@ if __name__ == '__main__':
                     f'Directory {p} does not exist. Skipping deletion.')
 
     LOGGER.info('Completed alignScans: Step 05')
-    LOGGER.info('All files saved to coreg directory')
+    if n_failed:
+        LOGGER.warning(f'{n_failed} sessions incomplete - re-run step 05 to process them')
+    else:
+        LOGGER.info('All files saved to coreg directory')
     LOGGER.info('Exiting alignScans: Step 05')

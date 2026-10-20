@@ -521,7 +521,9 @@ import os as _os
 WORKER_TIMEOUT = float(_os.environ.get('MRI_WORKER_TIMEOUT', '1800'))
 
 # Seconds of zero completed futures before the parent logs a per-worker /proc stall diagnostic.
-STALL_TIMEOUT = float(_os.environ.get('MRI_STALL_TIMEOUT', '120'))
+# Sized above a single 05_alignScans item (up to 4 reg_f3d scans, ~4-10 min under GPU
+# contention) so healthy parallel runs do not trip the diagnostic. Keep < WORKER_TIMEOUT.
+STALL_TIMEOUT = float(_os.environ.get('MRI_STALL_TIMEOUT', '900'))
 
 # Container-local (non-NFS) fallback file for the stall dump: the main log file
 # is on an NFS mount and can itself block, which would swallow the diagnostic.
@@ -662,7 +664,7 @@ def run_function(
     target: Callable[..., Any], items: List[Any],
     Parallel: bool = True, P_type: str = 'thread', N_CPUS: int = 0, N_THREADS: int = 0,
     P_role: Literal['io', 'compute'] | None = None,
-    stop_flag: Optional[object] = None, *args: Any, **kwargs: Any,
+    stop_flag: Optional[object] = None, N_WORKERS: int = 0, *args: Any, **kwargs: Any,
 ) -> List[Any]:
     """Run a function over *items* in parallel or sequentially.
 
@@ -683,6 +685,9 @@ def run_function(
         P_role (str | None): ``'io'`` for I/O-bound workloads, ``'compute'`` for CPU-bound.
             I/O-bound: caps workers at min(8, cpu_count()-1) or half the available cores on larger machines.
             Compute-bound: uses full core capacity.  None falls back to legacy behavior.
+        N_WORKERS (int): Exact process-pool size for P_type='process'. 0 keeps the
+            existing auto-size (min(32, 2 × effective N_CPUS)). When >0 the pool
+            is exactly min(32, N_WORKERS) processes.
 
     Returns:
         List[Any]: Results in the same order as *items*.  If every result is a tuple,
@@ -728,7 +733,7 @@ def run_function(
         # ───────── process mode ─────────
         if Parallel and P_type == 'process':
             effective = _effective_workers(N_CPUS, role=P_role)
-            max_workers = min(32, 2 * effective)
+            max_workers = min(32, N_WORKERS) if N_WORKERS > 0 else min(32, 2 * effective)
             LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             init_args = (LOGGER.name, LOGGER._log_level,
                          LOGGER._file_path, LOGGER._formatter_str,
@@ -871,7 +876,7 @@ def run_function(
             if Parallel and P_type not in ('thread', 'process'):
                 LOGGER.error(f'Unknown P_type={P_type}, falling back to serial.')
             for i, item in enumerate(items):
-                if (stop_flag and getattr(stop_flag, 'is_set', lambda: False)()) or (time.monotonic() >= deadline):
+                if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
                     break
                 try:
                     results.append(target(item, *args, **kwargs))

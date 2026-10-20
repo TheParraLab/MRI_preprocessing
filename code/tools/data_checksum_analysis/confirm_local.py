@@ -172,7 +172,7 @@ def main(argv=None):
         print(f"Error: local directory {args.local_dir} not found.", file=sys.stderr)
         return 2
     return _status_manifest(args.manifest, args.local_dir, outdir,
-                            args.list_all, args.emit_details)
+                            args.list_all, args.emit_details, n_workers=args.workers)
 
 
 if __name__ == "__main__":

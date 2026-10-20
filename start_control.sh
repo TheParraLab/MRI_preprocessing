@@ -10,6 +10,13 @@
 #
 # Requires a .env file at the project root with deployment paths.
 #   See .env.example for reference and required variables.
+#
+# Options:
+#   --resume   Re-attach to the most recent existing deployment directory
+#              (deployments/<YYYYMMDD_HHMMSS>/) instead of creating a new one.
+#              Reuses its configuration and log files and keeps the directory
+#              intact — so you can restart the container (picking up new code)
+#              without losing the deployment's state.
 # =============================================================================
 
 set -euo pipefail
@@ -17,6 +24,17 @@ set -euo pipefail
 # ── Determine the script's directory ─────────────────────────────
 script_directory=$(dirname "$(readlink -f "$0")")
 project_directory_path=$(realpath "$script_directory")
+
+# ── Parse CLI flags ─────────────────────────────────────────────
+# --resume: re-attach to the most recent existing deployment directory
+#           (reuse its configuration + log files) instead of minting a new
+#           timestamped one. See the "Deployment log directory" block below.
+RESUME=false
+for arg in "$@"; do
+  case "$arg" in
+    --resume) RESUME=true ;;
+  esac
+done
 
 # ── Load or create .env ─────────────────────────────────────────
 ENV_FILE="${project_directory_path}/.env"
@@ -211,25 +229,64 @@ PYEOF
   esac
 }
 
-# ── Create timestamped deployment log directory ─────────────────
-DEPLOYMENT_ID=$(date +%Y%m%d_%H%M%S)
-DEPLOY_LOG_DIR="${project_directory_path}/deployments/${DEPLOYMENT_ID}"
-mkdir -p "$DEPLOY_LOG_DIR"
+# ── Deployment log directory ───────────────────────────────────────
+# Default (fresh run): mint a new timestamped dir and record a manifest.
+# --resume: re-attach to the most recent existing deployment so we reuse its
+#           configuration and log files (and keep that directory intact)
+#           instead of creating a new one.
+DEPLOY_ROOT="${project_directory_path}/deployments"
 
-# Record which source tree this deployment started from.
-# (The runtime-detected image/container identity is appended later at exit,
-# see deployment_finalize().)
-GIT_COMMIT="unknown"
-GIT_DIRTY=true
-if git -C "$project_directory_path" rev-parse --git-dir &>/dev/null; then
-  GIT_COMMIT=$(git -C "$project_directory_path" rev-parse HEAD)
-  if [ -z "$(git -C "$project_directory_path" status --porcelain)" ]; then
-    GIT_DIRTY=false
+# Find the most recent deployment directory by name. Deployment dirs are
+# named YYYYMMDD_HHMMSS, so reverse-lexicographic order == newest first.
+# Echoes the dir name and returns 0; returns 1 if none exist.
+find_latest_deployment() {
+  if [ ! -d "$DEPLOY_ROOT" ]; then
+    return 1
   fi
-fi
+  local d
+  for d in $(ls -1 "$DEPLOY_ROOT" 2>/dev/null | sort -r); do
+    if [[ "$d" =~ ^[0-9]{8}_[0-9]{6}$ ]]; then
+      echo "$d"
+      return 0
+    fi
+  done
+  return 1
+}
 
-# Write a minimal manifest so deployments can be audited later
-cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
+if [ "$RESUME" = true ]; then
+  DEPLOYMENT_ID="$(find_latest_deployment)" || {
+    echo ""
+    echo "ERROR: --resume requested but no existing deployment directory was found under:"
+    echo "  ${DEPLOY_ROOT}"
+    echo "Run once without --resume to create the initial deployment, then use --resume."
+    exit 1
+  }
+  DEPLOY_LOG_DIR="${DEPLOY_ROOT}/${DEPLOYMENT_ID}"
+  echo "Resuming existing deployment: ${DEPLOYMENT_ID}"
+  echo "Deployment log: ${DEPLOY_LOG_DIR}"
+  echo ""
+  # Keep the deployment's original manifest.json / .env.snapshot intact
+  # (they hold the original config + identity for this deployment).
+  # deployment_finalize() still updates the manifest's `runtime` section at exit.
+else
+  DEPLOYMENT_ID=$(date +%Y%m%d_%H%M%S)
+  DEPLOY_LOG_DIR="${DEPLOY_ROOT}/${DEPLOYMENT_ID}"
+  mkdir -p "$DEPLOY_LOG_DIR"
+
+  # Record which source tree this deployment started from.
+  # (The runtime-detected image/container identity is appended later at exit,
+  # see deployment_finalize().)
+  GIT_COMMIT="unknown"
+  GIT_DIRTY=true
+  if git -C "$project_directory_path" rev-parse --git-dir &>/dev/null; then
+    GIT_COMMIT=$(git -C "$project_directory_path" rev-parse HEAD)
+    if [ -z "$(git -C "$project_directory_path" status --porcelain)" ]; then
+      GIT_DIRTY=false
+    fi
+  fi
+
+  # Write a minimal manifest so deployments can be audited later
+  cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
 {
   "deployment_id": "${DEPLOYMENT_ID}",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -249,8 +306,9 @@ cat > "${DEPLOY_LOG_DIR}/manifest.json" <<MANIFEST
 }
 MANIFEST
 
-# Snapshot the .env used for this deployment (so deployments are self-contained)
-cp "$ENV_FILE" "${DEPLOY_LOG_DIR}/.env.snapshot"
+  # Snapshot the .env used for this deployment (so deployments are self-contained)
+  cp "$ENV_FILE" "${DEPLOY_LOG_DIR}/.env.snapshot"
+fi
 
 export DEPLOY_LOG_DIR
 # Record the runtime-resolved identity of what actually ran (image ID, sif,
