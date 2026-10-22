@@ -1,11 +1,11 @@
 """Regression tests for DICOMsplit slice fan-out (ISSUE-001).
 
-The 9/24 MSK deployment (20260924_112405) produced two sessions with 343 and
+The 9/24 site deployment (20260924_112405) produced two sessions with 343 and
 325 "post scans" because ``sort_scans()`` derived each file's ``Slice`` index
-from the second-to-last dash token of the *path*. For dash-free RIA_20-425
+from the second-to-last dash token of the *path*. For dash-free SITE_B_22-839
 filenames (``img_0031_1.2.840....dcm``) the only dash is inside the archive id
-in the path, so every file parsed to the same value (20). The
-``len(slices) != pre_slices`` count-guard passed (114 copies of 20), and the
+in the path, so every file parsed to the same value (22). The
+``len(slices) != pre_slices`` count-guard passed (114 copies of 22), and the
 representative-row filter ``Slice == slices[0]`` then matched ALL files in the
 group — fanning each phase out to 114 duplicate rows.
 
@@ -67,7 +67,7 @@ def _write_dcm(path, trigger, desc):
 def _make_session(tmp_path, naming):
     """Pre dir (6 files) + post dir (18 files = 3 TriTimes x 6 slices) plus the
     01-style table DICOMsplit expects. ``naming`` is 'underscore' (dash-free
-    filenames — the degenerate case) or 'dash' (MSKCC-style, slice index as the
+    filenames — the degenerate case) or 'dash' (SITE_A-style, slice index as the
     second-to-last dash token)."""
     pre_dir = tmp_path / "SCANS" / "4" / "DICOM"
     post_dir = tmp_path / "SCANS" / "6" / "DICOM"

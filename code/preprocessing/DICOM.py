@@ -1208,7 +1208,7 @@ class DICOMfilter():
               (e.g., `resolve_laterality`, `resolve_slice_counts`) would improve
               maintainability and testability.
         """
-        # SHOULD THIS FUNCTION FLOW DEPEND ON SESSION PROTOCOL [16-328, 19-093, 20-425]
+        # SHOULD THIS FUNCTION FLOW DEPEND ON SESSION PROTOCOL [18-629, 19-406, 22-839]
         self.removeNonFSScans()
         self.print_table(columns=['Session_ID', 'Series_desc', 'NumSlices', 'Lat', 'Orientation', 'TriTime', 'Type', 'Series'])
 
@@ -1589,7 +1589,7 @@ class DICOMsplit():
     def _parse_slice(self, path) -> int:
         """Slice index from the second-to-last dash token of the path.
 
-        MSKCC_16-328 / RIA_19-093 filenames embed the slice index as the
+        SITE_A_18-629 / SITE_B_19-406 filenames embed the slice index as the
         second-to-last dash-delimited token of the path. Returns -1 when no
         digits can be parsed. Note: for dash-free filenames the only dashes in
         the path are path components (e.g. the archive id), so every file
@@ -1602,7 +1602,7 @@ class DICOMsplit():
 
     def _fallback_slices_if_degenerate(self):
         """Guard (ISSUE-001): when the filename convention does not encode the
-        slice index (e.g. RIA_20-425 underscore naming — every file parsed to
+        slice index (e.g. SITE_B_22-839 underscore naming — every file parsed to
         the same value), re-derive Slice as a deterministic per-file rank
         (1..n by PATH order) within each TriTime group so each phase still
         yields exactly one representative row. No-op when Slice is already
