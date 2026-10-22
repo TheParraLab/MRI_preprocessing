@@ -388,7 +388,10 @@ def generate_slopes(SessionID):
     ###################################
     # Calculating slope 1 (enhancement)
     LOGGER.debug(f'{SessionID} | Starting slope 1 calculation')
-    slope1 = _linfit_slope(T[..., 0:2], D[..., 0:2]) / p95
+    # p95 normalization intentionally removed (2026-10-22): the detection dataloader
+    # (published load_and_preprocess) normalizes by p95 of the raw pre itself; 06
+    # writes raw values so both segmentation and detection paths see the same raw data.
+    slope1 = _linfit_slope(T[..., 0:2], D[..., 0:2])
 
     header['glmax'] = np.max(slope1)
     header['glmin'] = np.min(slope1)
@@ -403,7 +406,7 @@ def generate_slopes(SessionID):
     ###################################
     # Calculating slope 2 (washout)
     LOGGER.debug(f'{SessionID} | Starting slope 2 calculation')
-    slope2 = _linfit_slope(T[..., 1:], D[..., 1:]) / p95
+    slope2 = _linfit_slope(T[..., 1:], D[..., 1:])
 
     header['glmax'] = np.max(slope2)
     header['glmin'] = np.min(slope2)
@@ -421,7 +424,8 @@ def generate_slopes(SessionID):
     img = nib.load(Fils[1])
     data1 = img.get_fdata().astype(np.float32)
     data1[np.isnan(data1)] = 0
-    post = data1/p95
+    # raw post; p95 normalization handled by the detection dataloader
+    post = data1
 
     LOGGER.debug(f'{SessionID} | Post contrast shape: {post.shape}')
     LOGGER.debug(f'{SessionID} | Header shape: {header.get_data_shape()}')
