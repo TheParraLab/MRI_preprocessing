@@ -63,18 +63,30 @@ cd "${BUILD_DIR}/niftyreg-git"
 mkdir -p build
 cd build
 
-CMAKE_CUDA_FLAG="-DBUILD_CUDA=ON"
+CMAKE_CUDA_FLAG="-DUSE_CUDA=ON"
 if [[ "${CUDA_FOUND}" = false ]]; then
-  CMAKE_CUDA_FLAG="-DBUILD_CUDA=OFF"
+  CMAKE_CUDA_FLAG="-DUSE_CUDA=OFF"
 fi
 
+# CHECK_GPU=OFF: skip niftyreg's configure-time GPU probe, which silently
+# disables USE_CUDA on build nodes without a reachable card.
 cmake .. \
   ${CMAKE_CUDA_FLAG} \
+  -DCHECK_GPU=OFF \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}"
 
 echo "→ Compiling (this takes ~10 minutes)..."
 make install
+
+if [[ "${CUDA_FOUND}" = true ]]; then
+  if ldd "${PREFIX}/bin/reg_f3d" | grep -qi cuda; then
+    echo "✓ reg_f3d linked against CUDA libraries"
+  else
+    echo "ERROR: reg_f3d built WITHOUT CUDA — check cmake configure output for USE_CUDA"
+    exit 1
+  fi
+fi
 
 echo "→ Cleaning up build files..."
 rm -rf "${BUILD_DIR}"
