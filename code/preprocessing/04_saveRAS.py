@@ -9,11 +9,10 @@ import random
 import signal
 import numpy as np
 import nibabel as nib
-from multiprocessing import cpu_count, Manager
+from multiprocessing import cpu_count, Event
 # Custom Imports
-from toolbox import run_function, get_logger, get_log_dir
-manager = Manager()
-stop_flag = manager.Event()
+from toolbox import run_function, get_logger, get_log_dir, resolve_dir, nifti_stem, is_nifti_file, glob_nifti
+stop_flag = Event()
 
 
 def _check_stop():
@@ -22,12 +21,12 @@ def _check_stop():
 
 # Define command line arguments
 parser = argparse.ArgumentParser(description='Convert Nifti files to RAS orientation')
-parser.add_argument('--scan_dir', type=str, default='/FL_system/data/nifti/', help='Directory containing scans to process')
-parser.add_argument('--save_dir', type=str, default='/FL_system/data/RAS/', help='Directory to save the output')
+parser.add_argument('--scan_dir', type=str, default=None, help='Directory containing scans to process (default: $NIFTI_DIR or /FL_system/data/nifti/)')
+parser.add_argument('--save_dir', type=str, default=None, help='Directory to save the output (default: $RAS_DIR or /FL_system/data/RAS/)')
 parser.add_argument('--dir_idx', type=int, required=False, help='Index of the directory to process')
 parser.add_argument('--dir_list', type=str, default='list.txt', help='List of directories to process')
-parser.add_argument('--multi', '-m', nargs='?', const=cpu_count()-1, type=int, help='Run with multiprocessing enabled, using provided number of cpus (default: max-1)')
-parser.add_argument('-p', '--profile', action='store_true', help='Run with profiler enabled')
+parser.add_argument('--multi', action='store_true', help='Run with multiprocessing enabled')
+parser.add_argument('--profile', action='store_true', help='Run with profiler enabled')
 parser.add_argument('--test', nargs='?', type=int, const=10, help='Run in test mode, limit the number of directories to process')
 parser.add_argument('--test_stop', action='store_true', help='Randomly trip the disk space checker to simulate low disk space')
 parser.add_argument(
@@ -35,6 +34,8 @@ parser.add_argument(
     help='CSV/txt file containing one ID per line. If provided, only process directories whose name appears in this file.'
 )
 args = parser.parse_args()
+args.scan_dir = resolve_dir(args.scan_dir, 'NIFTI_DIR', '/FL_system/data/nifti/')
+args.save_dir = resolve_dir(args.save_dir, 'RAS_DIR', '/FL_system/data/RAS/')
 # Get script name
 script_name = os.path.basename(__file__).split('.')[0]
 
@@ -48,7 +49,7 @@ SAVE_DIR = args.save_dir #'/FL_system/data/RAS/'
 TEST = args.test is not None # If True, the script will run with a limited number of directories
 if TEST:
     N_TEST = args.test
-PARALLEL = args.multi is not None # If True, the script will run with multiprocessing enabled
+PARALLEL = args.multi # If True, the script will run with multiprocessing enabled
 DISK_SPACE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 100 GB
 #PROGRESS = False
 LOGGER = get_logger(script_name, LOG_DIR)
@@ -182,58 +183,59 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
         return
     
     
-    Fils = glob.glob(f'{dir}/*.nii')
+    Fils = glob_nifti(dir, '*')
     LOGGER.debug(f'{dir} | Found {len(Fils)} files')
-    Fils.sort()
-    Fils = [os.path.split(ii)[-1] for ii in Fils]
+    Fils = [os.path.basename(f) for f in sorted(Fils)]
     save_path = os.path.join(save_path, dir.split(os.sep)[-1])
-    if not os.path.exists(f'{save_path}'):
-        LOGGER.debug(f'Creating directory: {save_path}')
-        os.mkdir(f'{save_path}')
-    Fils_out = glob.glob(f'{save_path}/*_RAS.nii') or []
-    Fils_out = [os.path.split(ii)[-1] for ii in Fils_out]
-    Fils_out = [ii.replace('_RAS.nii', '.nii') for ii in Fils_out]
+    if not os.path.exists(save_path):
+        os.mkdir(save_path)
+    Fils_out = [nifti_stem(os.path.basename(f)) for f in glob.glob(f'{save_path}/*_RAS.nii') + glob.glob(f'{save_path}/*_RAS.nii.gz')]
     LOGGER.debug(f'{dir} | Found {len(Fils_out)} files in {save_path}')
 
-    no_pre_scan = not any(re.match(r'00\d*\.\w+', f) for f in Fils)
+    no_pre_scan = not any(nifti_stem(f) == '00' for f in Fils)
     if no_pre_scan:
-        LOGGER.warning(f'{dir} | Pre-scan 00.nii missing, decrementing all file numbers by 1')
+        LOGGER.warning(f'{dir} | Pre-scan 00 missing, decrementing all file numbers by 1')
 
-    for ii in Fils:
-        LOGGER.debug(f'{dir} | Processing: {os.path.join(dir, ii)}')
-        if ii.endswith('00a.nii'):
-            LOGGER.debug(f'{dir} | found 00a.nii, attempting to isolate FS sample...')
-            with open(f'{dir}/00.json', 'r') as f:
-                json_00 = json.load(f)
-            with open(f'{dir}/00a.json', 'r') as f:
-                json_00a = json.load(f)
-            LOGGER.debug(f'{dir} | 00_desc: {json_00["SeriesDescription"]}')
-            LOGGER.debug(f'{dir} | 00a_desc: {json_00a["SeriesDescription"]}')  
-            if 'FS' in json_00['SeriesDescription']:
-                LOGGER.debug(f'{dir} | Found FS in 00')
-                Fils.remove(f'00a.nii')
-            elif 'FS' in json_00a['SeriesDescription']:
-                LOGGER.debug(f'{dir} | Found FS in 00a')
-                Fils.remove(f'00.nii')
-            else:
-                LOGGER.error(f'{dir} | No FS found in 00 or 00a')
-                return
+    _zero_files = [f for f in Fils if nifti_stem(f) in ('00', '00a')]
+    if '00a' in [nifti_stem(f) for f in _zero_files] and '00' in [nifti_stem(f) for f in _zero_files]:
+        f_00   = next(f for f in _zero_files if nifti_stem(f) == '00')
+        f_00a  = next(f for f in _zero_files if nifti_stem(f) == '00a')
+        desc_00  = json.load(open(os.path.join(dir, '00.json'), 'r'))['SeriesDescription']
+        desc_00a = json.load(open(os.path.join(dir, '00a.json'), 'r'))['SeriesDescription']
+        if 'FS' in desc_00:
+            Fils.remove(f_00a)
+            LOGGER.debug(f'{dir} | FS in 00; dropping 00a')
+        elif 'FS' in desc_00a:
+            Fils.remove(f_00)
+            LOGGER.debug(f'{dir} | FS in 00a; dropping 00')
+        else:
+            LOGGER.error(f'{dir} | No FS in 00 or 00a. Aborting session.')
+            return
+    # (no other changes; 00a detection is now extension-agnostic)
 
     def _shift(niiname):
         if not no_pre_scan:
             return niiname
-        m = re.match(r'(\d+)(\.\w+)', niiname)
+        stem_base = nifti_stem(niiname)
+        m = re.match(r'^(\d+)([a-z]?)$', stem_base)
         if m:
-            nr = f'{int(m.group(1)) - 1:02d}{m.group(2)}'
-            LOGGER.warning(f'{dir} | Renaming {niiname} → {nr} to compensate for missing pre-scan')
-        return nr
+            new_num = int(m.group(1)) - 1
+            suffix  = m.group(2) or ''
+            # Re-attach the original extension by finding it on the input name
+            ext = niiname[len(stem_base):]
+            if not ext:
+                ext = '.nii.gz'
+            nr = f'{new_num:02d}{suffix}{ext}'
+            LOGGER.warning(f'{dir} | Renaming {niiname} → {nr} (pre-scan missing)')
+            return nr
+        return niiname
 
     for ii in Fils:
         _check_stop()
         shifted = _shift(ii)
         LOGGER.debug(f'{dir} | Checking if {shifted} is in {Fils_out}...')
 
-        if shifted in Fils_out:
+        if nifti_stem(shifted) in Fils_out:
             LOGGER.warning(f'{dir} | {ii} | Already processed, skipping')
             continue
         LOGGER.debug(f'{dir} | {ii} | Not processed, converting to RAS')
@@ -267,11 +269,11 @@ def RAS_convert(dir: str, save_path=SAVE_DIR):
     
         # Create a new Nifti1Image with the RAS data and updated affine
         ras_img = nib.Nifti1Image(ras_data, ras_affine)
-        out_name = shifted if no_pre_scan else ii
-        if out_name.endswith('00a.nii'):
-            out_name = out_name.replace('00a.nii', '00.nii')
-        out_name = out_name.replace('.nii', '_RAS.nii')
-        nib.save(ras_img,os.path.join(save_path,out_name))
+        out_stem = nifti_stem(shifted if no_pre_scan else ii)
+        if out_stem == '00a':
+            out_stem = '00'
+        out_name = f'{out_stem}_RAS.nii.gz'
+        nib.save(ras_img, os.path.join(save_path, out_name))
         LOGGER.debug(f'{dir} | Saving: {os.path.join(save_path,out_name)}')
     if args.dir_idx is not None:
         progress_name = f'{script_name}_{args.dir_idx}'

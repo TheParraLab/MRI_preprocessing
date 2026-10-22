@@ -1,4 +1,5 @@
 import os
+import time
 import random
 import argparse
 import pydicom as pyd
@@ -12,7 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
 import subprocess
 import threading
-from toolbox import ProgressBar, get_log_dir, get_logger
+import queue
+from toolbox import ProgressBar, get_log_dir, get_logger, resolve_dir, _terminate_executors, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti
 
 
 def _clean_timing(value):
@@ -113,36 +115,44 @@ LOGGER = get_logger('06_genInputs', LOG_DIR)
 
 # argparse configuration
 parser = argparse.ArgumentParser(description='Generate model inputs from coregistered scans')
-parser.add_argument('--load_dir', type=str, default='/FL_system/data/coreg/', help='Directory to load scans from')
-parser.add_argument('--save_dir', type=str, default='/FL_system/data/inputs/', help='Directory to save model inputs')
+parser.add_argument('--load_dir', type=str, default=None, help='Directory to load scans from (default: $COREG_DIR or /FL_system/data/coreg/)')
+parser.add_argument('--save_dir', type=str, default=None, help='Directory to save model inputs (default: $INPUTS_DIR or /FL_system/data/inputs/)')
 parser.add_argument('--test', nargs='?', type=int, const=40, help='Run in test mode, randomly sample N sessions (default: 40)')
-parser.add_argument('--parallel', action='store_true', help='Enable multiprocessing')
+parser.add_argument('--multi', action='store_true', help='Enable multiprocessing')
 parser.add_argument(
     '--ids_file', type=str, default=None,
     help='CSV/txt file containing one ID per line. If provided, only process sessions whose name appears in this file.'
 )
 args = parser.parse_args()
+args.load_dir = resolve_dir(args.load_dir, 'COREG_DIR', '/FL_system/data/coreg/')
+args.save_dir = resolve_dir(args.save_dir, 'INPUTS_DIR', '/FL_system/data/inputs/')
 
 LOAD_DIR = args.load_dir
 SAVE_DIR = args.save_dir
 DEBUG = 0
 TEST = args.test is not None
 N_TEST = args.test if TEST else 40
-PARALLEL = args.parallel
+PARALLEL = args.multi
 PROGRESS = False
 # This script is for generating the numpy files utilized for model training
 # Performs the calculation of the slope 1 (enhancement) for each scan
 # Performs the calculation of the slope 2 (washout) for each scan
 # Normalizes samples by dividing by 95th percentile of T1_01_01
+def _qput(q, item):
+    try:
+        q.put(item, timeout=1)
+    except queue.Full:
+        pass
+
 def progress_wrapper(item, target, progress_queue, *args, **kwargs):
     result = target(item, *args, **kwargs)
-    progress_queue.put((None, f'Processing'))
+    _qput(progress_queue, (None, f'Processing'))
     return result
 
 def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bool=True, *args, **kwargs) -> List[Any]:
     """Run a function with a progress bar"""
     # Initialize using a manager to allow for shared progress queue
-    progress_queue = Queue()
+    progress_queue = Queue(maxsize=4096)
     target_name = target.func.__name__ if isinstance(target, partial) else target.__name__
 
     # Debugging information
@@ -171,20 +181,43 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
             LOGGER.exception(f'{item_id} | traceback')
             result = None
             if PROGRESS:
-                progress_queue.put((None, f'Processing {item_id} FAILED'))
+                _qput(progress_queue, (None, f'Processing {item_id} FAILED'))
         return result
 
     # Run the target function with a progress bar
     if Parallel:
-        with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
+        deadline = time.monotonic() + WORKER_TIMEOUT
+        executor = ProcessPoolExecutor(max_workers=cpu_count())
+        try:
             futures = [executor.submit(target, item, *args, **kwargs) for item in items]
             results = []
             for future in futures:
                 try:
-                    results.append(future.result())
+                    results.append(future.result(timeout=max(0.1, deadline - time.monotonic())))
+                except (TimeoutError, queue.Full) as e:
+                    LOGGER.error(f'worker timed out or queue full: {e!r}')
+                    results.append(None)
                 except Exception as e:
                     LOGGER.error(f'worker raised: {e!r}')
                     results.append(None)
+                if time.monotonic() >= deadline:
+                    LOGGER.error('Global worker deadline exceeded — stopping and terminating.')
+                    break
+        finally:
+            if time.monotonic() < deadline:
+                try:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                except Exception as e:
+                    LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
+                    _terminate_executors(executor)
+            else:
+                LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                _terminate_executors(executor)
+            for _ in range(1000):
+                try:
+                    progress_queue.get_nowait()
+                except queue.Empty:
+                    break
     else:
         results = [_safe(item) for item in items]
 
@@ -231,8 +264,7 @@ def generate_slopes(SessionID):
 
     LOGGER.debug(f'Generating slopes for session: {SessionID}')
     
-    Fils = glob.glob(f'{LOAD_DIR}/{SessionID}/*.nii')
-    Fils.sort()
+    Fils = glob_nifti(f'{LOAD_DIR}/{SessionID}', '*')
     LOGGER.debug(f'{SessionID} | Files | {Fils} ')
     Data = Data_table[Data_table['SessionID'] == SessionID]
     if np.min([len(Data), len(Fils)]) < 3:

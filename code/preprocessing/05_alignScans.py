@@ -9,10 +9,12 @@ import subprocess
 import threading
 import signal
 
-from multiprocessing import Manager, cpu_count
-from toolbox import ProgressBar, get_log_dir, get_logger, run_function
-
-BASE_PATH = '/FL_system'
+from functools import partial
+from multiprocessing import cpu_count, Event
+from toolbox import (
+    ProgressBar, get_log_dir, get_logger, run_function, resolve_dir,
+    nifti_stem, is_nifti_file, glob_nifti,
+)
 
 _GPU_CHECK_INTERVAL = 10
 _gpu_calls_since_check = 0
@@ -21,11 +23,11 @@ _gpu_calls_since_check = 0
 parser = argparse.ArgumentParser(
     description='Align scans to the first post scan')
 parser.add_argument(
-    '--load_dir', type=str, default=f'{BASE_PATH}/data/RAS/',
-    help='Directory to load scans from')
+    '--load_dir', type=str, default=None,
+    help='Directory to load scans from (default: $RAS_DIR or /FL_system/data/RAS/)')
 parser.add_argument(
-    '--save_dir', type=str, default=f'{BASE_PATH}/data/coreg/',
-    help='Directory to save aligned scans')
+    '--save_dir', type=str, default=None,
+    help='Directory to save aligned scans (default: $COREG_DIR or /FL_system/data/coreg/)')
 parser.add_argument(
     '--multi', '-m', action='store_true', help='Use multiprocessing')
 parser.add_argument(
@@ -35,7 +37,7 @@ parser.add_argument(
     '--dir_list', type=str, default='dirs_to_process.txt',
     help='Path to the directory list file')
 parser.add_argument(
-    '--prune', '-p', action='store_true',
+    '--prune', action='store_true',
     help='Enable the deletion of the original scans once aligned')
 parser.add_argument(
     '--test', nargs='?', type=int, const=10,
@@ -44,7 +46,15 @@ parser.add_argument(
     '--ids_file', type=str, default=None,
     help='CSV/txt file containing one ID per line. If provided, only process directories whose name appears in this file.'
 )
+parser.add_argument(
+    '--cpus', type=int, default=0,
+    help='Cap on parallel worker processes for --multi: exactly N reg_f3d jobs '
+         'run concurrently (0 = auto: min(32, 2×(cores-1)))'
+)
 args = parser.parse_args()
+
+args.load_dir = resolve_dir(args.load_dir, 'RAS_DIR', '/FL_system/data/RAS/')
+args.save_dir = resolve_dir(args.save_dir, 'COREG_DIR', '/FL_system/data/coreg/')
 
 # Centralised log directory — resolves to /deployment/logs inside containers
 # (bound mount) or <repo>/logs for local/manual runs. See toolbox.get_log_dir().
@@ -61,8 +71,7 @@ N_TEST = args.test if TEST else 10
 PROGRESS = False
 PRUNE = args.prune
 
-manager = Manager()
-stop_flag = manager.Event()
+stop_flag = Event()
 
 
 def _check_stop():
@@ -72,10 +81,13 @@ def _check_stop():
 
 def _check_gpu_health():
     """Verify GPU is still accessible. Raises RuntimeError if not."""
-    _res = subprocess.run(
-        ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True)
+    try:
+        _res = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('nvidia-smi timed out')
     if _res.returncode != 0 or not _res.stdout.strip():
         raise RuntimeError(
             f'GPU health check failed (exit {_res.returncode}): '
@@ -95,8 +107,8 @@ def align(session_dir: str, save_dir: str):
         LOGGER.warning('Directory has trailing slash. Removing it.')
         session_dir = session_dir[:-1]
 
-    src_files = glob.glob(f'{session_dir}/*_RAS.nii')
-    src_files.sort()
+    src_files = sorted(glob.glob(f'{session_dir}/*_RAS.nii') + glob.glob(f'{session_dir}/*_RAS.nii.gz'),
+                       key=lambda p: nifti_stem(p))
     if len(src_files) < 3:
         LOGGER.error(
             f'Not enough scans in {session_dir}. '
@@ -105,9 +117,9 @@ def align(session_dir: str, save_dir: str):
 
     out_dir = os.path.join(save_dir, session_dir.split(os.sep)[-1])
 
-    # Skip if every output already exists
+    # Skip if every output already exists (output is <stem>_RAS.nii.gz)
     if all(
-        os.path.exists(os.path.join(out_dir, os.path.basename(f)))
+        os.path.exists(os.path.join(out_dir, f'{nifti_stem(f)}_RAS.nii.gz'))
         for f in src_files
     ):
         LOGGER.info(f'All files already exist, skipping: {session_dir}')
@@ -124,8 +136,9 @@ def align(session_dir: str, save_dir: str):
     session_failed = False
     for f in src_files[:1] + src_files[2:]:
         _check_stop()
-        dest = os.path.join(out_dir, os.path.basename(f)).replace('.nii', '')
-        out_file = f'{dest}.nii'
+        out_stem  = nifti_stem(f)                    # already strips _RAS
+        out_name  = f'{out_stem}_RAS.nii.gz'        # emit .nii.gz
+        out_file  = os.path.join(out_dir, out_name)
         if os.path.exists(out_file):
             LOGGER.info(
                 f'Skipping (already exists): {os.path.basename(f)}')
@@ -134,12 +147,20 @@ def align(session_dir: str, save_dir: str):
             subprocess.run(
                 ['reg_f3d', '-ref', reference, '-flo', f, '-res', out_file,
                  '-be', '0.1', '-platf', '1'],
-                check=True)
+                check=True, timeout=1800)
             LOGGER.info(f'Coregistered: {os.path.basename(f)}')
         except subprocess.CalledProcessError as e:
             LOGGER.error(
                 f'Error during coregistration of '
                 f'{os.path.basename(f)}: {e}')
+            if os.path.exists(out_file):
+                os.remove(out_file)
+            session_failed = True
+            break
+        except subprocess.TimeoutExpired:
+            LOGGER.error(
+                f'Coregistration of {os.path.basename(f)} timed out '
+                f'(exceeded 1800s). Treating session as failed.')
             if os.path.exists(out_file):
                 os.remove(out_file)
             session_failed = True
@@ -171,12 +192,15 @@ def align(session_dir: str, save_dir: str):
             LOGGER.info(f'Deleted: {out_dir}')
         return 'failed'
 
-    # Copy reference scan into output directory unchanged
-    reference_dst = os.path.join(out_dir, os.path.basename(reference))
+    # reference name may already be .nii or .nii.gz; emit as .nii.gz so
+    # downstream steps see a consistent extension.
+    reference_out_stem = nifti_stem(reference)
+    reference_dst = os.path.join(out_dir, f'{reference_out_stem}_RAS.nii.gz')
     if not os.path.exists(reference_dst):
-        subprocess.run(['cp', reference, reference_dst], check=True)
-        LOGGER.info(
-            f'Copied reference: {os.path.basename(reference)}')
+        subprocess.run(['cp', reference, reference_dst], check=True, timeout=600)
+        LOGGER.info(f'Copied reference: {reference_out_stem}_RAS.nii.gz')
+    else:
+        LOGGER.info(f'REFERENCE ALREADY PRESENT: {reference_dst}')
 
     return 'completed'
 
@@ -196,9 +220,23 @@ def _progress_updater(update_queue, progress):
             update_queue.task_done()
 
 
+def _align_wrapper(item, target, save_dir, update_queue=None):
+    """Module-level progress wrapper, picklable under any start method.
+
+    ``concurrent.futures`` pickles the submitted callable and its arguments
+    into the worker call queue, so the old nested closure raised
+    ``AttributeError: Can't pickle local object`` and failed every item in
+    process mode.  The wrapper is module-level and is bound at the
+    call site via ``functools.partial``, which is itself picklable."""
+    result = target(item, save_dir)
+    if update_queue is not None:
+        update_queue.put((None, 'Processing'))
+    return result
+
+
 def run_with_progress(
     target, items, parallel=True, P_type='process',
-    P_role='compute', save_dir: str = SAVE_DIR
+    P_role='compute', save_dir: str = SAVE_DIR, n_workers: int = 0
 ):
     """Run *target* over *items* with an optional progress bar.
 
@@ -218,19 +256,13 @@ def run_with_progress(
             daemon=True)
         updater_thread.start()
 
-    # Module-level wrapper so it is picklable for spawn mode.
-    # ``align`` already takes (session_dir, save_dir), so we just need to
-    # inject the progress marker without creating a non-picklable closure.
-    def _align_wrapper(item):
-        result = target(item, save_dir)
-        if update_queue is not None:
-            update_queue.put((None, 'Processing'))
-        return result
-
     results = run_function(
-        LOGGER, _align_wrapper, list(items),
+        LOGGER,
+        partial(_align_wrapper, target=target, save_dir=save_dir,
+                update_queue=update_queue),
+        list(items),
         Parallel=parallel, P_type=P_type, P_role=P_role,
-        stop_flag=stop_flag)
+        stop_flag=stop_flag, N_WORKERS=n_workers)
 
     if PROGRESS:
         if update_queue is not None:
@@ -250,9 +282,9 @@ if __name__ == '__main__':
         _res = subprocess.run(
             ['reg_f3d', '--version'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, check=True)
+            text=True, check=True, timeout=30)
         LOGGER.info(f'NiftyReg version: {_res.stdout.strip()}')
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
         LOGGER.error(f'Error checking NiftyReg version: {e}')
 
     # ---- Signal handler for graceful shutdown -----------------
@@ -310,10 +342,21 @@ if __name__ == '__main__':
 
     # ---- Run coregistration ----------------------------------
     try:
-        run_with_progress(align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR)
+        results = run_with_progress(
+            align, dirs, parallel=PARALLEL, save_dir=SAVE_DIR,
+            n_workers=args.cpus) or []
     except KeyboardInterrupt:
         LOGGER.info('Interrupted. Completed directories are safe to resume.')
         raise
+
+    n_aligned = sum(1 for r in results if r == 'completed')
+    n_done = sum(1 for r in results if r == 'already done')
+    n_insufficient = sum(1 for r in results if r == 'Not enough scans')
+    n_failed = sum(1 for r in results if r in ('failed', None))
+    LOGGER.info(
+        f'Run summary: {n_aligned} aligned, {n_done} already done, '
+        f'{n_insufficient} insufficient scans, {n_failed} failed '
+        f'of {len(dirs)} sessions')
 
     # ---- Prune original scans if requested --------------------
     if PRUNE:
@@ -322,7 +365,7 @@ if __name__ == '__main__':
             p = d if os.path.isabs(d) else os.path.join(LOAD_DIR, d)
             if os.path.exists(p):
                 try:
-                    subprocess.run(['rm', '-rf', p], check=True)
+                    subprocess.run(['rm', '-rf', p], check=True, timeout=120)
                     LOGGER.info(f'Deleted: {p}')
                 except Exception as e:
                     LOGGER.error(f'Error deleting directory {p}: {e}')
@@ -331,5 +374,8 @@ if __name__ == '__main__':
                     f'Directory {p} does not exist. Skipping deletion.')
 
     LOGGER.info('Completed alignScans: Step 05')
-    LOGGER.info('All files saved to coreg directory')
+    if n_failed:
+        LOGGER.warning(f'{n_failed} sessions incomplete - re-run step 05 to process them')
+    else:
+        LOGGER.info('All files saved to coreg directory')
     LOGGER.info('Exiting alignScans: Step 05')

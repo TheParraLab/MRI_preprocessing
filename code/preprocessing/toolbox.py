@@ -5,11 +5,13 @@ import fcntl
 import queue
 import atexit as _atexit
 import sys
+import multiprocessing
+import threading
 
 from typing import Callable, List, Any, Optional, Literal
 from functools import partial
 from multiprocessing import cpu_count
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait
 from logging.handlers import QueueHandler, QueueListener
 
 
@@ -115,47 +117,85 @@ def _init_child_logger(
     logger_level: int,
     file_path: str,
     formatter_str: str,
+    mp_log_queue: Optional[Any] = None,
 ) -> None:
     """Called once per spawned child process.
 
-    Installs a direct FileHandlerWithLock (no queue needed in an isolated process)."""
+    If ``mp_log_queue`` is given, attach a :class:`~logging.handlers.QueueHandler`
+    for it and route every log record through that queue.  The parent
+    process has a :func:`_drain_mp_log_to_parent` thread consuming from
+    the queue and forwarding into its own file + stream pipeline (see
+    ``get_logger``).  Worker logs therefore land in the SAME file as
+    parent logs, all written by one single thread in the parent —
+    no N-way shared-file write contention on NFS.
+
+    No ``StreamHandler`` is attached in this branch (would double-print
+    to stdout; the parent's stream handler already surfaces the record
+    once it drains from the queue).
+
+    If ``mp_log_queue`` is ``None`` (legacy / caller that didn't pass one),
+    fall back to console-only stdout for this child.
+    """
     lgr = logging.getLogger(logger_name)
     lgr.handlers.clear()
     lgr.setLevel(logger_level)
     lgr._log_level = logger_level          # so run_function can read it back.
     lgr._formatter_str = formatter_str
-    file_path_abs = os.path.abspath(file_path) if file_path else ''
-    lgr._file_path = file_path_abs
+    lgr._file_path = ''                    # child never opens its own file
 
     fmt = logging.Formatter(formatter_str)
 
-    # Empty file_path means the parent ran console-only (log dir was not
-    # writable, e.g. on a read-only SIF) — mirror that here instead of trying
-    # to open an empty path.
-    if file_path:
-        fh = FileHandlerWithLock(file_path, mode='a')
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(fmt)
-        lgr.addHandler(fh)
+    if mp_log_queue is not None:
+        qh = QueueHandler(mp_log_queue)
+        lgr.addHandler(qh)
+    else:
+        ch_stream = logging.StreamHandler()
+        ch_stream.setLevel(logging.INFO)
+        ch_stream.setFormatter(fmt)
+        lgr.addHandler(ch_stream)
 
-    ch_stream = logging.StreamHandler()
-    ch_stream.setLevel(logging.INFO)
-    ch_stream.setFormatter(fmt)
-    lgr.addHandler(ch_stream)
-
-    # Prevent every log line from double-writing via propagation to root handler
     lgr.propagate = False
 
-    # Give the root logger a handler for bare logging calls from library code.
     root = logging.getLogger()
     if not root.handlers:
-        if file_path:
-            root_fh = FileHandlerWithLock(file_path, mode='a')
+        if mp_log_queue is not None:
+            root.addHandler(QueueHandler(mp_log_queue))
         else:
             root_fh = logging.StreamHandler()
-        root_fh.setLevel(logger_level)
-        root_fh.setFormatter(fmt)
-        root.addHandler(root_fh)
+            root_fh.setLevel(logger_level)
+            root_fh.setFormatter(fmt)
+            root.addHandler(root_fh)
+
+
+def _drain_mp_log_to_parent(mp_q: Any, parent_logger: Any, stop_event: Any) -> None:
+    """Thread target. Runs in the PARENT process.
+
+    Drains a ``multiprocessing.Queue`` of ``logging.LogRecord`` objects
+    (put there by workers via ``QueueHandler``) and forwards each record
+    into the parent logger's normal pipeline.  The parent already owns
+    the file handler and ``QueueListener`` (see ``get_logger``), so
+    forwarding via ``parent_logger.handle(record)`` ultimately writes to
+    the SAME single log file the parent's own records use.
+
+    Runs until ``stop_event`` is set AND the queue is drained (any
+    records that were already queued still get processed — no silent
+    log loss on shutdown).
+    """
+    while True:
+        try:
+            record = mp_q.get(timeout=0.25)
+        except queue.Empty:
+            if stop_event is not None and stop_event.is_set():
+                break
+            continue
+        except (EOFError, OSError) as _e:
+            # Queue closed / pipe dead — normal on shutdown
+            break
+        try:
+            parent_logger.handle(record)
+        except Exception:
+            # Never let a broken log record drop the whole drain
+            pass
 
 
 # ---- Hybrid chunk worker (module-level so it is picklable) -----------
@@ -258,7 +298,72 @@ class _LoggerProxy(logging.Logger):
             object.__getattribute__(self, '_wrapped').__setattr__(name, value)
 
 
+# ---- NIfTI name helpers (shared across 03/04/05/06) -------------------
+# NIfTI files are `.nii` or `.nii.gz`. dcm2niix emits plain `.nii` but
+# we now pass `-z y` so it emits `.nii.gz`.  nibabel is transparent to
+# either.  These helpers give every pipeline step one source of truth
+# for name comparisons so `.nii` / `.nii.gz` / `00a.nii` / `00a.nii.gz`
+# all collapse to the same stem ('00', '01', '00a', ...).
+def nifti_stem(path: str) -> str:
+    """Reduce a NIfTI basename to its stem: '01.nii'->'01',
+    '05.nii.gz'->'05', '00a.nii'->'00a', '00a.nii.gz'->'00a'.
+    Also strips a `_RAS` suffix so '01_RAS.nii.gz'->'01'.
+    """
+    name = os.path.basename(path)
+    for suffix in ('.nii.gz', '.nii'):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    if name.endswith('_RAS'):
+        name = name[:-4]
+    return name
+
+
+def is_nifti_file(name: str) -> bool:
+    """True if *name* is a NIfTI file (`.nii` or `.nii.gz`)."""
+    b = os.path.basename(name)
+    return b.endswith('.nii') or b.endswith('.nii.gz')
+
+
+def glob_nifti(directory: str, pattern: str = '*') -> list:
+    """Glob NIfTI files in *directory* matching *pattern* (prefix of stem).
+    Returns an absolute sorted list of paths.  Matches both `.nii` and
+    `.nii.gz`.  Example: glob_nifti(d, '*.nii') is the legacy call;
+    glob_nifti(d, '*') returns every NIfTI in the directory.
+    """
+    import glob as _glob
+    cands = (
+        _glob.glob(os.path.join(directory, pattern + '.nii')) +
+        _glob.glob(os.path.join(directory, pattern + '.nii.gz'))
+    )
+    # de-dup (in case pattern is already '*.nii' etc.) and sort by stem
+    uniq = sorted({os.path.realpath(p) for p in cands}, key=lambda p: (nifti_stem(p), p))
+    return uniq
+
+
 # ---- Public API ------------------------------------------------------------
+
+def resolve_dir(flag_value: Optional[str], env_name: str, default: str) -> str:
+    """Resolve a deployment directory path.
+
+    Order (first non-empty value wins):
+      1. ``flag_value``  — an explicit CLI argument for that directory.
+      2. ``env_name``    — an environment variable set by the launcher
+         (e.g. ``RAW_DIR``, ``NIFTI_DIR``); on a native Conda HPC run the
+         launcher exports the host-local path, while inside a container the
+         variable is left unset so the container default applies.
+      3. ``default``     — the container-stable path (``/FL_system/data/...``).
+
+    Returns the path verbatim (trailing-slash handling is left to the caller).
+    Empty strings are treated as "not provided".
+    """
+    if flag_value:
+        return flag_value
+    env_val = os.environ.get(env_name, '').strip()
+    if env_val:
+        return env_val
+    return default
+
 
 def get_log_dir() -> str:
     """Centralised log directory for the current deployment.
@@ -270,11 +375,8 @@ def get_log_dir() -> str:
       2. Fallback for manual/local runs: ``<repo_root>/logs`` so that log
          creation never requires write access to the filesystem root.
     """
-    env_log_dir = os.environ.get('LOG_DIR', '').strip()
-    if env_log_dir:
-        return env_log_dir
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(repo_root, 'logs')
+    return resolve_dir(None, 'LOG_DIR', os.path.join(repo_root, 'logs'))
 
 
 def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
@@ -414,12 +516,155 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
 
 # ---- Parallel runner -------------------------------------------------------
 
+# Max seconds to wait for workers before force-terminating. Override per run via env MRI_WORKER_TIMEOUT.
+import os as _os
+WORKER_TIMEOUT = float(_os.environ.get('MRI_WORKER_TIMEOUT', '1800'))
+
+# Seconds of zero completed futures before the parent logs a per-worker /proc stall diagnostic.
+# Sized above a single 05_alignScans item (up to 4 reg_f3d scans, ~4-10 min under GPU
+# contention) so healthy parallel runs do not trip the diagnostic. Keep < WORKER_TIMEOUT.
+STALL_TIMEOUT = float(_os.environ.get('MRI_STALL_TIMEOUT', '900'))
+
+# Container-local (non-NFS) fallback file for the stall dump: the main log file
+# is on an NFS mount and can itself block, which would swallow the diagnostic.
+STALL_DUMP_FILE = _os.environ.get('MRI_STALL_DUMP_FILE', '/tmp/mri_stall_diagnostic.log')
+
+
+def _terminate_executors(*executors) -> None:
+    import signal, logging
+    _log = logging.getLogger(__name__)
+    for ex in executors:
+        procs = getattr(ex, '_processes', None)
+        if procs:
+            for p in list(procs.values()):
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            for p in list(procs.values()):
+                try:
+                    p.join(timeout=3)
+                    if p.is_alive():
+                        p.kill()
+                except Exception:
+                    pass
+        try:
+            ex.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:
+            _log.warning(f'Failed to shut down executor gracefully: {e!r}')
+
+
+def _worker_stall_diagnostic(pid: int) -> dict:
+    """Best-effort /proc snapshot of one worker process (Linux; no ptrace)."""
+    info: dict = {'state': '?', 'wchan': '?', 'io': {}, 'open_files': []}
+    try:
+        with open(f'/proc/{pid}/stat', 'rb') as f:
+            data = f.read()
+        info['state'] = data.split(b')', 1)[1].split()[0].decode('ascii', 'replace')
+    except (OSError, IndexError, UnicodeDecodeError):
+        pass
+    try:
+        with open(f'/proc/{pid}/wchan', 'r') as f:
+            info['wchan'] = f.read().strip() or '-'
+    except OSError:
+        pass
+    try:
+        with open(f'/proc/{pid}/io', 'r') as f:
+            for line in f:
+                if line.startswith(('read_bytes:', 'write_bytes:')):
+                    key, val = line.split(':', 1)
+                    info['io'][key] = int(val.strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        for fd in sorted(os.listdir(f'/proc/{pid}/fd')):
+            try:
+                tgt = os.readlink(f'/proc/{pid}/fd/{fd}')
+            except OSError:
+                continue
+            if tgt.startswith('/'):
+                info['open_files'].append(tgt)
+    except OSError:
+        pass
+    return info
+
+
+def _log_worker_stall_diagnostic(executor: Any, stalled_secs: float, LOGGER: Any) -> None:
+    """Log one /proc line per worker so a stall is diagnosable from the log alone.
+
+    Fans out to three channels because the main log file sits on an NFS mount
+    and the parent's QueueListener can block on it, swallowing LOGGER output:
+    (1) the normal logger, (2) stdout directly, (3) a container-local file.
+    """
+    lines = [f'Workers stalled for {int(stalled_secs)}s with no completed items — dumping per-worker /proc state:']
+    procs = getattr(executor, '_processes', None)
+    if not procs:
+        lines.append('  (no worker pids found on executor._processes)')
+    else:
+        for pid, _proc in sorted(procs.items()):
+            info = _worker_stall_diagnostic(pid)
+            files = info['open_files']
+            shown = files[:15]
+            if len(files) > 15:
+                shown = shown + [f'... (+{len(files) - 15} more)']
+            lines.append(
+                f'  worker pid={pid}: state={info["state"]} wchan={info["wchan"]} '
+                f'io={info["io"]} open_files={shown}'
+            )
+    for line in lines:
+        LOGGER.warning(line)
+    for line in lines:
+        print(line, flush=True)
+    try:
+        with open(STALL_DUMP_FILE, 'a', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+            f.flush()
+    except OSError:
+        pass
+
+
+def _collect_future_map(future_map, deadline, LOGGER, executor: Any = None):
+    pending = dict(future_map)
+    ordered = [None] * len(future_map)
+    last_progress = time.monotonic()
+    last_dump = 0.0
+    while pending:
+        remaining = max(0.0, deadline - time.monotonic())
+        remap = dict()
+        done, not_done = wait(list(pending.keys()), timeout=min(5.0, remaining if remaining > 0 else 0.0))
+        for fut in done:
+            idx = future_map[fut]
+            try:
+                ordered[idx] = fut.result(timeout=0.1)
+            except Exception as e:
+                LOGGER.error(f'Error processing item {idx}: {e}', exc_info=True)
+                ordered[idx] = None
+            pending.pop(fut, None)
+            last_progress = time.monotonic()
+        now = time.monotonic()
+        if executor is not None and pending and now - last_progress >= STALL_TIMEOUT and now - last_dump >= STALL_TIMEOUT:
+            last_dump = now
+            _log_worker_stall_diagnostic(executor, now - last_progress, LOGGER)
+        if now >= deadline:
+            break
+    for fut in list(pending.keys()):
+        idx = future_map[fut]
+        pending.pop(fut, None)
+        if ordered[idx] is None:
+            LOGGER.error(f'Item {idx} timed out (worker exceeded deadline) and was cancelled.')
+        try:
+            fut.cancel()
+        except Exception:
+            pass
+    return ordered
+
+
 def run_function(
     LOGGER: Any,                          # can be a Logger or _LoggerProxy
     target: Callable[..., Any], items: List[Any],
     Parallel: bool = True, P_type: str = 'thread', N_CPUS: int = 0, N_THREADS: int = 0,
     P_role: Literal['io', 'compute'] | None = None,
-    stop_flag: Optional[object] = None, *args: Any, **kwargs: Any,
+    stop_flag: Optional[object] = None, N_WORKERS: int = 0, *args: Any, **kwargs: Any,
 ) -> List[Any]:
     """Run a function over *items* in parallel or sequentially.
 
@@ -440,6 +685,9 @@ def run_function(
         P_role (str | None): ``'io'`` for I/O-bound workloads, ``'compute'`` for CPU-bound.
             I/O-bound: caps workers at min(8, cpu_count()-1) or half the available cores on larger machines.
             Compute-bound: uses full core capacity.  None falls back to legacy behavior.
+        N_WORKERS (int): Exact process-pool size for P_type='process'. 0 keeps the
+            existing auto-size (min(32, 2 × effective N_CPUS)). When >0 the pool
+            is exactly min(32, N_WORKERS) processes.
 
     Returns:
         List[Any]: Results in the same order as *items*.  If every result is a tuple,
@@ -462,76 +710,91 @@ def run_function(
     LOGGER.debug(f'Number of items: {len(items)}')
 
     results: List[Any] = []
+
+    # Cross-process log routing: workers push records to _mp_q;
+    # parent drain thread forwards them into the logger's file+stream pipeline.
+    _use_mp_q = Parallel and P_type in ('process', 'hybrid')
+    _mp_q: Optional[multiprocessing.SimpleQueue | multiprocessing.Queue] = None
+    _mp_q_thread: Optional[threading.Thread] = None
+    _mp_q_stop: Optional[threading.Event] = None
+    if _use_mp_q:
+        _mp_q = multiprocessing.Queue(maxsize=10000)
+        _mp_q_stop = threading.Event()
+        _mp_q_thread = threading.Thread(
+            target=_drain_mp_log_to_parent,
+            args=(_mp_q, LOGGER, _mp_q_stop),
+            daemon=False,
+        )
+        _mp_q_thread.start()
+
     try:
+        deadline = time.monotonic() + WORKER_TIMEOUT
+
         # ───────── process mode ─────────
         if Parallel and P_type == 'process':
             effective = _effective_workers(N_CPUS, role=P_role)
-            max_workers = min(32, 2 * effective)
+            max_workers = min(32, N_WORKERS) if N_WORKERS > 0 else min(32, 2 * effective)
             LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             init_args = (LOGGER.name, LOGGER._log_level,
-                         LOGGER._file_path, LOGGER._formatter_str)
-
-            with ProcessPoolExecutor(max_workers=max_workers,
-                                     initializer=_init_child_logger,
-                                     initargs=init_args) as executor:
+                         LOGGER._file_path, LOGGER._formatter_str,
+                         _mp_q)
+            executor = ProcessPoolExecutor(max_workers=max_workers,
+                                           initializer=_init_child_logger,
+                                           initargs=init_args)
+            try:
                 future_map = {executor.submit(_process_worker, target, item, *args, **kwargs): i
                               for i, item in enumerate(items)}
-                ordered: List[Optional[Any]] = [None] * len(future_map)
-
-                try:
-                    for fut in as_completed(future_map):
-                        idx = future_map.pop(fut)
-                        if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
-                            LOGGER.info('Stopping parallel processing (stop flag).')
-                            break
-                        try:
-                            result = fut.result()         # fast path for already-completed work
-                            ordered[idx] = result
-                            LOGGER.debug(f'Future {idx} completed successfully')
-                        except Exception as e:
-                            LOGGER.error(
-                                f'Error parallel processing item {idx}: {e}', exc_info=True)
-                            ordered[idx] = None
-                except KeyboardInterrupt:
-                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                    for remaining_fut in list(future_map.keys()):
-                        remaining_fut.cancel()
-                    executor.shutdown(wait=True, cancel_futures=True)
-                    raise
-
+                ordered = _collect_future_map(future_map, deadline, LOGGER, executor=executor)
                 results = list(ordered)
+            except KeyboardInterrupt:
+                LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
+                _terminate_executors(executor)
+                raise
+            finally:
+                if time.monotonic() < deadline:
+                    try:
+                        executor.shutdown(wait=True, cancel_futures=True)
+                    except Exception as e:
+                        LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
+                        _terminate_executors(executor)
+                else:
+                    LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                    _terminate_executors(executor)
+            # Tear down mp log queue: signal stop, wait for drain, close pipe
+            if _use_mp_q and _mp_q is not None:
+                _mp_q_stop.set()
+                _mp_q_thread.join(timeout=5)
+                try:
+                    _mp_q.close()
+                    _mp_q.join_thread()
+                except Exception:
+                    pass
 
         # ───────── thread mode ────────────────
         elif Parallel and P_type == 'thread':
             effective = _effective_workers(N_CPUS, role=P_role)
             max_workers = min(32, 2 * effective)
             LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 future_map = {executor.submit(target, item, *args, **kwargs): i
                               for i, item in enumerate(items)}
-                ordered = [None] * len(future_map)
-
-                try:
-                    for fut in as_completed(future_map):
-                        idx = future_map.pop(fut)
-                        if stop_flag and getattr(stop_flag, 'is_set', lambda: False)():
-                            LOGGER.info('Stopping parallel processing (stop flag).')
-                            break
-                        try:
-                            result = fut.result()
-                            ordered[idx] = result
-                            LOGGER.debug(f'Future {idx} completed successfully')
-                        except Exception as e:
-                            LOGGER.error(f'Error parallel processing item {idx}: {e}', exc_info=True)
-                            ordered[idx] = None
-                except KeyboardInterrupt:
-                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                    for remaining_fut in list(future_map.keys()):
-                        remaining_fut.cancel()
-                    executor.shutdown(wait=True, cancel_futures=True)
-                    raise
-
+                ordered = _collect_future_map(future_map, deadline, LOGGER)
                 results = list(ordered)
+            except KeyboardInterrupt:
+                LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
+                _terminate_executors(executor)
+                raise
+            finally:
+                if time.monotonic() < deadline:
+                    try:
+                        executor.shutdown(wait=True, cancel_futures=True)
+                    except Exception as e:
+                        LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
+                        _terminate_executors(executor)
+                else:
+                    LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                    _terminate_executors(executor)
 
         # ───────── hybrid: processes chunk + threads reuse I/O per-chunk ────
         elif Parallel and P_type == 'hybrid':
@@ -543,9 +806,8 @@ def run_function(
             LOGGER.debug(f'Using {P_type}: ~{max_workers} process workers, ~{threads_per_worker} threads each')
 
             init_args = (LOGGER.name, LOGGER._log_level,
-                         LOGGER._file_path, LOGGER._formatter_str)
-
-
+                         LOGGER._file_path, LOGGER._formatter_str,
+                         _mp_q)
 
             # Create evenly-sized chunks and track global indices in parent.
             n_workers = min(max_workers, len(items)) if items else 0
@@ -559,39 +821,55 @@ def run_function(
 
             results: List[Optional[Any]] = [None] * len(items)
 
-            with ProcessPoolExecutor(
-                max_workers=max_workers,
-                initializer=_init_child_logger,
-                initargs=init_args,
-            ) as pexecutor:
-                future_to_chunk = {
-                    pexecutor.submit(_chunk_target, start, chunk, target, args, kwargs,
-                                     threads_per_worker): (start, end)
-                    for start, chunk in workers
-                }
-
+            if workers:
+                pexecutor = ProcessPoolExecutor(
+                    max_workers=max_workers,
+                    initializer=_init_child_logger,
+                    initargs=init_args,
+                )
                 try:
-                    for fut in as_completed(future_to_chunk):
-                        idx_range = future_to_chunk.pop(fut)
-                        try:
-                            global_start, ordered_list = fut.result()
-                            if not isinstance(ordered_list, list):
-                                ordered_list = list(ordered_list)
-                            for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
-                                               ordered_list):
-                                if k < len(results):
-                                    results[k] = val
-                        except Exception as e:
-                            root = logging.getLogger()
-                            root.error(f'Hybrid worker error at chunk {idx_range}: {e}', exc_info=True)
+                    futures = [
+                        pexecutor.submit(_chunk_target, start, chunk, target, args, kwargs,
+                                         threads_per_worker)
+                        for start, chunk in workers
+                    ]
+                    chunk_meta = [(start, start + len(chunk)) for start, chunk in workers]
+                    future_map = dict(zip(futures, range(len(futures))))
+                    ordered = _collect_future_map(future_map, deadline, LOGGER, executor=pexecutor)
+                    for (global_start, end_pos), chunk_result in zip(chunk_meta, ordered):
+                        if not chunk_result:
+                            continue
+                        global_start, ordered_list = chunk_result
+                        if not isinstance(ordered_list, list):
+                            ordered_list = list(ordered_list)
+                        for k, val in zip(range(global_start, min(global_start + len(ordered_list), len(results))),
+                                         ordered_list):
+                            if k < len(results):
+                                results[k] = val
                 except KeyboardInterrupt:
-                    LOGGER.info('KeyboardInterrupt received. Letting in-flight workers complete, cancelling queued...')
-                    for remaining_fut in list(future_to_chunk.keys()):
-                        remaining_fut.cancel()
-                    pexecutor.shutdown(wait=True, cancel_futures=True)
+                    LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
+                    _terminate_executors(pexecutor)
                     raise
+                finally:
+                    if time.monotonic() < deadline:
+                        try:
+                            pexecutor.shutdown(wait=True, cancel_futures=True)
+                        except Exception as e:
+                            LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
+                            _terminate_executors(pexecutor)
+                    else:
+                        LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                        _terminate_executors(pexecutor)
+            if _use_mp_q and _mp_q is not None:
+                _mp_q_stop.set()
+                _mp_q_thread.join(timeout=5)
+                try:
+                    _mp_q.close()
+                    _mp_q.join_thread()
+                except Exception:
+                    pass
 
-                results = list(results)
+            results = list(results)
 
         # ───────── fallback serial ─────────────
         else:

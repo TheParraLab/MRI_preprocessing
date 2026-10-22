@@ -18,7 +18,8 @@ Usage:
 Arguments:
     --save_dir (str): Directory to save output tables and logs.
     --load_table (str): Path to the input Data_table.csv from Step 01.
-    --multi (int): Enable multiprocessing with specified CPU count (default: max-1).
+    --multi: enable in-script multiprocessing.
+    --cpus (int): cap worker count (default: cores - 1).
     --filter-only: Run only the filtering step, skip ordering.
     --force: Overwrite existing output files without prompting.
     --profile: Enable yappi profiling.
@@ -58,7 +59,7 @@ except ImportError:
     yappi = None
 
 # Custom imports
-from toolbox import get_log_dir, get_logger, run_function
+from toolbox import get_log_dir, get_logger, run_function, resolve_dir
 from DICOM import DICOMfilter, DICOMorder, DICOMsplit, classify_fs_series
 
 # Centralised log directory — resolves to /deployment/logs inside containers
@@ -105,12 +106,10 @@ class ParseConfig:
 def build_config() -> ParseConfig:
     """Parse CLI arguments and return a ParseConfig instance."""
     parser = argparse.ArgumentParser(description='Parse DICOM data: filter, split, and order scans')
-    parser.add_argument('--multi', '-m', action='store_true',
-                        help='DEPRECATED — ignored. Multiprocessing is currently disabled.')
-    parser.add_argument('--save_dir', type=str, default='/FL_system/data/',
-                        help='Directory to save the updated tables (default: /FL_system/data/)')
-    parser.add_argument('--load_table', type=str, default='/FL_system/data/Data_table.csv',
-                        help='Path to the input Data_table.csv (default: /FL_system/data/Data_table.csv)')
+    parser.add_argument('--save_dir', type=str, default=None,
+                        help='Directory to save the updated tables (default: $DATA_DIR or /FL_system/data/)')
+    parser.add_argument('--load_table', type=str, default=None,
+                        help='Path to the input Data_table.csv (default: <$DATA_DIR>/Data_table.csv)')
     parser.add_argument('--dir_idx', type=int,
                         help='Index of the folder to process from dirs_to_process.txt (for HPC array jobs)')
     parser.add_argument('--dir_list', type=str, default='dirs_to_process.txt',
@@ -129,7 +128,18 @@ def build_config() -> ParseConfig:
                         help='Minimum free disk space in GB to proceed (default: 50)')
     parser.add_argument('--fully_removed', action='store_true',
                         help='Export fully removed sessions')
+    parser.add_argument('--multi', action='store_true',
+                        help='Enable in-script multiprocessing (default off).')
+    parser.add_argument('--cpus', type=int, default=None,
+                        help='Cap worker count (0 or unset = all cores - 1).')
     args = parser.parse_args()
+
+    args.save_dir = resolve_dir(args.save_dir, 'DATA_DIR', '/FL_system/data/')
+    if args.cpus is None:
+        from multiprocessing import cpu_count as _cpu
+        args.cpus = max(1, _cpu() - 1)
+    if args.load_table is None:
+        args.load_table = args.save_dir.rstrip('/') + '/Data_table.csv'
 
     cfg = ParseConfig(
         save_dir=args.save_dir,
@@ -138,8 +148,8 @@ def build_config() -> ParseConfig:
         dir_idx=args.dir_idx,
         filter_only=args.filter_only,
         force=args.force,
-        parallel=False,
-        n_cpus=0,
+        parallel=args.multi,
+        n_cpus=args.cpus,
         profile=args.profile,
         resume=args.resume,
         filter_batch_size=args.batch_size,
@@ -897,6 +907,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 batch_results, batch_removed, batch_temp_rels = run_function(
                     logger, filter_fn, batch,
                     Parallel=cfg.parallel, P_type='process',
+                    N_CPUS=cfg.n_cpus,
                 )
 
                 batch_results = [df for df in batch_results if not df.empty]
@@ -994,7 +1005,8 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
         os.makedirs(os.path.join(LOG_DIR, 'removal_log'), exist_ok=True)
         save_fn = functools.partial(_save_removal_worker, save_dir=cfg.save_dir, log_dir=LOG_DIR)
         run_function(logger, save_fn, list(removed_tables.items()),
-                    Parallel=cfg.parallel, P_type='process')
+                    Parallel=cfg.parallel, P_type='process',
+                    N_CPUS=cfg.n_cpus)
 
         if cfg.export_fully_removed:
             logger.info('Compiling fully removed sessions...')
@@ -1071,6 +1083,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 batch_results, batch_removed, batch_redirects = run_function(
                     logger, split_fn, batch,
                     Parallel=cfg.parallel, P_type='process',
+                    N_CPUS=cfg.n_cpus,
                 )
 
                 batch_results = [df for df in batch_results if not df.empty]
@@ -1237,6 +1250,7 @@ def main(cfg: ParseConfig, logger: logging.Logger) -> None:
                 new_ordered, new_removed = run_function(
                     logger, order_fn, batch,
                     Parallel=cfg.parallel, P_type='process',
+                    N_CPUS=cfg.n_cpus,
                 )
                 order_results.extend(new_ordered)
                 order_removed.extend(new_removed)

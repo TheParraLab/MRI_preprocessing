@@ -38,18 +38,44 @@ echo "│ MRI Preprocessing — Conda Pipeline                   │"
 echo "└─────────────────────────────────────────────────────┘"
 echo ""
 
-echo "Please enter the raw DICOM data path:"
-read -r DATA_DIRECTORY_PATH
+echo "Please enter the RAW DICOM input path:"
+read -r RAW_DIR
 
-echo "Please enter the NIfTI output path:"  
-read -r NIFTI_DIRECTORY_PATH
+echo "Please enter the base OUTPUT directory (where the pipeline writes all derived subdirectories, e.g. nifti/, RAS/, coreg/, inputs/):"
+read -r DATA_DIR
 
-PROJECT_DIRECTORY_PATH="${SCRIPT_DIR}"
+# Sanity: ensure we got absolute-ish paths (warn if empty)
+if [[ -z "${RAW_DIR}" || -z "${DATA_DIR}" ]]; then
+    echo "ERROR: RAW_DIR and DATA_DIR must both be set."
+    exit 1
+fi
 
-# ── Export env vars for all pipeline scripts ──────────────────────
-export PROJECT_DIRECTORY_PATH
-export DATA_DIRECTORY_PATH
-export NIFTI_DIRECTORY_PATH
+# ── Export the pipeline contract (env vars read by code/preprocessing/0[1-6]*) ─
+#   Order of resolution inside the pipeline: explicit flag > env var > container-default.
+#   On a native Conda run the container-default (/FL_system/data) is NOT present, so
+#   the env vars MUST be set here to the host-local directories the user gave.
+NIFTI_DIR="${DATA_DIR%/}/nifti/"
+RAS_DIR="${DATA_DIR%/}/RAS/"
+COREG_DIR="${DATA_DIR%/}/coreg/"
+INPUTS_DIR="${DATA_DIR%/}/inputs/"
+
+export DATA_DIR
+export RAW_DIR
+export NIFTI_DIR
+export RAS_DIR
+export COREG_DIR
+export INPUTS_DIR
+export LOG_DIR="${DATA_DIR%/}/logs"    # pipeline log dir; override for a different location
+
+echo "Pipeline contract for this run:"
+echo "  DATA_DIR   = ${DATA_DIR}"
+echo "  RAW_DIR    = ${RAW_DIR}"
+echo "  NIFTI_DIR  = ${NIFTI_DIR}"
+echo "  RAS_DIR    = ${RAS_DIR}"
+echo "  COREG_DIR  = ${COREG_DIR}"
+echo "  INPUTS_DIR = ${INPUTS_DIR}"
+echo "  LOG_DIR    = ${LOG_DIR}"
+echo ""
 
 # ── Check for existing conda env ──────────────────────────────────
 CONDAPATH=""
@@ -125,8 +151,7 @@ echo "Pipeline ready. Run from project root:"
 echo "  bash code/preprocessing/00_preprocess.sh"
 echo "──────────────────────────────────────────────────────────"
 
-# Run the pipeline directly
-    cd "${PROJECT_DIRECTORY_PATH}"
-    bash code/preprocessing/00_preprocess.sh \
-      --scan-dir "${DATA_DIRECTORY_PATH}" \
-      --save-dir "${DATA_DIRECTORY_PATH}"
+# Run the pipeline.  00_preprocess.sh takes NO path args; all steps resolve
+# their dirs from the exported contract env vars (see above) → flag → default.
+cd "${SCRIPT_DIR}"
+bash code/preprocessing/00_preprocess.sh
