@@ -62,6 +62,11 @@ DCM2NIIX_TIMEOUT = args.dcm2niix_timeout
 # treated as "disk/source unavailable" instead of stalling the whole pool.
 CHECK_TIMEOUT = float(os.environ.get('MRI_CHECK_TIMEOUT', '15'))
 stop_flag = Event()
+# Results salvaged from an interrupted parallel phase (drained from already-done
+# futures when SIGINT hits). Pruned from the remaining-commands bookkeeping
+# before the checkpoint is saved, so a Ctrl-C checkpoint reflects only the
+# work that did not complete. See run_with_progress + the SIGINT handler.
+_interrupt_salvage = []
 
 #### Preprocessing | Step 3: Save Nifti Files ####
 # This script is for generating the nifti files for the selected scans
@@ -287,7 +292,22 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
             ordered = _collect_future_map(future_map, deadline, LOGGER, executor=executor)
             results = [r for r in ordered if r is not None]
         except KeyboardInterrupt:
-            LOGGER.info('Interrupted. Terminating workers...')
+            LOGGER.info('Interrupted. Salvaging completed items, terminating workers...')
+            # Done futures already hold their results in the parent's queue —
+            # draining them is in-memory (no NFS), so it does not delay exit.
+            # Anything still running is killed and its (possibly partial)
+            # output re-validated on resume via run_cmd's existing-file check.
+            # (future_map may be unbound if the interrupt lands mid-submit.)
+            fmap = locals().get('future_map', {})
+            for fut in fmap:
+                if fut.done():
+                    try:
+                        _interrupt_salvage.append(fut.result())
+                    except Exception:
+                        pass
+            LOGGER.info(f'[SIGINT] Salvaged {len(_interrupt_salvage)} already-completed '
+                        f'item(s) from the in-flight phase; {len(fmap) - len(_interrupt_salvage)} '
+                        f'killed in flight (remain for resume re-validation)')
             _terminate_executors(executor)
             raise
         finally:
@@ -697,7 +717,8 @@ def audit_nifti_directory():
     return clean
 
 def handle_keyboard_interrupt(signum, frame):
-    LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will complete, queued ones cancelled...')
+    LOGGER.info('[SIGINT] Keyboard interrupt received. In-flight sessions will be abandoned '
+                '(their partial output is validated/overwritten on resume); queued ones cancelled...')
     raise KeyboardInterrupt('Interrupted')
 
 if __name__ == '__main__':
@@ -822,6 +843,13 @@ if __name__ == '__main__':
         # re-scanning every produced file. (The stop-flag branch above already
         # checkpoints; this covers the interrupt path, which previously
         # exited the script before save_progress() could run.)
+        # Prune the salvage from the in-flight phase first: without this the
+        # checkpoint saves the unpruned phase list and the next run re-scans
+        # (and re-validates) every item that already completed before the
+        # interrupt.
+        if _interrupt_salvage:
+            _remove_completed(commands, _interrupt_salvage, 'SIGINT-salvage')
+            _interrupt_salvage.clear()
         LOGGER.warning(f'[SIGINT] Saving checkpoint with {len(commands)} remaining commands before exit')
         try:
             save_progress(list(commands))
