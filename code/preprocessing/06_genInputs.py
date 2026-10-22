@@ -352,6 +352,13 @@ def generate_slopes(SessionID):
     p95 = float(np.percentile(data0,95))
     LOGGER.debug(f'{SessionID} | 95% | {p95}')
 
+    # Write the raw pre (NaN->0, float32) into Input/: the detection dataloader
+    # (published load_and_preprocess) needs the per-session pre on disk to
+    # compute its p95 reference; it silently skips normalization if absent.
+    # Written raw (no /p95) to match the 06 raw-output convention.
+    nib.save(nib.Nifti1Image(data0.astype("float32"), img.affine), SAVE_DIR + f"/{SessionID}/pre.nii")
+    LOGGER.debug(f"{SessionID} | Saved pre (raw)")
+
     header = img.header.copy()
     header['datatype'] = 16 # 32-bit float
     header['scl_slope'] = 1
