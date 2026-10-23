@@ -516,13 +516,19 @@ def get_logger(name: str, save_dir: str = '') -> _LoggerProxy:
 
 # ---- Parallel runner -------------------------------------------------------
 
-# Max seconds to wait for workers before force-terminating. Override per run via env MRI_WORKER_TIMEOUT.
+# Per-item timeout (seconds): a single in-flight future older than this is
+# cancelled and its slot released, so a slow or hung call can no longer cap the
+# whole run. (The previous MRI_WORKER_TIMEOUT was a *global* deadline that
+# force-terminated the entire pool — removed; the name is still honoured below
+# as a fallback so existing launch configs keep working.) Override via MRI_ITEM_TIMEOUT.
 import os as _os
-WORKER_TIMEOUT = float(_os.environ.get('MRI_WORKER_TIMEOUT', '1800'))
+ITEM_TIMEOUT = float(_os.environ.get('MRI_ITEM_TIMEOUT',
+                                     _os.environ.get('MRI_WORKER_TIMEOUT', '1800')))
+WORKER_TIMEOUT = ITEM_TIMEOUT   # backward-compat alias
 
 # Seconds of zero completed futures before the parent logs a per-worker /proc stall diagnostic.
 # Sized above a single 05_alignScans item (up to 4 reg_f3d scans, ~4-10 min under GPU
-# contention) so healthy parallel runs do not trip the diagnostic. Keep < WORKER_TIMEOUT.
+# contention) so healthy parallel runs do not trip the diagnostic.
 STALL_TIMEOUT = float(_os.environ.get('MRI_STALL_TIMEOUT', '900'))
 
 # Container-local (non-NFS) fallback file for the stall dump: the main log file
@@ -623,40 +629,102 @@ def _log_worker_stall_diagnostic(executor: Any, stalled_secs: float, LOGGER: Any
         pass
 
 
-def _collect_future_map(future_map, deadline, LOGGER, executor: Any = None):
-    pending = dict(future_map)
-    ordered = [None] * len(future_map)
+def _shutdown_bounded(executor: Any, timeout: float = 60.0) -> None:
+    """``executor.shutdown(wait=True)`` with a backstop: if a worker is hung
+    (a runaway item that outlived its per-item timeout), SIGTERM the pool's
+    children after ``timeout`` seconds instead of blocking the parent forever."""
+    t = threading.Thread(target=executor.shutdown,
+                         kwargs={'wait': True, 'cancel_futures': True},
+                         daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        _terminate_executors(executor)
+
+
+def _run_windowed(submit_one: Callable[[int], Any], n_items: int, max_window: int,
+                  LOGGER: Any, executor: Any = None,
+                  per_deadline: Optional[float] = None,
+                  deadline_of: Optional[Callable[[int], float]] = None) -> List[Optional[Any]]:
+    """Collect per-item results with a *per-item* timeout and a bounded
+    in-flight window.
+
+    submit_one(item_index) -> concurrent.futures.Future (or None to skip).
+
+    Semantics (replaces the old global-deadline collector):
+      - No global deadline: the run ends only when every item has completed or
+        individually timed out — one slow call can no longer cancel the rest.
+      - Per-item timeout: a future in flight longer than ``per_deadline``
+        (default ITEM_TIMEOUT; ``deadline_of(idx)`` for chunked modes) is
+        cancelled, logged, and recorded as None.
+      - Bounded window (at most max_window in flight): queue time is ~0 so a
+        future's age ~ its actual run time, and memory stays flat on 10k+
+        item lists.
+    Returns a list of length n_items; None where the item failed or timed out.
+    """
+    results: List[Optional[Any]] = [None] * n_items
+    if n_items == 0:
+        return results
+    window = max(1, min(max_window, n_items))
+    in_flight = {}      # future -> item index
+    deadline_at = {}    # future -> monotonic time the item's budget expires
+    budget_secs = {}    # future -> configured budget (for logging)
+    next_idx = 0
     last_progress = time.monotonic()
     last_dump = 0.0
-    while pending:
-        remaining = max(0.0, deadline - time.monotonic())
-        remap = dict()
-        done, not_done = wait(list(pending.keys()), timeout=min(5.0, remaining if remaining > 0 else 0.0))
+
+    def _submit_up_to(limit: int) -> None:
+        nonlocal next_idx
+        while len(in_flight) < limit and next_idx < n_items:
+            idx = next_idx
+            next_idx += 1
+            fut = submit_one(idx)
+            if fut is None:
+                continue
+            per = (deadline_of(idx) if deadline_of is not None
+                   else (per_deadline if per_deadline is not None else ITEM_TIMEOUT))
+            in_flight[fut] = idx
+            budget_secs[fut] = float(per)
+            deadline_at[fut] = time.monotonic() + float(per)
+
+    _submit_up_to(window)
+    while in_flight:
+        done, _ = wait(list(in_flight.keys()), timeout=5.0)
         for fut in done:
-            idx = future_map[fut]
+            idx = in_flight.pop(fut)
+            deadline_at.pop(fut, None)
+            budget_secs.pop(fut, None)
             try:
-                ordered[idx] = fut.result(timeout=0.1)
+                results[idx] = fut.result(timeout=0.1)
             except Exception as e:
                 LOGGER.error(f'Error processing item {idx}: {e}', exc_info=True)
-                ordered[idx] = None
-            pending.pop(fut, None)
+                results[idx] = None
             last_progress = time.monotonic()
         now = time.monotonic()
-        if executor is not None and pending and now - last_progress >= STALL_TIMEOUT and now - last_dump >= STALL_TIMEOUT:
+        if (executor is not None and in_flight
+                and now - last_progress >= STALL_TIMEOUT
+                and now - last_dump >= STALL_TIMEOUT):
             last_dump = now
             _log_worker_stall_diagnostic(executor, now - last_progress, LOGGER)
-        if now >= deadline:
-            break
-    for fut in list(pending.keys()):
-        idx = future_map[fut]
-        pending.pop(fut, None)
-        if ordered[idx] is None:
-            LOGGER.error(f'Item {idx} timed out (worker exceeded deadline) and was cancelled.')
-        try:
-            fut.cancel()
-        except Exception:
-            pass
-    return ordered
+        for fut in [f for f in list(in_flight) if now >= deadline_at[f]]:
+            idx = in_flight.pop(fut)
+            budget = budget_secs.pop(fut, ITEM_TIMEOUT)
+            deadline_at.pop(fut, None)
+            try:
+                if fut.done():                      # completed in the 5 s race window
+                    results[idx] = fut.result(timeout=0.1)
+                    continue
+            except Exception:
+                pass
+            LOGGER.error(f'Item {idx} exceeded per-item timeout ({budget:.0f}s) '
+                         f'— cancelled; run continues.')
+            results[idx] = None
+            try:
+                fut.cancel()
+            except Exception:
+                pass
+        _submit_up_to(window)
+    return results
 
 
 def run_function(
@@ -728,7 +796,6 @@ def run_function(
         _mp_q_thread.start()
 
     try:
-        deadline = time.monotonic() + WORKER_TIMEOUT
 
         # ───────── process mode ─────────
         if Parallel and P_type == 'process':
@@ -742,23 +809,20 @@ def run_function(
                                            initializer=_init_child_logger,
                                            initargs=init_args)
             try:
-                future_map = {executor.submit(_process_worker, target, item, *args, **kwargs): i
-                              for i, item in enumerate(items)}
-                ordered = _collect_future_map(future_map, deadline, LOGGER, executor=executor)
+                def _submit_one(idx):
+                    return executor.submit(_process_worker, target, items[idx], *args, **kwargs)
+                ordered = _run_windowed(_submit_one, len(items), 2 * max_workers,
+                                        LOGGER, executor=executor)
                 results = list(ordered)
             except KeyboardInterrupt:
                 LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
                 _terminate_executors(executor)
                 raise
             finally:
-                if time.monotonic() < deadline:
-                    try:
-                        executor.shutdown(wait=True, cancel_futures=True)
-                    except Exception as e:
-                        LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
-                        _terminate_executors(executor)
-                else:
-                    LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                try:
+                    _shutdown_bounded(executor)
+                except Exception as e:
+                    LOGGER.warning(f'Executor shutdown issue: {e!r}; force-terminating')
                     _terminate_executors(executor)
             # Tear down mp log queue: signal stop, wait for drain, close pipe
             if _use_mp_q and _mp_q is not None:
@@ -777,23 +841,19 @@ def run_function(
             LOGGER.debug(f'Using {P_type} workers={max_workers} (role={P_role})')
             executor = ThreadPoolExecutor(max_workers=max_workers)
             try:
-                future_map = {executor.submit(target, item, *args, **kwargs): i
-                              for i, item in enumerate(items)}
-                ordered = _collect_future_map(future_map, deadline, LOGGER)
+                def _submit_one(idx):
+                    return executor.submit(target, items[idx], *args, **kwargs)
+                ordered = _run_windowed(_submit_one, len(items), 2 * max_workers, LOGGER)
                 results = list(ordered)
             except KeyboardInterrupt:
                 LOGGER.info('KeyboardInterrupt received. Cancelling queued and terminating workers...')
                 _terminate_executors(executor)
                 raise
             finally:
-                if time.monotonic() < deadline:
-                    try:
-                        executor.shutdown(wait=True, cancel_futures=True)
-                    except Exception as e:
-                        LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
-                        _terminate_executors(executor)
-                else:
-                    LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                try:
+                    _shutdown_bounded(executor)
+                except Exception as e:
+                    LOGGER.warning(f'Executor shutdown issue: {e!r}; force-terminating')
                     _terminate_executors(executor)
 
         # ───────── hybrid: processes chunk + threads reuse I/O per-chunk ────
@@ -827,15 +887,17 @@ def run_function(
                     initializer=_init_child_logger,
                     initargs=init_args,
                 )
+                def _deadline_of(i):
+                    start, chunk = workers[i]
+                    return ITEM_TIMEOUT * max(1, len(chunk))   # per-item budget x items in chunk
                 try:
-                    futures = [
-                        pexecutor.submit(_chunk_target, start, chunk, target, args, kwargs,
-                                         threads_per_worker)
-                        for start, chunk in workers
-                    ]
+                    def _submit_one(i):
+                        start, chunk = workers[i]
+                        return pexecutor.submit(_chunk_target, start, chunk, target, args, kwargs,
+                                                threads_per_worker)
                     chunk_meta = [(start, start + len(chunk)) for start, chunk in workers]
-                    future_map = dict(zip(futures, range(len(futures))))
-                    ordered = _collect_future_map(future_map, deadline, LOGGER, executor=pexecutor)
+                    ordered = _run_windowed(_submit_one, len(workers), 2 * len(workers),
+                                            LOGGER, executor=pexecutor, deadline_of=_deadline_of)
                     for (global_start, end_pos), chunk_result in zip(chunk_meta, ordered):
                         if not chunk_result:
                             continue
@@ -851,14 +913,10 @@ def run_function(
                     _terminate_executors(pexecutor)
                     raise
                 finally:
-                    if time.monotonic() < deadline:
-                        try:
-                            pexecutor.shutdown(wait=True, cancel_futures=True)
-                        except Exception as e:
-                            LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
-                            _terminate_executors(pexecutor)
-                    else:
-                        LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+                    try:
+                        _shutdown_bounded(pexecutor)
+                    except Exception as e:
+                        LOGGER.warning(f'Executor shutdown issue: {e!r}; force-terminating')
                         _terminate_executors(pexecutor)
             if _use_mp_q and _mp_q is not None:
                 _mp_q_stop.set()

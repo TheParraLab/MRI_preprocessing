@@ -14,7 +14,7 @@ from functools import partial
 import subprocess
 import threading
 import queue
-from toolbox import ProgressBar, get_log_dir, get_logger, resolve_dir, _terminate_executors, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti
+from toolbox import _shutdown_bounded, _run_windowed, ProgressBar, get_log_dir, get_logger, resolve_dir, _terminate_executors, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti
 
 
 def _clean_timing(value):
@@ -186,32 +186,17 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
 
     # Run the target function with a progress bar
     if Parallel:
-        deadline = time.monotonic() + WORKER_TIMEOUT
         executor = ProcessPoolExecutor(max_workers=cpu_count())
         try:
-            futures = [executor.submit(target, item, *args, **kwargs) for item in items]
-            results = []
-            for future in futures:
-                try:
-                    results.append(future.result(timeout=max(0.1, deadline - time.monotonic())))
-                except (TimeoutError, queue.Full) as e:
-                    LOGGER.error(f'worker timed out or queue full: {e!r}')
-                    results.append(None)
-                except Exception as e:
-                    LOGGER.error(f'worker raised: {e!r}')
-                    results.append(None)
-                if time.monotonic() >= deadline:
-                    LOGGER.error('Global worker deadline exceeded — stopping and terminating.')
-                    break
+            def _submit_one(idx):
+                return executor.submit(target, items[idx], *args, **kwargs)
+            results = list(_run_windowed(_submit_one, len(items), 2 * cpu_count(),
+                                         LOGGER, executor=executor))
         finally:
-            if time.monotonic() < deadline:
-                try:
-                    executor.shutdown(wait=True, cancel_futures=True)
-                except Exception as e:
-                    LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
-                    _terminate_executors(executor)
-            else:
-                LOGGER.error('Worker deadline exceeded — force-terminating workers.')
+            try:
+                _shutdown_bounded(executor)
+            except Exception as e:
+                LOGGER.warning(f'Executor shutdown issue: {e!r}; force-terminating')
                 _terminate_executors(executor)
             for _ in range(1000):
                 try:
