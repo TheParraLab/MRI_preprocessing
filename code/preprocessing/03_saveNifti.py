@@ -1,15 +1,12 @@
 import os
 #import pydicom as pyd
 import glob
-import math
 import pickle
 import numpy as np
 import nibabel as nib
 import pandas as pd
-import multiprocessing
-from multiprocessing import Queue, cpu_count, Lock, Event
+from multiprocessing import cpu_count, Lock, Event
 import threading
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import signal
 import subprocess
 import argparse
@@ -18,7 +15,7 @@ import time
 from typing import Callable, List, Any
 from functools import partial
 # Custom imports
-from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir, get_log_dir, _collect_future_map, _terminate_executors, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti, _drain_mp_log_to_parent, _init_child_logger
+from toolbox import ProgressBar, get_logger, run_function, ensure_dir_writable, resolve_dir, get_log_dir, WORKER_TIMEOUT, nifti_stem, is_nifti_file, glob_nifti
 from DICOM import DICOMfilter, DICOMorder
 
 # Global variables for progress bar and lock
@@ -55,17 +52,19 @@ N_TEST = 200
 PARALLEL = args.multi
 DISK_SPACE_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
 # Per-session dcm2niix wall-clock timeout (seconds); also the per-item budget
-# used to size the parallel phase deadline (see run_with_progress).
+# passed to the parallel phase as its subprocess guard (see run_with_progress).
 DCM2NIIX_TIMEOUT = args.dcm2niix_timeout
 # Wall-clock guard for the per-item disk-space/source NFS checks. A check that
 # cannot return within this window (stale NFS handle, disk being swapped) is
 # treated as "disk/source unavailable" instead of stalling the whole pool.
 CHECK_TIMEOUT = float(os.environ.get('MRI_CHECK_TIMEOUT', '15'))
 stop_flag = Event()
-# Results salvaged from an interrupted parallel phase (drained from already-done
-# futures when SIGINT hits). Pruned from the remaining-commands bookkeeping
-# before the checkpoint is saved, so a Ctrl-C checkpoint reflects only the
-# work that did not complete. See run_with_progress + the SIGINT handler.
+# Results salvaged from an interrupted parallel phase. The parallel phase now
+# routes through toolbox.run_function, which re-raises SIGINT without draining
+# done futures, so this list stays empty for now — resume re-validation (run_cmd
+# existing-output check) covers completed/in-flight items instead. Kept so the
+# checkpoint bookkeeping stays safe if a future phase salvages explicitly.
+# See run_with_progress + the SIGINT handler.
 _interrupt_salvage = []
 
 #### Preprocessing | Step 3: Save Nifti Files ####
@@ -259,75 +258,34 @@ def run_with_progress(target: Callable[..., Any], items: List[Any], Parallel: bo
         auto_cpus = max(1, (cpu_count() or 2) - 1)
         max_workers = args.cpus if args.cpus > 0 else min(8, max(2, auto_cpus // 2))
         LOGGER.info(f'Running {len(items)} tasks through ProcessPoolExecutor ({max_workers} workers; --cpus={args.cpus})')
+        # Per-item timeout: run_function sizes each in-flight future against
+        # toolbox.ITEM_TIMEOUT (MRI_ITEM_TIMEOUT / MRI_WORKER_TIMEOUT env vars).
+        # The dcm2niix subprocess inside run_cmd already enforces DCM2NIIX_TIMEOUT
+        # per call, so the phase-level budget is only a fallback net for stalls
+        # outside that subprocess — keep it at the old grace value.
         if per_item_timeout is not None:
-            waves = math.ceil(len(items) / max_workers) if max_workers > 0 else 0
-            grace = 300.0
-            budget = waves * per_item_timeout + grace
-            deadline = time.monotonic() + budget
-            LOGGER.info(f'Phase budget: {waves} wave(s) x {per_item_timeout:.0f}s per-item + {grace:.0f}s grace '
-                        f'= {budget:.0f}s for {len(items)} items (per-item guard: dcm2niix subprocess timeout)')
-        else:
-            deadline = time.monotonic() + WORKER_TIMEOUT
-        # Cross-process log routing: workers push records to _mp_q and the
-        # parent drain thread forwards them into this run's file+stream
-        # pipeline. Without this initializer the forked children inherit the
-        # parent's in-memory log queue (whose consumer thread does not exist
-        # in the child) and every worker log line is silently dropped.
-        # Unbounded on purpose: logging must never block a worker even if the
-        # parent's NFS flush stalls.
-        _mp_q = multiprocessing.Queue()
-        _mp_q_stop = threading.Event()
-        _mp_q_thread = threading.Thread(target=_drain_mp_log_to_parent,
-                                        args=(_mp_q, LOGGER, _mp_q_stop),
-                                        daemon=False)
-        _mp_q_thread.start()
-        executor = ProcessPoolExecutor(max_workers=max_workers,
-                                       initializer=_init_child_logger,
-                                       initargs=(LOGGER.name, LOGGER._log_level,
-                                                 LOGGER._file_path, LOGGER._formatter_str,
-                                                 _mp_q))
+            LOGGER.info(f'Per-item timeout for this phase: {WORKER_TIMEOUT:.0f}s '
+                        f'(env MRI_ITEM_TIMEOUT / MRI_WORKER_TIMEOUT; dcm2niix subprocess '
+                        f'timeout {per_item_timeout:.0f}s remains the primary guard)')
+        # Cross-process log routing (mp queue, per-item timeout, bounded window
+        # and executor teardown) is handled by toolbox.run_function. N_WORKERS
+        # pins the pool to exactly the size computed above (run_function's own
+        # P_role/N_CPUS auto-sizing would multiply the worker count, changing
+        # the established concurrency).
         try:
-            future_map = {executor.submit(target, items[i], *_extra_args, **_extra_kwargs): i
-                          for i in range(len(items))}
-            ordered = _collect_future_map(future_map, deadline, LOGGER, executor=executor)
-            results = [r for r in ordered if r is not None]
+            results = run_function(LOGGER, target, items, Parallel=True, P_type='process',
+                                   N_WORKERS=max_workers,
+                                   *(_extra_args), **(_extra_kwargs))
+            results = [r for r in results if r is not None]
         except KeyboardInterrupt:
-            LOGGER.info('Interrupted. Salvaging completed items, terminating workers...')
-            # Done futures already hold their results in the parent's queue —
-            # draining them is in-memory (no NFS), so it does not delay exit.
-            # Anything still running is killed and its (possibly partial)
-            # output re-validated on resume via run_cmd's existing-file check.
-            # (future_map may be unbound if the interrupt lands mid-submit.)
-            fmap = locals().get('future_map', {})
-            for fut in fmap:
-                if fut.done():
-                    try:
-                        _interrupt_salvage.append(fut.result())
-                    except Exception:
-                        pass
-            LOGGER.info(f'[SIGINT] Salvaged {len(_interrupt_salvage)} already-completed '
-                        f'item(s) from the in-flight phase; {len(fmap) - len(_interrupt_salvage)} '
-                        f'killed in flight (remain for resume re-validation)')
-            _terminate_executors(executor)
+            # run_function terminates the pool and re-raises without draining
+            # done futures, so the old in-memory salvage list is no longer
+            # populated here. Resume re-validation (run_cmd's existing-output
+            # check + the SIGINT handler's progress bookkeeping) already covers
+            # it: completed conversions are skipped on the next run, in-flight
+            # partial output is redone.
+            LOGGER.info('[SIGINT] Pool terminated; completed items will be re-validated on resume.')
             raise
-        finally:
-            if time.monotonic() < deadline:
-                try:
-                    executor.shutdown(wait=True, cancel_futures=True)
-                except Exception as e:
-                    LOGGER.warning(f'Graceful shutdown failed: {e!r}; force-terminating')
-                    _terminate_executors(executor)
-            else:
-                LOGGER.error('Worker deadline exceeded — force-terminating workers.')
-                _terminate_executors(executor)
-            # Tear down the worker-log queue: signal stop, wait for drain, close pipe.
-            _mp_q_stop.set()
-            _mp_q_thread.join(timeout=5)
-            try:
-                _mp_q.close()
-                _mp_q.join_thread()
-            except Exception:
-                pass
     else:
         for items_index, item in enumerate(items):
             if stop_flag.is_set():

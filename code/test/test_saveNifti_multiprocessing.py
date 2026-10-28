@@ -207,6 +207,12 @@ def _prepare_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, 'LOAD_DIR', str(load_dir) + '/')
     monkeypatch.setattr(mod, 'SAVE_DIR', str(save_dir) + '/')
+    # Checkpoints live in the deployment log dir since 33b2e87 (Ctrl-C
+    # checkpoint move). Patch the module-level binding on the 03 module —
+    # patching toolbox.get_log_dir would not affect 03's `from toolbox import
+    # get_log_dir` reference.
+    (tmp_path / 'logs').mkdir(exist_ok=True)
+    monkeypatch.setattr(mod, 'get_log_dir', lambda: str(tmp_path / "logs"))
     monkeypatch.setattr(_tb, 'get_log_dir', lambda: str(tmp_path / "logs"))
 
     fake = _write_fake_dcm2niix(tmp_path)
@@ -346,7 +352,7 @@ def test_parallel_ok_logging_and_completion(tmp_path, monkeypatch, env, stop_fla
     assert removed == 3, f'expected 3 removed, got {removed} (remaining {len(cmds)})'
     assert len(cmds) == 0
     mod._finalize_progress(cmds)
-    assert not os.path.exists(f'{mod.LOAD_DIR}saveNifti_progress.pkl'), \
+    assert not os.path.exists(f'{mod.get_log_dir()}/saveNifti_progress.pkl'), \
         'checkpoint file should not exist after a clean run'
 
 
@@ -406,7 +412,7 @@ def test_disk_threshold_stops_all(tmp_path, monkeypatch, env, stop_flag_reset):
     assert removed == 0, f'expected 0 removed, got {removed}'
     assert len(cmds) == 3
     mod._finalize_progress(cmds)
-    cp = f'{mod.LOAD_DIR}saveNifti_progress.pkl'
+    cp = f'{mod.get_log_dir()}/saveNifti_progress.pkl'
     assert os.path.exists(cp), 'checkpoint file should exist after a stopped run'
     with open(cp, 'rb') as fh:
         stored = pickle.load(fh)
@@ -467,7 +473,7 @@ def test_in_flight_completes_queued_stop(tmp_path, monkeypatch, env, stop_flag_r
     assert cmds[0] == cmd1, 'remaining command should be the stopped S001 command'
 
     mod._finalize_progress(cmds)
-    cp = f'{mod.LOAD_DIR}saveNifti_progress.pkl'
+    cp = f'{mod.get_log_dir()}/saveNifti_progress.pkl'
     assert os.path.exists(cp), 'checkpoint file should exist after a stopped run'
     with open(cp, 'rb') as fh:
         stored = pickle.load(fh)

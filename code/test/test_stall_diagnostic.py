@@ -1,7 +1,9 @@
 """
 Tests for the self-diagnosing worker stall detector in toolbox.
 Covers the /proc-based per-worker snapshot and the stall logging path in
-_collect_future_map, plus the _terminate_executors fix to iterate Process objects.
+_run_windowed (via _log_worker_stall_diagnostic — the old _collect_future_map
+trigger was removed with the global-deadline collector), plus the
+_terminate_executors fix to iterate Process objects.
 """
 import os
 import sys
@@ -15,7 +17,6 @@ repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root / "code" / "preprocessing"))
 
 import toolbox
-from concurrent.futures import Future
 
 
 class _Rec:
@@ -43,16 +44,14 @@ def test_worker_stall_diagnostic_self():
     assert isinstance(info['open_files'], list)
 
 
-def test_collect_future_map_logs_stall_diagnostic(monkeypatch, tmp_path):
-    monkeypatch.setattr(toolbox, 'STALL_TIMEOUT', 1.0)
+def test_stall_diagnostic_logs_and_dumps(monkeypatch, tmp_path):
+    # Direct test of the stall-dump function that _run_windowed calls when no
+    # future completes for STALL_TIMEOUT seconds.
     dump_file = str(tmp_path / 'stall.log')
     monkeypatch.setattr(toolbox, 'STALL_DUMP_FILE', dump_file)
     rec = _Rec()
-    fut = Future()
     ex = types.SimpleNamespace(_processes={os.getpid(): None})
-    deadline = time.monotonic() + 5
-    res = toolbox._collect_future_map({fut: 0}, deadline, rec, executor=ex)
-    assert res == [None]
+    toolbox._log_worker_stall_diagnostic(ex, stalled_secs=900.0, LOGGER=rec)
     joined = '\n'.join(rec.warnings)
     assert 'stalled' in joined
     assert 'state=' in joined
