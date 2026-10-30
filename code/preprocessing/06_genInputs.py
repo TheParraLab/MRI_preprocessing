@@ -307,10 +307,35 @@ def generate_slopes(SessionID):
     if tri_posts_usable:
         Times = list(tri_s)
         if Times[0] is None:
+            # Pre has no trigger time. Resolve it from the pre scan's own
+            # duration: the Siemens private acquisition-duration tag
+            # (0019,105A) is in MICROSECONDS (legacy genSlopeImgV2.m used
+            # *1e-6; cohort-wide check: 99.8% of 358k ScanDur values fall
+            # in a 5-600 s window under us->s, 0.0% under ms->s).
+            pre_via_dur = None
             if dur_clean[0] != 'Unknown':
                 try:
-                    Times[0] = float(Times[1]) - float(dur_clean[0]) / 1000.0
+                    pre_via_dur = float(Times[1]) - float(dur_clean[0]) * 1e-6
                 except (ValueError, TypeError):
+                    pre_via_dur = None
+            if pre_via_dur is not None:
+                # Plausibility gate: the implied pre->post1 gap is the pre
+                # scan duration and must look like a real acquisition
+                # window. Guards against a vendor unit quirk silently
+                # re-introducing a 1000x (or worse) error; on rejection
+                # we fall through to the AcqTime delta below.
+                dur_gap = float(Times[1]) - pre_via_dur
+                if 60.0 <= dur_gap <= 1200.0:
+                    Times[0] = pre_via_dur
+                    LOGGER.debug(
+                        f'{SessionID} | pre via ScanDur ({dur_gap:.1f}s gap)'
+                    )
+                else:
+                    LOGGER.warning(
+                        f'{SessionID} | ScanDur-implied pre->post1 gap '
+                        f'{dur_gap:.1f}s outside 60-1200s; falling back to '
+                        f'AcqTime delta'
+                    )
                     Times[0] = None
         if Times[0] is None and (acq_s[0] is not None and acq_s[1] is not None):
             Times[0] = float(acq_s[0]) - float(acq_s[1])
